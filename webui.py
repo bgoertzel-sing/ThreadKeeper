@@ -75,6 +75,154 @@ _ANTHROPIC_MODELS_CACHE_TTL = 300.0
 _deepseek_models_cache = {"ts": 0, "models": [], "err": ""}
 _DEEPSEEK_MODELS_CACHE_TTL = 300.0
 
+# CAPTAIN-PATCH: when no swipl runtime exists, /send routes through
+# lib_llm_ext directly. _FALLBACK_ROUTE remembers the chosen provider:model
+# across requests; defaults to deepseek:deepseek-v4-pro on first use if unset.
+# _FALLBACK_PERSONA_CACHE caches the system prompt loaded from
+# OMEGACLAW_PROMPT_FILE so we don't reread it every turn. Stage A: persona
+# + chat-history replay so the fallback path has continuity, not stateless
+# single-shot calls (which made 玄 drift between identities).
+_FALLBACK_ROUTE = None
+_FALLBACK_LOCK = threading.Lock()
+_FALLBACK_PERSONA_CACHE = {"path": None, "mtime": 0, "text": ""}
+_FALLBACK_HISTORY_TURNS = int(os.environ.get("FALLBACK_HISTORY_TURNS", "12"))
+_FALLBACK_TOOL_LOOP_MAX = int(os.environ.get("FALLBACK_TOOL_LOOP_MAX", "10"))
+_WEB_FETCH_MAX_CHARS = int(os.environ.get("WEB_FETCH_MAX_CHARS", "20000"))
+_WEB_FETCH_TIMEOUT_S = float(os.environ.get("WEB_FETCH_TIMEOUT_S", "15"))
+
+# OpenAI-style tool schema (DeepSeek V4 Pro accepts the same shape).
+_FALLBACK_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "web_fetch",
+            "description": (
+                "Fetch a public URL and return its readable text content. "
+                "Works for static HTML and server-rendered pages. For "
+                "single-page apps (heavy client-side JS), the result will be "
+                "the bare HTML shell — call this anyway and report what you "
+                "see; do not fabricate page contents you did not receive. "
+                "Returns up to {} chars of extracted text."
+            ).format(_WEB_FETCH_MAX_CHARS),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "Full URL to fetch (https://… or http://…).",
+                    },
+                    "as_raw_html": {
+                        "type": "boolean",
+                        "description": "If true, return raw HTML instead of extracted text. Default false.",
+                        "default": False,
+                    },
+                },
+                "required": ["url"],
+            },
+        },
+    }
+]
+
+
+class _HTMLToText(__import__("html.parser", fromlist=["HTMLParser"]).HTMLParser):
+    """Strip tags, collapse whitespace, drop script/style content."""
+    _SKIP = {"script", "style", "noscript", "svg"}
+
+    def __init__(self):
+        super().__init__()
+        self._buf = []
+        self._depth_skip = 0
+
+    def handle_starttag(self, tag, _attrs):
+        if tag in self._SKIP:
+            self._depth_skip += 1
+        elif tag in ("p", "br", "li", "div", "h1", "h2", "h3", "h4", "h5", "h6", "tr"):
+            self._buf.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in self._SKIP and self._depth_skip > 0:
+            self._depth_skip -= 1
+
+    def handle_data(self, data):
+        if self._depth_skip:
+            return
+        self._buf.append(data)
+
+    def get_text(self):
+        raw = "".join(self._buf)
+        return re.sub(r"[ \t]+", " ", re.sub(r"\n{3,}", "\n\n", raw)).strip()
+
+
+def _tool_web_fetch(args):
+    url = (args.get("url") or "").strip()
+    as_raw = bool(args.get("as_raw_html", False))
+    if not url:
+        return {"ok": False, "error": "url is required"}
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return {"ok": False, "error": "url must be http:// or https://"}
+    try:
+        import urllib.request as ur, urllib.error
+        req = ur.Request(url, headers={
+            "User-Agent": "OmegaClaw-Xuan/0.1 (+lab)",
+            "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+        })
+        with ur.urlopen(req, timeout=_WEB_FETCH_TIMEOUT_S) as resp:
+            ctype = resp.headers.get("Content-Type", "")
+            raw = resp.read(2_000_000).decode(
+                resp.headers.get_content_charset() or "utf-8",
+                errors="replace",
+            )
+            final_url = resp.geturl()
+            status = resp.status
+    except urllib.error.HTTPError as e:
+        return {"ok": False, "error": f"HTTP {e.code} {e.reason}", "url": url}
+    except Exception as e:
+        return {"ok": False, "error": f"fetch failed: {e}", "url": url}
+
+    if as_raw or "html" not in ctype.lower():
+        body = raw[:_WEB_FETCH_MAX_CHARS]
+    else:
+        try:
+            p = _HTMLToText()
+            p.feed(raw)
+            body = p.get_text()[:_WEB_FETCH_MAX_CHARS]
+        except Exception:
+            body = raw[:_WEB_FETCH_MAX_CHARS]
+    return {
+        "ok": True,
+        "url": url,
+        "final_url": final_url,
+        "status": status,
+        "content_type": ctype,
+        "truncated": len(raw) > _WEB_FETCH_MAX_CHARS,
+        "content": body,
+    }
+
+
+_TOOL_DISPATCH = {
+    "web_fetch": _tool_web_fetch,
+}
+
+# CAPTAIN-PATCH: server-side audit log for every tool call so we can verify
+# what 玄 actually fetched vs what she claimed in her reply. JSONL, one
+# entry per call.
+_TOOL_AUDIT_LOG = "/tmp/oma-tools.jsonl"
+
+
+def _audit_tool_call(name, args, result):
+    try:
+        ok = bool(result.get("ok")) if isinstance(result, dict) else False
+        url = (args or {}).get("url", "") if name == "web_fetch" else ""
+        entry = {
+            "ts": time.time(), "tool": name, "ok": ok, "url": url,
+            "status": (result or {}).get("status") if isinstance(result, dict) else None,
+            "bytes": len((result or {}).get("content", "")) if isinstance(result, dict) else 0,
+        }
+        with open(_TOOL_AUDIT_LOG, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
+
 # tps probe — periodically asks Ollama for a tiny generation to read its own
 # eval_count / eval_duration. Cached so we don't beat up the GPU; runs in a
 # background thread so /stats responses stay snappy.
@@ -106,6 +254,18 @@ def _cmd_arg_value(cmd, key):
 
 def active_provider_model():
     pid, cmd = find_swipl()
+    # CAPTAIN-PATCH: when no swipl, surface the fallback route instead of
+    # claiming Ollama is "active" (it isn't — there's no runtime).
+    if not pid and _FALLBACK_ROUTE:
+        try:
+            provider_lc, _, model = _FALLBACK_ROUTE.partition(":")
+            provider_disp = {"deepseek": "DeepSeek", "openai": "OpenAI",
+                             "anthropic": "Anthropic", "ollama": "Ollama"}.get(
+                                 provider_lc, provider_lc.title())
+            return {"provider": provider_disp, "model": model,
+                    "route": _FALLBACK_ROUTE}
+        except Exception:
+            pass
     provider = _cmd_arg_value(cmd, "provider") or "Ollama"
     llm = _cmd_arg_value(cmd, "LLM")
     env = {}
@@ -743,6 +903,19 @@ def relaunch_swipl(route_id):
        into the child process, never via shell-expanded export commands."""
     pid, _cmd = find_swipl()
     if not pid:
+        # CAPTAIN-PATCH: no swipl runtime present. If the requested route is a
+        # remote-API provider, just record it as the in-process fallback so
+        # /send can call lib_llm_ext directly. Local Ollama still requires a
+        # MeTTa loop to do anything useful, so reject that case.
+        try:
+            provider, model = _route_from_id(route_id)
+        except ValueError as e:
+            return False, str(e)
+        if provider in ("DeepSeek", "OpenAI", "Anthropic"):
+            global _FALLBACK_ROUTE
+            with _FALLBACK_LOCK:
+                _FALLBACK_ROUTE = f"{provider.lower()}:{model}"
+            return True, f"fallback route set to {_FALLBACK_ROUTE} (no swipl; using lib_llm_ext direct)"
         return False, "no swipl currently running"
     try:
         provider, model = _route_from_id(route_id)
@@ -891,6 +1064,289 @@ def recent_messages(limit=200):
     return cleaned[-limit:]
 
 
+# CAPTAIN-PATCH: lib_llm_ext direct path (no swipl, no MeTTa loop).
+# Stage A: persona system prompt + chat-history replay, so /send is no
+# longer a stateless single-shot. Without these, DeepSeek had no idea who
+# 玄 was supposed to be and drifted between "I am DeepSeek" and "I am 玄"
+# turn-to-turn. We now (1) load OMEGACLAW_PROMPT_FILE as a system message,
+# (2) replay the last FALLBACK_HISTORY_TURNS message pairs from the log
+# so the model sees prior turns, (3) call the chat-completion API directly
+# with the full message array (lib_llm_ext.useDeepSeek only accepts a
+# single user string, so we bypass it for the multi-message case).
+def _load_persona():
+    global _FALLBACK_PERSONA_CACHE
+    name = os.environ.get("OMEGACLAW_PROMPT_FILE", "prompt-xuan.txt")
+    path = name if os.path.isabs(name) else os.path.join(REPO_ROOT, "memory", name)
+    try:
+        st = os.stat(path)
+    except OSError:
+        return ""
+    cache = _FALLBACK_PERSONA_CACHE
+    if cache["path"] == path and cache["mtime"] == st.st_mtime:
+        return cache["text"]
+    try:
+        with open(path) as f:
+            text = f.read()
+    except Exception:
+        return ""
+    _FALLBACK_PERSONA_CACHE = {"path": path, "mtime": st.st_mtime, "text": text}
+    return text
+
+
+def _replay_history(limit_turns):
+    """Convert recent_messages() output into chat-completion message dicts.
+       Strips the (send (text "...")) wrapper from assistant entries so the
+       model isn't training itself on the wrapper as content; we re-wrap
+       on output. Caps at the most recent `limit_turns * 2` events."""
+    msgs = recent_messages(limit=limit_turns * 4)
+    out = []
+    for m in msgs[-limit_turns * 2 :]:
+        who = m.get("who")
+        text = (m.get("text") or "").strip()
+        if not text:
+            continue
+        # Unwrap (send (text "...")) shells that leaked into stored text.
+        sm = re.match(r'^\(send\s+\(text\s+"(.*)"\)\)\s*$', text, re.DOTALL)
+        if sm:
+            text = sm.group(1).replace('\\"', '"').replace('\\\\', '\\')
+        if who == "you":
+            out.append({"role": "user", "content": text})
+        elif who == "oma":
+            out.append({"role": "assistant", "content": text})
+    return out
+
+
+def _no_swipl_fallback_send(text):
+    global _FALLBACK_ROUTE
+    with _FALLBACK_LOCK:
+        route = _FALLBACK_ROUTE
+    if not route:
+        if os.environ.get("DEEPSEEK_API_KEY"):
+            route = "deepseek:" + os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro")
+            with _FALLBACK_LOCK:
+                _FALLBACK_ROUTE = route
+        else:
+            return False, "", "no swipl runtime and no fallback route configured"
+    provider_lc, _, model = route.partition(":")
+    try:
+        sys.path.insert(0, REPO_ROOT)
+        import lib_llm_ext
+    except Exception as e:
+        return False, "", f"lib_llm_ext import failed: {e}"
+
+    persona = _load_persona()
+    history = _replay_history(_FALLBACK_HISTORY_TURNS)
+    messages = []
+    if persona:
+        messages.append({"role": "system", "content": persona})
+    # CAPTAIN-PATCH: explicit staleness boundary. Without this, the model
+    # was treating prior turns' "I fetched X" assistant text as if it were
+    # current ground truth, then continuing the narrative — confabulating
+    # 150+ blog posts in one run with zero tool calls actually made.
+    messages.append({
+        "role": "system",
+        "content": (
+            "TURN BOUNDARY. The conversation history below shows prior turns "
+            "for continuity, but ANY tool-result text in it is from a previous "
+            "/send call and is stale. To make any factual claim about live web "
+            "content (URLs, page text, post lists, etc.) THIS turn, you MUST "
+            "call web_fetch THIS turn for each claim. Do not infer fresh data "
+            "from prior assistant messages — they are not a substitute for "
+            "current fetches. If you cannot or do not call the tool, do not "
+            "make the claim."
+        ),
+    })
+    messages.extend(history)
+    messages.append({"role": "user", "content": text})
+
+    try:
+        if provider_lc in ("deepseek", "openai"):
+            # Both use the OpenAI tool-calling protocol. Loop: call model →
+            # if tool_calls, execute and append → recall, up to N iters.
+            if provider_lc == "deepseek":
+                client = lib_llm_ext.DEEPSEEK_CLIENT
+                if client is None:
+                    return False, "", "DEEPSEEK_API_KEY not set in lib_llm_ext"
+            else:
+                client = lib_llm_ext.OPENAI_CLIENT
+                if client is None:
+                    return False, "", "OPENAI_API_KEY not set in lib_llm_ext"
+
+            base_kwargs = {
+                "model": model,
+                "max_tokens": int(os.environ.get("DEEPSEEK_MAX_TOKENS", "6000")),
+                "temperature": float(os.environ.get("DEEPSEEK_TEMPERATURE", "0.2")),
+                "tools": _FALLBACK_TOOLS,
+                "tool_choice": "auto",
+            }
+            # CAPTAIN-PATCH: when user message references a URL/host, force
+            # at least one tool call on the first iteration. Without this,
+            # DeepSeek (especially with polluted history) declines to fetch
+            # and just continues a prior confabulation.
+            _url_re = re.compile(r"\b(https?://\S+|www\.\S+\.\S+|\b\S+\.(com|org|net|io|ai|co)/?\S*)", re.I)
+            force_first_fetch = bool(_url_re.search(text))
+            if provider_lc == "deepseek":
+                thinking = os.environ.get("DEEPSEEK_THINKING", "disabled").lower()
+                if model.startswith("deepseek-v4") or model == "deepseek-reasoner":
+                    base_kwargs["extra_body"] = {
+                        "thinking": {"type": "enabled" if thinking == "enabled" else "disabled"}
+                    }
+                    if thinking == "enabled":
+                        base_kwargs["reasoning_effort"] = os.environ.get(
+                            "DEEPSEEK_REASONING_EFFORT", "high"
+                        )
+
+            reply = ""
+            cap_hit = False
+            for _iter in range(_FALLBACK_TOOL_LOOP_MAX):
+                turn_kwargs = dict(base_kwargs)
+                if _iter == 0 and force_first_fetch:
+                    turn_kwargs["tool_choice"] = "required"
+                resp = client.chat.completions.create(messages=messages, **turn_kwargs)
+                msg = resp.choices[0].message
+                tool_calls = getattr(msg, "tool_calls", None) or []
+                if not tool_calls:
+                    reply = (msg.content or "").strip()
+                    break
+                # Append the assistant turn (with tool_calls) verbatim, then
+                # add one tool-result turn per call before recalling.
+                messages.append({
+                    "role": "assistant",
+                    "content": msg.content or "",
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            },
+                        }
+                        for tc in tool_calls
+                    ],
+                })
+                for tc in tool_calls:
+                    name = tc.function.name
+                    try:
+                        args = json.loads(tc.function.arguments or "{}")
+                    except Exception:
+                        args = {}
+                    handler = _TOOL_DISPATCH.get(name)
+                    if not handler:
+                        result = {"ok": False, "error": f"unknown tool: {name}"}
+                    else:
+                        try:
+                            result = handler(args)
+                        except Exception as e:
+                            result = {"ok": False, "error": f"tool {name} raised: {e}"}
+                    _audit_tool_call(name, args, result)
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": json.dumps(result)[: _WEB_FETCH_MAX_CHARS + 2000],
+                    })
+            else:
+                cap_hit = True
+
+            # Build the deterministic truth ledger for this /send: the only
+            # URLs/tools that actually executed this turn, regardless of
+            # what the model later claims. We extract from the assistant
+            # turns we appended to `messages` during this call (not the
+            # replayed history), so this is groundtruth, not LLM-generated.
+            actual_calls = []
+            for m in messages:
+                if m.get("role") != "assistant":
+                    continue
+                for tc in m.get("tool_calls") or []:
+                    fn = tc.get("function") or {}
+                    try:
+                        a = json.loads(fn.get("arguments") or "{}")
+                    except Exception:
+                        a = {}
+                    actual_calls.append({
+                        "name": fn.get("name", "?"),
+                        "args": a,
+                    })
+            # CAPTAIN-PATCH: always record a per-turn summary so we can audit
+            # confabulation even when zero tools fired (most dangerous case).
+            try:
+                with open(_TOOL_AUDIT_LOG, "a") as f:
+                    f.write(json.dumps({
+                        "ts": time.time(),
+                        "turn_summary": True,
+                        "user_chars": len(text),
+                        "tool_calls_made": len(actual_calls),
+                        "tools_used": [c["name"] for c in actual_calls],
+                        "urls_fetched": [c["args"].get("url") for c in actual_calls if c["name"] == "web_fetch"],
+                        "cap_hit": cap_hit,
+                    }) + "\n")
+            except Exception:
+                pass
+
+            if cap_hit:
+                # Tool budget exhausted. Force a final synthesis turn with
+                # tools disabled, so the user gets a coherent summary built
+                # from the tool results we already have rather than the
+                # mid-stream narration that came with the last tool call.
+                # Crucially: inject the deterministic call-list so the model
+                # cannot fabricate additional fetches in its summary.
+                truth_block = ["[runtime] TOOL CALLS THAT ACTUALLY EXECUTED THIS TURN:"]
+                for i, c in enumerate(actual_calls, 1):
+                    if c["name"] == "web_fetch":
+                        truth_block.append(f"  {i}. web_fetch url={c['args'].get('url','?')}")
+                    else:
+                        truth_block.append(f"  {i}. {c['name']} args={json.dumps(c['args'])}")
+                truth_block.append(
+                    f"[runtime] Tool budget exhausted ({_FALLBACK_TOOL_LOOP_MAX} calls used)."
+                    " Synthesize your final answer NOW using ONLY the tool"
+                    " results from the calls listed above. You MUST NOT list"
+                    " any URL or tool result not in that list. If the user"
+                    " asked for more than you fetched, name the gap honestly"
+                    " and stop. Do not call any more tools."
+                )
+                messages.append({"role": "user", "content": "\n".join(truth_block)})
+                final_kwargs = dict(base_kwargs)
+                final_kwargs.pop("tools", None)
+                final_kwargs["tool_choice"] = "none"
+                try:
+                    final = client.chat.completions.create(messages=messages, **final_kwargs)
+                    reply = (final.choices[0].message.content or "").strip()
+                except Exception as e:
+                    reply = f"(tool loop exhausted; forced-summary call failed: {e})"
+        elif provider_lc == "anthropic":
+            client = lib_llm_ext.ANTHROPIC_CLIENT
+            if client is None:
+                return False, "", "ANTHROPIC_API_KEY not set in lib_llm_ext"
+            sys_block = persona if persona else ""
+            anth_msgs = [m for m in messages if m["role"] != "system"]
+            resp = client.messages.create(model=model, system=sys_block, messages=anth_msgs, max_tokens=6000)
+            reply = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
+        else:
+            return False, "", f"unsupported fallback provider: {provider_lc}"
+    except Exception as e:
+        return False, "", f"chat completion failed: {e}"
+    if not reply.strip():
+        return False, "", "empty reply from provider"
+    # Persist to LOG_PATH in the shape the swipl loop would emit, so
+    # recent_messages() picks them up with no changes. lib_llm_ext returns
+    # MeTTa-formatted output (already wrapped in `(send (text "..."))`) for
+    # models configured as `format: json` in models.yaml, so write the
+    # provider output verbatim. If the reply doesn't already contain a
+    # `(send ...)` form, wrap it ourselves with proper escaping.
+    try:
+        os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+        with open(LOG_PATH, "a") as f:
+            f.write(f"(HUMAN-MSG: {text})\n")
+            if "(send " in reply:
+                f.write(reply.rstrip() + "\n")
+            else:
+                esc = reply.replace("\\", "\\\\").replace('"', '\\"')
+                f.write(f'(send (text "{esc}"))\n')
+    except Exception:
+        pass
+    return True, reply, ""
+
+
 # --- HTTP handler -------------------------------------------------------------
 class Handler(http.server.BaseHTTPRequestHandler):
     # Quiet logs
@@ -1007,6 +1463,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             text = (body.get("text") or "").strip()
             if not text:
                 return self._json({"ok": False, "err": "empty"}, 400)
+            # CAPTAIN-PATCH: if no swipl runtime, call lib_llm_ext directly
+            # instead of writing to a FIFO nobody is reading.
+            swipl_pid, _ = find_swipl()
+            if not swipl_pid:
+                ok, reply, err = _no_swipl_fallback_send(text)
+                if not ok:
+                    return self._json({"ok": False, "err": err}, 503)
+                return self._json({"ok": True, "reply": reply})
             try:
                 with open(IN_FIFO, "w") as f:
                     f.write(text + "\n")

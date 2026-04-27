@@ -16,3 +16,8 @@ chroma_db.snapshot-*
 
 # Generated logs
 *.log
+
+# Captain-patch local-only files
+.env
+*.pre-captain-patch
+/tmp/oma-tools.jsonl
