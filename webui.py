@@ -116,6 +116,46 @@ _LOCAL_READ_ROOTS = (
 )
 _XUAN_NOTEBOOK_PATH = os.path.join(REPO_ROOT, "memory", "xuan-notes.md")
 
+# CAPTAIN-PATCH (Stage E): ChromaDB persistent vector store for long-term
+# memory recall. Lazy-initialised on first use so webui startup stays fast
+# and fails closed (returns ok=false with a clear error) if chromadb can't
+# load. Default embedding function (all-MiniLM-L6-v2) downloads on first
+# call — kept on disk in ~/.cache/chroma after that.
+_CHROMA_DB_PATH = os.path.join(REPO_ROOT, "chroma_db")
+_CHROMA_COLLECTION = "xuan_memory"
+_CHROMA_QUERY_DEFAULT_N = int(os.environ.get("CHROMA_QUERY_DEFAULT_N", "5"))
+_chroma_state = {"client": None, "collection": None, "init_error": None, "lock": threading.Lock()}
+
+
+def _chroma_get_collection():
+    """Returns (collection, error_str). On failure, returns (None, msg)."""
+    state = _chroma_state
+    with state["lock"]:
+        if state["collection"] is not None:
+            return state["collection"], None
+        if state["init_error"]:
+            return None, state["init_error"]
+        try:
+            import chromadb
+            client = chromadb.PersistentClient(path=_CHROMA_DB_PATH)
+            collection = client.get_or_create_collection(name=_CHROMA_COLLECTION)
+            state["client"] = client
+            state["collection"] = collection
+            return collection, None
+        except Exception as e:
+            msg = f"chromadb init failed: {type(e).__name__}: {e}"
+            state["init_error"] = msg
+            return None, msg
+
+
+def _chroma_doc_id(timestamp, tag, text):
+    """Stable id for a (timestamp, tag, text) tuple — used for idempotent
+    upserts so reindexing the notebook doesn't create duplicates."""
+    import hashlib
+    h = hashlib.sha256()
+    h.update(f"{timestamp}\0{tag or ''}\0{text}".encode())
+    return h.hexdigest()[:24]
+
 # OpenAI-style tool schema (DeepSeek V4 Pro accepts the same shape).
 _FALLBACK_TOOLS = [
     {
@@ -250,6 +290,54 @@ _FALLBACK_TOOLS = [
                 },
                 "required": ["url"],
             },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "chroma_query",
+            "description": (
+                "Semantic search over your long-term memory (your "
+                "notebook entries are auto-indexed when written via "
+                "memory_note). Returns the top-N most relevant entries "
+                "with similarity scores. Use this when you need to "
+                "recall something you wrote earlier but only remember "
+                "approximately what it was about — keyword grep on "
+                "the notebook would miss synonyms; this won't."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Natural-language query describing what you want to recall.",
+                    },
+                    "n_results": {
+                        "type": "integer",
+                        "description": f"How many results to return (default {_CHROMA_QUERY_DEFAULT_N}, max 20).",
+                        "default": _CHROMA_QUERY_DEFAULT_N,
+                    },
+                    "tag": {
+                        "type": "string",
+                        "description": "Optional exact-match filter on the tag field.",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "chroma_reindex_notes",
+            "description": (
+                "Re-read memory/xuan-notes.md from disk and reindex all "
+                "entries into the vector store. Idempotent — re-running "
+                "won't create duplicates. Use this once after a fresh "
+                "deploy if your notebook had entries written before "
+                "chroma was wired in, or after a chroma_db wipe."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
     {
@@ -511,7 +599,123 @@ def _tool_memory_note(args):
         size = os.path.getsize(_XUAN_NOTEBOOK_PATH)
     except Exception as e:
         return {"ok": False, "error": f"append failed: {e}"}
-    return {"ok": True, "path": _XUAN_NOTEBOOK_PATH, "notebook_size_bytes": size}
+    # Dual-write to ChromaDB. Best-effort: if chroma is down, the file
+    # write already succeeded so the note is not lost. We surface the
+    # vector-store status in the result so the caller can see it.
+    chroma_status = "skipped"
+    chroma_error = None
+    collection, err = _chroma_get_collection()
+    if collection is not None:
+        try:
+            doc_id = _chroma_doc_id(ts, tag, note)
+            collection.upsert(
+                ids=[doc_id],
+                documents=[note],
+                metadatas=[{"timestamp": ts, "tag": tag or "", "source": "memory_note"}],
+            )
+            chroma_status = "indexed"
+        except Exception as e:
+            chroma_status = "error"
+            chroma_error = f"{type(e).__name__}: {e}"
+    else:
+        chroma_status = "unavailable"
+        chroma_error = err
+    return {
+        "ok": True,
+        "path": _XUAN_NOTEBOOK_PATH,
+        "notebook_size_bytes": size,
+        "chroma_status": chroma_status,
+        "chroma_error": chroma_error,
+    }
+
+
+# Header pattern used by memory_note: "## 2026-04-27 19:15:33 -0400  [tag]"
+_NOTE_HEADER_RE = re.compile(
+    r"^##\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?:\s+[+-]\d{4})?)"
+    r"(?:\s+\[([^\]]+)\])?\s*$"
+)
+
+
+def _parse_notebook(path):
+    """Yield (timestamp, tag, body) tuples from xuan-notes.md."""
+    if not os.path.isfile(path):
+        return []
+    entries = []
+    cur_ts = None
+    cur_tag = None
+    cur_lines = []
+    with open(path) as f:
+        for raw in f:
+            line = raw.rstrip("\n")
+            m = _NOTE_HEADER_RE.match(line)
+            if m:
+                if cur_ts is not None and cur_lines:
+                    entries.append((cur_ts, cur_tag or "", "\n".join(cur_lines).strip()))
+                cur_ts = m.group(1)
+                cur_tag = m.group(2)
+                cur_lines = []
+            else:
+                cur_lines.append(line)
+    if cur_ts is not None and cur_lines:
+        entries.append((cur_ts, cur_tag or "", "\n".join(cur_lines).strip()))
+    return [(ts, tag, body) for ts, tag, body in entries if body]
+
+
+def _tool_chroma_query(args):
+    query = (args.get("query") or "").strip()
+    n = max(1, min(int(args.get("n_results") or _CHROMA_QUERY_DEFAULT_N), 20))
+    tag = (args.get("tag") or "").strip()
+    if not query:
+        return {"ok": False, "error": "query is required"}
+    collection, err = _chroma_get_collection()
+    if collection is None:
+        return {"ok": False, "error": err or "chroma unavailable"}
+    where = {"tag": tag} if tag else None
+    try:
+        res = collection.query(query_texts=[query], n_results=n, where=where)
+    except Exception as e:
+        return {"ok": False, "error": f"query failed: {type(e).__name__}: {e}"}
+    docs = (res.get("documents") or [[]])[0]
+    metas = (res.get("metadatas") or [[]])[0]
+    dists = (res.get("distances") or [[]])[0]
+    ids = (res.get("ids") or [[]])[0]
+    hits = []
+    for i in range(len(docs)):
+        hits.append({
+            "id": ids[i] if i < len(ids) else None,
+            "score": 1.0 - float(dists[i]) if i < len(dists) and dists[i] is not None else None,
+            "distance": float(dists[i]) if i < len(dists) and dists[i] is not None else None,
+            "timestamp": (metas[i] or {}).get("timestamp", "") if i < len(metas) else "",
+            "tag": (metas[i] or {}).get("tag", "") if i < len(metas) else "",
+            "text": docs[i],
+        })
+    return {"ok": True, "query": query, "n_results": len(hits), "hits": hits}
+
+
+def _tool_chroma_reindex_notes(_args):
+    collection, err = _chroma_get_collection()
+    if collection is None:
+        return {"ok": False, "error": err or "chroma unavailable"}
+    entries = _parse_notebook(_XUAN_NOTEBOOK_PATH)
+    if not entries:
+        return {"ok": True, "indexed": 0, "note": "notebook empty or missing"}
+    ids, docs, metas = [], [], []
+    for ts, tag, body in entries:
+        ids.append(_chroma_doc_id(ts, tag, body))
+        docs.append(body)
+        metas.append({"timestamp": ts, "tag": tag, "source": "reindex"})
+    try:
+        # Batch in chunks of 100 to keep upsert calls reasonable.
+        BATCH = 100
+        for i in range(0, len(ids), BATCH):
+            collection.upsert(
+                ids=ids[i:i + BATCH],
+                documents=docs[i:i + BATCH],
+                metadatas=metas[i:i + BATCH],
+            )
+    except Exception as e:
+        return {"ok": False, "error": f"upsert failed: {type(e).__name__}: {e}"}
+    return {"ok": True, "indexed": len(ids), "notebook": _XUAN_NOTEBOOK_PATH}
 
 
 def _parse_sitemap_xml(text):
@@ -684,6 +888,8 @@ _TOOL_DISPATCH = {
     "read_local_file": _tool_read_local_file,
     "list_local_dir": _tool_list_local_dir,
     "memory_note": _tool_memory_note,
+    "chroma_query": _tool_chroma_query,
+    "chroma_reindex_notes": _tool_chroma_reindex_notes,
 }
 
 # CAPTAIN-PATCH: server-side audit log for every tool call so we can verify
@@ -719,6 +925,12 @@ def _audit_tool_call(name, args, result):
         elif name == "memory_note":
             entry["chars_appended"] = len(((args or {}).get("text") or ""))
             entry["tag"] = (args or {}).get("tag", "")
+            entry["chroma_status"] = (result or {}).get("chroma_status", "")
+        elif name == "chroma_query":
+            entry["query"] = ((args or {}).get("query") or "")[:120]
+            entry["n_results"] = (result or {}).get("n_results", 0)
+        elif name == "chroma_reindex_notes":
+            entry["indexed"] = (result or {}).get("indexed", 0)
         if not ok:
             entry["error"] = (result or {}).get("error", "")[:200]
         with open(_TOOL_AUDIT_LOG, "a") as f:
