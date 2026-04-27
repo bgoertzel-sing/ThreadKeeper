@@ -89,6 +89,18 @@ _FALLBACK_HISTORY_TURNS = int(os.environ.get("FALLBACK_HISTORY_TURNS", "12"))
 _FALLBACK_TOOL_LOOP_MAX = int(os.environ.get("FALLBACK_TOOL_LOOP_MAX", "10"))
 _WEB_FETCH_MAX_CHARS = int(os.environ.get("WEB_FETCH_MAX_CHARS", "20000"))
 _WEB_FETCH_TIMEOUT_S = float(os.environ.get("WEB_FETCH_TIMEOUT_S", "15"))
+_LINK_EXTRACT_MAX = int(os.environ.get("LINK_EXTRACT_MAX", "200"))
+_FILE_READ_MAX_CHARS = int(os.environ.get("FILE_READ_MAX_CHARS", "30000"))
+# Sandbox roots for read_local_file / list_local_dir. Resolved with realpath
+# at access time so symlinks can't escape. memory_note appends to a fixed
+# notebook path inside REPO_ROOT.
+_LOCAL_READ_ROOTS = (
+    REPO_ROOT,                          # the OmegaClaw-Core checkout
+    "/tmp/oma-tools.jsonl",             # her own audit log
+    "/tmp/omegaclaw.log",               # the conversation log
+    "/tmp/oma-webui.log",               # webui stdout/stderr
+)
+_XUAN_NOTEBOOK_PATH = os.path.join(REPO_ROOT, "memory", "xuan-notes.md")
 
 # OpenAI-style tool schema (DeepSeek V4 Pro accepts the same shape).
 _FALLBACK_TOOLS = [
@@ -120,7 +132,109 @@ _FALLBACK_TOOLS = [
                 "required": ["url"],
             },
         },
-    }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "link_extract",
+            "description": (
+                "Fetch a URL and return its outbound links. Use this to "
+                "discover what is on a page (blog index, navigation, "
+                "post lists) before deciding which web_fetch calls to "
+                "make. Returns up to {} links as a list of "
+                "{{href, text}} pairs. Same-host filtering optional."
+            ).format(_LINK_EXTRACT_MAX),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL to fetch."},
+                    "same_host_only": {
+                        "type": "boolean",
+                        "description": "If true, only return links whose host matches the fetched URL. Default true.",
+                        "default": True,
+                    },
+                    "path_contains": {
+                        "type": "string",
+                        "description": "Optional substring filter on the link path (e.g., '/post/' to only return blog posts).",
+                    },
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_local_file",
+            "description": (
+                "Read a local file on the Oma host. SANDBOX: only files "
+                "inside the OmegaClaw-Core checkout, plus the conversation "
+                "log (/tmp/omegaclaw.log) and her audit log "
+                "(/tmp/oma-tools.jsonl) and webui log (/tmp/oma-webui.log) "
+                "are accessible. Returns up to {} chars."
+            ).format(_FILE_READ_MAX_CHARS),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Absolute path or path relative to the OmegaClaw-Core checkout.",
+                    },
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_local_dir",
+            "description": (
+                "List entries in a directory on the Oma host. Same sandbox "
+                "as read_local_file: limited to the OmegaClaw-Core "
+                "checkout. Returns up to 500 entries with type/size."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Directory path; absolute or relative to the OmegaClaw-Core checkout.",
+                    },
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "memory_note",
+            "description": (
+                "Append a note to your persistent notebook at "
+                "memory/xuan-notes.md. Use this to record observations, "
+                "decisions, and TODOs that should survive across sessions "
+                "(this fallback path has only ~12 turns of conversation "
+                "memory, so write down anything you want to keep). "
+                "Append-only: cannot read or delete existing notes through "
+                "this tool."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "The note text. A timestamp will be prepended automatically.",
+                    },
+                    "tag": {
+                        "type": "string",
+                        "description": "Optional short tag/category (e.g., 'observation', 'todo', 'decision').",
+                    },
+                },
+                "required": ["text"],
+            },
+        },
+    },
 ]
 
 
@@ -199,8 +313,167 @@ def _tool_web_fetch(args):
     }
 
 
+def _path_in_sandbox(real):
+    """True iff `real` (already realpath'd) is inside an allowed root."""
+    for root in _LOCAL_READ_ROOTS:
+        try:
+            root_real = os.path.realpath(root)
+        except OSError:
+            continue
+        if real == root_real:
+            return True
+        if os.path.isdir(root_real) and real.startswith(root_real + os.sep):
+            return True
+    return False
+
+
+def _resolve_in_repo(path):
+    """Make `path` absolute by treating relative paths as REPO_ROOT-relative."""
+    if not os.path.isabs(path):
+        path = os.path.join(REPO_ROOT, path)
+    return os.path.realpath(path)
+
+
+class _LinkCollector(__import__("html.parser", fromlist=["HTMLParser"]).HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.links = []
+        self._cur_href = None
+        self._cur_text = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag != "a":
+            return
+        for k, v in attrs:
+            if k == "href" and v:
+                self._cur_href = v
+                self._cur_text = []
+                return
+
+    def handle_data(self, data):
+        if self._cur_href is not None:
+            self._cur_text.append(data)
+
+    def handle_endtag(self, tag):
+        if tag == "a" and self._cur_href is not None:
+            text = re.sub(r"\s+", " ", "".join(self._cur_text)).strip()
+            self.links.append({"href": self._cur_href, "text": text})
+            self._cur_href = None
+            self._cur_text = []
+
+
+def _tool_link_extract(args):
+    url = (args.get("url") or "").strip()
+    same_host = bool(args.get("same_host_only", True))
+    path_contains = (args.get("path_contains") or "").strip()
+    if not url:
+        return {"ok": False, "error": "url is required"}
+    fetch = _tool_web_fetch({"url": url, "as_raw_html": True})
+    if not fetch.get("ok"):
+        return {"ok": False, "error": fetch.get("error") or "fetch failed", "url": url}
+    html = fetch.get("content", "")
+    try:
+        parser = _LinkCollector()
+        parser.feed(html)
+    except Exception as e:
+        return {"ok": False, "error": f"parse failed: {e}", "url": url}
+    from urllib.parse import urlparse, urljoin
+    base = urlparse(fetch.get("final_url") or url)
+    out = []
+    seen = set()
+    for link in parser.links:
+        href = link["href"].strip()
+        if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
+            continue
+        absu = urljoin(fetch.get("final_url") or url, href)
+        if absu in seen:
+            continue
+        seen.add(absu)
+        parsed = urlparse(absu)
+        if same_host and parsed.netloc != base.netloc:
+            continue
+        if path_contains and path_contains not in parsed.path:
+            continue
+        out.append({"href": absu, "text": link["text"][:200]})
+        if len(out) >= _LINK_EXTRACT_MAX:
+            break
+    return {"ok": True, "url": url, "final_url": fetch.get("final_url"),
+            "count": len(out), "links": out}
+
+
+def _tool_read_local_file(args):
+    path = (args.get("path") or "").strip()
+    if not path:
+        return {"ok": False, "error": "path is required"}
+    real = _resolve_in_repo(path)
+    if not _path_in_sandbox(real):
+        return {"ok": False, "error": f"path outside sandbox: {real}"}
+    if not os.path.isfile(real):
+        return {"ok": False, "error": f"not a file: {real}"}
+    try:
+        size = os.path.getsize(real)
+        with open(real, "r", errors="replace") as f:
+            data = f.read(_FILE_READ_MAX_CHARS + 1)
+    except Exception as e:
+        return {"ok": False, "error": f"read failed: {e}"}
+    truncated = len(data) > _FILE_READ_MAX_CHARS
+    return {
+        "ok": True, "path": real, "size_bytes": size,
+        "truncated": truncated, "content": data[:_FILE_READ_MAX_CHARS],
+    }
+
+
+def _tool_list_local_dir(args):
+    path = (args.get("path") or "").strip()
+    if not path:
+        return {"ok": False, "error": "path is required"}
+    real = _resolve_in_repo(path)
+    if not _path_in_sandbox(real):
+        return {"ok": False, "error": f"path outside sandbox: {real}"}
+    if not os.path.isdir(real):
+        return {"ok": False, "error": f"not a directory: {real}"}
+    try:
+        entries = sorted(os.listdir(real))[:500]
+    except Exception as e:
+        return {"ok": False, "error": f"listdir failed: {e}"}
+    out = []
+    for name in entries:
+        full = os.path.join(real, name)
+        try:
+            st = os.stat(full)
+            kind = "dir" if os.path.isdir(full) else (
+                "link" if os.path.islink(full) else "file")
+            out.append({"name": name, "type": kind, "size": st.st_size})
+        except OSError:
+            out.append({"name": name, "type": "unknown", "size": 0})
+    return {"ok": True, "path": real, "count": len(out), "entries": out}
+
+
+def _tool_memory_note(args):
+    note = (args.get("text") or "").strip()
+    tag = (args.get("tag") or "").strip()
+    if not note:
+        return {"ok": False, "error": "text is required"}
+    try:
+        os.makedirs(os.path.dirname(_XUAN_NOTEBOOK_PATH), exist_ok=True)
+        ts = time.strftime("%Y-%m-%d %H:%M:%S %z")
+        header = f"\n## {ts}"
+        if tag:
+            header += f"  [{tag}]"
+        with open(_XUAN_NOTEBOOK_PATH, "a") as f:
+            f.write(header + "\n" + note.rstrip() + "\n")
+        size = os.path.getsize(_XUAN_NOTEBOOK_PATH)
+    except Exception as e:
+        return {"ok": False, "error": f"append failed: {e}"}
+    return {"ok": True, "path": _XUAN_NOTEBOOK_PATH, "notebook_size_bytes": size}
+
+
 _TOOL_DISPATCH = {
     "web_fetch": _tool_web_fetch,
+    "link_extract": _tool_link_extract,
+    "read_local_file": _tool_read_local_file,
+    "list_local_dir": _tool_list_local_dir,
+    "memory_note": _tool_memory_note,
 }
 
 # CAPTAIN-PATCH: server-side audit log for every tool call so we can verify
@@ -212,12 +485,27 @@ _TOOL_AUDIT_LOG = "/tmp/oma-tools.jsonl"
 def _audit_tool_call(name, args, result):
     try:
         ok = bool(result.get("ok")) if isinstance(result, dict) else False
-        url = (args or {}).get("url", "") if name == "web_fetch" else ""
-        entry = {
-            "ts": time.time(), "tool": name, "ok": ok, "url": url,
-            "status": (result or {}).get("status") if isinstance(result, dict) else None,
-            "bytes": len((result or {}).get("content", "")) if isinstance(result, dict) else 0,
-        }
+        entry = {"ts": time.time(), "tool": name, "ok": ok}
+        # Tool-specific fingerprint of WHAT happened (truncated, never the
+        # full content — keeps the audit log tailable and grep-able).
+        if name == "web_fetch":
+            entry["url"] = (args or {}).get("url", "")
+            entry["status"] = result.get("status")
+            entry["bytes"] = len(result.get("content", "") or "")
+        elif name == "link_extract":
+            entry["url"] = (args or {}).get("url", "")
+            entry["count"] = result.get("count", 0)
+        elif name == "read_local_file":
+            entry["path"] = result.get("path") or (args or {}).get("path", "")
+            entry["bytes"] = len(result.get("content", "") or "")
+        elif name == "list_local_dir":
+            entry["path"] = result.get("path") or (args or {}).get("path", "")
+            entry["count"] = result.get("count", 0)
+        elif name == "memory_note":
+            entry["chars_appended"] = len(((args or {}).get("text") or ""))
+            entry["tag"] = (args or {}).get("tag", "")
+        if not ok:
+            entry["error"] = (result or {}).get("error", "")[:200]
         with open(_TOOL_AUDIT_LOG, "a") as f:
             f.write(json.dumps(entry) + "\n")
     except Exception:
