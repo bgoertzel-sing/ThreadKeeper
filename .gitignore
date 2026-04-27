@@ -21,3 +21,4 @@ chroma_db.snapshot-*
 .env
 *.pre-captain-patch
 /tmp/oma-tools.jsonl
+memory/xuan-notes.md
