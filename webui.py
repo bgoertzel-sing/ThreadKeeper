@@ -90,6 +90,20 @@ _FALLBACK_TOOL_LOOP_MAX = int(os.environ.get("FALLBACK_TOOL_LOOP_MAX", "10"))
 _WEB_FETCH_MAX_CHARS = int(os.environ.get("WEB_FETCH_MAX_CHARS", "20000"))
 _WEB_FETCH_TIMEOUT_S = float(os.environ.get("WEB_FETCH_TIMEOUT_S", "15"))
 _LINK_EXTRACT_MAX = int(os.environ.get("LINK_EXTRACT_MAX", "200"))
+_SITEMAP_MAX_URLS = int(os.environ.get("SITEMAP_MAX_URLS", "500"))
+_SITEMAP_PROBES = (
+    "/sitemap.xml",
+    "/sitemap_index.xml",
+    "/sitemap-index.xml",
+    "/wp-sitemap.xml",          # WordPress 5.5+
+    "/feed",                    # WordPress default
+    "/feed/",
+    "/rss",
+    "/rss.xml",
+    "/atom.xml",
+    "/index.xml",               # Hugo default
+    "/.well-known/feed",
+)
 _FILE_READ_MAX_CHARS = int(os.environ.get("FILE_READ_MAX_CHARS", "30000"))
 # Sandbox roots for read_local_file / list_local_dir. Resolved with realpath
 # at access time so symlinks can't escape. memory_note appends to a fixed
@@ -203,6 +217,38 @@ _FALLBACK_TOOLS = [
                     },
                 },
                 "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "sitemap_fetch",
+            "description": (
+                "Discover URLs on a site by probing standard sitemap and "
+                "feed endpoints (/sitemap.xml, /sitemap_index.xml, "
+                "/wp-sitemap.xml, /feed, /rss, /atom.xml, /index.xml, etc.). "
+                "Returns the union of all URLs found across whichever "
+                "endpoints respond, plus a per-endpoint success/fail "
+                "breakdown so you can see what the site actually exposes. "
+                "Use this BEFORE link_extract or guessing URLs — sitemaps "
+                "are the canonical source of a site's URL inventory and "
+                "work even on heavy-SPA sites where <a> tags are not in "
+                "the static HTML. Returns up to {} URLs."
+            ).format(_SITEMAP_MAX_URLS),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "Any URL on the target site (e.g., the home page). Endpoint probes are derived from its host.",
+                    },
+                    "path_contains": {
+                        "type": "string",
+                        "description": "Optional substring filter applied to the path of each discovered URL.",
+                    },
+                },
+                "required": ["url"],
             },
         },
     },
@@ -468,9 +514,173 @@ def _tool_memory_note(args):
     return {"ok": True, "path": _XUAN_NOTEBOOK_PATH, "notebook_size_bytes": size}
 
 
+def _parse_sitemap_xml(text):
+    """Return (urls, nested_sitemaps). Both lists. Tolerant: tries
+    ElementTree, falls back to regex if XML is malformed."""
+    urls = []
+    nested = []
+    try:
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(text)
+        # Strip namespaces — sitemap protocol uses
+        # {http://www.sitemaps.org/schemas/sitemap/0.9}url etc., which is
+        # ugly to match against. We just look at the local tag.
+        def localname(t):
+            return t.split("}", 1)[1] if "}" in t else t
+        for el in root.iter():
+            tag = localname(el.tag)
+            if tag == "loc" and el.text:
+                loc = el.text.strip()
+                # Distinguish nested sitemap-of-sitemaps from regular URLs:
+                # if parent tag is `sitemap`, it's a nested index entry.
+                # ElementTree doesn't expose parent directly without an
+                # iterparse pass, so we check both lists later via
+                # heuristic — sitemap-index URLs end in .xml or sitemap.
+                urls.append(loc)
+        # Heuristic split: sitemap-index files contain <sitemap><loc>…</loc>
+        # entries pointing to other .xml sitemaps. Detect by extension.
+        regular = []
+        for u in urls:
+            if u.lower().endswith(".xml") or "sitemap" in u.lower():
+                nested.append(u)
+            else:
+                regular.append(u)
+        return regular, nested
+    except Exception:
+        # Fallback: regex over <loc>...</loc>.
+        out = re.findall(r"<loc>\s*([^<\s]+)\s*</loc>", text, re.I)
+        regular = [u for u in out if not (u.lower().endswith(".xml") or "sitemap" in u.lower())]
+        nested = [u for u in out if u.lower().endswith(".xml") or "sitemap" in u.lower()]
+        return regular, nested
+
+
+def _parse_feed(text, base_url):
+    """Pull URLs out of an RSS or Atom feed. Returns a list of URLs."""
+    from urllib.parse import urljoin
+    urls = []
+    try:
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(text)
+        def localname(t):
+            return t.split("}", 1)[1] if "}" in t else t
+        for el in root.iter():
+            tag = localname(el.tag)
+            if tag == "link":
+                # RSS: <link>URL</link>; Atom: <link href="URL"/>
+                href = el.get("href")
+                if href:
+                    urls.append(urljoin(base_url, href))
+                elif el.text:
+                    urls.append(urljoin(base_url, el.text.strip()))
+            elif tag == "guid" and el.text and (el.text.startswith("http://") or el.text.startswith("https://")):
+                # Some RSS feeds put canonical URL in <guid>.
+                urls.append(el.text.strip())
+        return urls
+    except Exception:
+        # Fallback: regex.
+        href_pat = re.findall(r'<link[^>]*href=["\']([^"\']+)["\']', text, re.I)
+        text_pat = re.findall(r"<link>\s*([^<\s]+)\s*</link>", text, re.I)
+        return [urljoin(base_url, u) for u in (href_pat + text_pat) if u]
+
+
+def _tool_sitemap_fetch(args):
+    from urllib.parse import urlparse, urljoin
+    url = (args.get("url") or "").strip()
+    path_contains = (args.get("path_contains") or "").strip()
+    if not url:
+        return {"ok": False, "error": "url is required"}
+    parsed = urlparse(url if "://" in url else f"https://{url}")
+    if not parsed.netloc:
+        return {"ok": False, "error": f"could not derive host from {url}"}
+    base = f"{parsed.scheme or 'https'}://{parsed.netloc}"
+
+    probes = []
+    all_urls = []
+    seen = set()
+    nested_to_visit = []
+    NESTED_DEPTH_CAP = 3
+    visited_sitemaps = set()
+
+    def _accept(u):
+        if u in seen:
+            return
+        seen.add(u)
+        if path_contains and path_contains not in urlparse(u).path:
+            return
+        all_urls.append(u)
+
+    def _try_endpoint(probe_url):
+        if probe_url in visited_sitemaps or len(all_urls) >= _SITEMAP_MAX_URLS:
+            return None
+        visited_sitemaps.add(probe_url)
+        fetch = _tool_web_fetch({"url": probe_url, "as_raw_html": True})
+        rec = {"endpoint": probe_url, "ok": fetch.get("ok", False)}
+        if not fetch.get("ok"):
+            rec["error"] = fetch.get("error", "")[:120]
+            return rec
+        body = fetch.get("content", "") or ""
+        ctype = (fetch.get("content_type") or "").lower()
+        looks_xml = body.lstrip().startswith("<?xml") or "<urlset" in body[:500] or "<sitemapindex" in body[:500] or "<rss" in body[:500] or "<feed" in body[:500]
+        if "xml" in ctype or looks_xml:
+            if "<sitemapindex" in body[:1000] or ("<urlset" in body[:1000] or "</loc>" in body):
+                regular, nested = _parse_sitemap_xml(body)
+                rec["urls_found"] = len(regular)
+                rec["nested_found"] = len(nested)
+                for u in regular:
+                    _accept(u)
+                nested_to_visit.extend(nested)
+            elif "<rss" in body[:500] or "<feed" in body[:500] or "<channel" in body[:500]:
+                feed_urls = _parse_feed(body, probe_url)
+                rec["urls_found"] = len(feed_urls)
+                for u in feed_urls:
+                    _accept(u)
+            else:
+                # XML but not a known shape; try sitemap parser anyway.
+                regular, nested = _parse_sitemap_xml(body)
+                rec["urls_found"] = len(regular)
+                rec["nested_found"] = len(nested)
+                for u in regular:
+                    _accept(u)
+                nested_to_visit.extend(nested)
+        else:
+            rec["error"] = f"non-xml response (content-type={ctype}, body starts: {body[:80]!r})"
+        return rec
+
+    for path in _SITEMAP_PROBES:
+        rec = _try_endpoint(base + path)
+        if rec is not None:
+            probes.append(rec)
+        if len(all_urls) >= _SITEMAP_MAX_URLS:
+            break
+
+    # Walk nested sitemaps up to a depth cap.
+    depth = 0
+    while nested_to_visit and depth < NESTED_DEPTH_CAP and len(all_urls) < _SITEMAP_MAX_URLS:
+        depth += 1
+        next_round = []
+        for nu in nested_to_visit:
+            if len(all_urls) >= _SITEMAP_MAX_URLS:
+                break
+            rec = _try_endpoint(nu)
+            if rec is not None:
+                probes.append(rec)
+        nested_to_visit = next_round  # reset; new nested entries get appended in _try_endpoint via global list
+
+    # Cap final list.
+    all_urls = all_urls[:_SITEMAP_MAX_URLS]
+    return {
+        "ok": True,
+        "host": base,
+        "endpoints_tried": probes,
+        "url_count": len(all_urls),
+        "urls": all_urls,
+    }
+
+
 _TOOL_DISPATCH = {
     "web_fetch": _tool_web_fetch,
     "link_extract": _tool_link_extract,
+    "sitemap_fetch": _tool_sitemap_fetch,
     "read_local_file": _tool_read_local_file,
     "list_local_dir": _tool_list_local_dir,
     "memory_note": _tool_memory_note,
@@ -495,6 +705,11 @@ def _audit_tool_call(name, args, result):
         elif name == "link_extract":
             entry["url"] = (args or {}).get("url", "")
             entry["count"] = result.get("count", 0)
+        elif name == "sitemap_fetch":
+            entry["host"] = result.get("host", "")
+            entry["url_count"] = result.get("url_count", 0)
+            entry["endpoints_ok"] = sum(1 for p in (result.get("endpoints_tried") or []) if p.get("ok"))
+            entry["endpoints_tried"] = len(result.get("endpoints_tried") or [])
         elif name == "read_local_file":
             entry["path"] = result.get("path") or (args or {}).get("path", "")
             entry["bytes"] = len(result.get("content", "") or "")
