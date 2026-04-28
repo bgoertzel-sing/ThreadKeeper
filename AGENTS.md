@@ -2,7 +2,7 @@
 
 ## Project Mission
 
-We are building Oma OmegaClaw: a packaged WebUI app for SingularityNET leadership, especially a CRO / Chief Ethics Officer role. The app should act as an AI Ethics & Risk Command Center for agentic AI systems.
+We are building Oma OmegaClaw: a packaged WebUI app oriented around a Chief Risk Officer / Chief Ethics Officer role. The app acts as an AI Ethics & Risk Command Center for agentic AI systems, framed around the Three Lines of Defense model (NIST IR 8286 / IIA): Risk Owners (Line 1), Risk Managers (Line 2), Independent Audit (Line 3).
 
 Primary goals:
 - Help a CRO / Chief Ethics Officer review AI systems, agents, model choices, incidents, and risk decisions.
