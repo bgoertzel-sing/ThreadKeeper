@@ -2805,7 +2805,7 @@ INDEX_HTML = """<!DOCTYPE html>
       <h1>Oma · <select id="model_select" title="Switch model (kills + relaunches Oma)"></select>
         <button id="reset_btn" class="reset" title="Wipe in-process state (keeps long-term memory). Useful after model switches.">↻ new</button>
       </h1>
-      <div class="sub">An OmegaClaw agent · OpenCog Hyperon roadmap · SingularityNET</div>
+      <div class="sub">An OmegaClaw agent</div>
     </div>
   </div>
   <div class="ver"><span id="branch">?</span> @ <span id="commit">?</span></div>
@@ -2887,10 +2887,10 @@ INDEX_HTML = """<!DOCTYPE html>
     <div class="page" id="page-ecosystem">
       <div class="page-content">
         <div class="section">
-          <h2>SingularityNET ecosystem risk cockpit</h2>
+          <h2>Chief Risk Officer Dashboard</h2>
           <div class="pager">
             <button id="seed_demo">Seed sample dashboard</button>
-            <span>Demo data: synthetic reports from autonomous agents mapped to NIST IR 8286.</span>
+            <span>Configure your org chart in <code>memory/ecosystem.json</code>; nodes / edges / reports are loaded from that file. Empty by default.</span>
           </div>
           <div class="viz-wrap">
             <div class="network-panel" id="network_panel">loading…</div>
@@ -3005,7 +3005,7 @@ INDEX_HTML = """<!DOCTYPE html>
               </select>
             </label>
             <label>Scope
-              <input type="text" id="report_scope" value="SingularityNET agentic AI ecosystem">
+              <input type="text" id="report_scope" value="">
             </label>
             <label>Audience
               <input type="text" id="report_audience" value="CRO / Chief Ethics Officer / board-risk committee">
@@ -3519,7 +3519,7 @@ async function loadEcosystem() {
     }
     html += `<div class="defense-row domain">
       <div class="defense-head">
-        <div class="defense-title">SingularityNET ecosystem domains</div>
+        <div class="defense-title">Ecosystem domains</div>
         <div class="defense-note">Each domain can host Line 1 risk-owner agents, Line 2 risk-manager agents, and optional Line 3 internal-audit agents; model routes stay dynamic</div>
       </div>
       <div class="defense-cards">${domains.map(renderCard).join('')}</div>
