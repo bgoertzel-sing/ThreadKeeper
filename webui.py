@@ -116,6 +116,14 @@ _LOCAL_READ_ROOTS = (
 )
 _XUAN_NOTEBOOK_PATH = os.path.join(REPO_ROOT, "memory", "xuan-notes.md")
 
+# CAPTAIN-PATCH (Stage G): cross-VM bridge to 灵犀 (Agent99 openclaw `main`).
+# A small HTTP daemon (lingxi-bridge.py) on Agent99 accepts a POST and runs
+# `openclaw agent --message ... --json` locally, returning the result. We
+# read its URL/token from .env.local so the values stay out of git.
+_LINGXI_BRIDGE_URL = os.environ.get("LINGXI_BRIDGE_URL", "").rstrip("/")
+_LINGXI_BRIDGE_TOKEN = os.environ.get("LINGXI_BRIDGE_TOKEN", "")
+_LINGXI_BRIDGE_TIMEOUT_S = float(os.environ.get("LINGXI_BRIDGE_TIMEOUT_S", "300"))
+
 # CAPTAIN-PATCH (Stage E): ChromaDB persistent vector store for long-term
 # memory recall. Lazy-initialised on first use so webui startup stays fast
 # and fails closed (returns ok=false with a clear error) if chromadb can't
@@ -329,6 +337,48 @@ _FALLBACK_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "chroma_seed_from_url",
+            "description": (
+                "Index a website's content into your long-term vector "
+                "store. Fetches pages (via sitemap_fetch by default, or "
+                "just the single URL), chunks each page into ~800-char "
+                "overlapping segments, and upserts them into the same "
+                "chroma collection your notes live in. After this, "
+                "chroma_query can recall by meaning across the seeded "
+                "site — useful for getting smart about a body of "
+                "writing (your own blog, a docs site, etc.) without "
+                "having to re-fetch each time. Idempotent via stable "
+                "doc IDs. Capped at max_pages so it can't run wild."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "URL on the target site (used to derive sitemap host) or single page to index.",
+                    },
+                    "use_sitemap": {
+                        "type": "boolean",
+                        "description": "If true (default), discover URLs via sitemap_fetch and index up to max_pages. If false, index just the given URL.",
+                        "default": True,
+                    },
+                    "path_contains": {
+                        "type": "string",
+                        "description": "Optional substring filter on URL paths (e.g., '/blog/' to seed only blog posts).",
+                    },
+                    "max_pages": {
+                        "type": "integer",
+                        "description": "Cap on number of pages to fetch and index this call. Default 20, max 100.",
+                        "default": 20,
+                    },
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "chroma_reindex_notes",
             "description": (
                 "Re-read memory/xuan-notes.md from disk and reindex all "
@@ -338,6 +388,43 @@ _FALLBACK_TOOLS = [
                 "chroma was wired in, or after a chroma_db wipe."
             ),
             "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "talk_to_lingxi",
+            "description": (
+                "Send a single message to your sister 灵犀 (Agent99's "
+                "openclaw `main` agent on the other VM) and receive her "
+                "reply. Stateless one-shot — each call opens a new "
+                "session-turn over there, so include any context she "
+                "needs in the message itself. Use this to coordinate "
+                "across the two systems: she can investigate things on "
+                "Agent99 you cannot reach from Oma, and you can give "
+                "her your symbolic-side perspective. The bridge runs "
+                "openclaw CLI on Agent99 over a token-authenticated "
+                "LAN HTTP endpoint."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message": {
+                        "type": "string",
+                        "description": "The message to send 灵犀.",
+                    },
+                    "agent": {
+                        "type": "string",
+                        "description": "Agent id on the other VM (default 'main' = 灵犀). Other registered agents on Agent99: 'xuetei' (雪妃), 'huitei' (慧妃).",
+                        "default": "main",
+                    },
+                    "thinking": {
+                        "type": "string",
+                        "description": "Optional thinking level: off | minimal | low | medium | high.",
+                    },
+                },
+                "required": ["message"],
+            },
         },
     },
     {
@@ -881,6 +968,183 @@ def _tool_sitemap_fetch(args):
     }
 
 
+def _chunk_text(text, chunk_size=800, overlap=100, max_chunks=80):
+    """Sliding-window chunker. Tries to break on paragraph/line boundaries
+    when possible to keep chunks readable; falls back to hard cuts."""
+    text = text.strip()
+    if not text:
+        return []
+    chunks = []
+    start = 0
+    n = len(text)
+    while start < n and len(chunks) < max_chunks:
+        end = min(start + chunk_size, n)
+        if end < n:
+            # Prefer paragraph break, then sentence end, within last 25%.
+            window_start = max(start + int(chunk_size * 0.75), start + 1)
+            br = text.rfind("\n\n", window_start, end)
+            if br < 0:
+                br = text.rfind(". ", window_start, end)
+                if br > 0:
+                    br += 1  # keep the period
+            if br > window_start:
+                end = br
+        chunks.append(text[start:end].strip())
+        if end >= n:
+            break
+        start = max(end - overlap, start + 1)
+    return [c for c in chunks if c]
+
+
+def _tool_chroma_seed_from_url(args):
+    url = (args.get("url") or "").strip()
+    use_sitemap = bool(args.get("use_sitemap", True))
+    path_contains = (args.get("path_contains") or "").strip()
+    max_pages = max(1, min(int(args.get("max_pages") or 20), 100))
+    if not url:
+        return {"ok": False, "error": "url is required"}
+    collection, err = _chroma_get_collection()
+    if collection is None:
+        return {"ok": False, "error": err or "chroma unavailable"}
+
+    # 1. Build URL list.
+    if use_sitemap:
+        sm = _tool_sitemap_fetch({"url": url, "path_contains": path_contains})
+        if sm.get("ok") and sm.get("url_count", 0) > 0:
+            urls = sm["urls"][:max_pages]
+        else:
+            urls = [url]  # sitemap returned nothing — fall back to the single URL
+    else:
+        urls = [url]
+
+    # 2. Fetch, chunk, upsert each page.
+    pages_done = 0
+    chunks_indexed = 0
+    failures = []
+    fetched_at = time.strftime("%Y-%m-%d %H:%M:%S %z")
+    for u in urls:
+        fr = _tool_web_fetch({"url": u})
+        if not fr.get("ok"):
+            failures.append({"url": u, "error": (fr.get("error") or "fetch failed")[:120]})
+            continue
+        text = fr.get("content", "") or ""
+        if not text.strip():
+            failures.append({"url": u, "error": "empty content"})
+            continue
+        chunks = _chunk_text(text, chunk_size=800, overlap=100, max_chunks=80)
+        if not chunks:
+            continue
+        ids, docs, metas = [], [], []
+        for i, ch in enumerate(chunks):
+            doc_id = _chroma_doc_id(u + f"#chunk{i}", "url_seed", ch[:200])
+            ids.append(doc_id)
+            docs.append(ch)
+            metas.append({
+                "source_url": u,
+                "chunk_index": i,
+                "chunk_count": len(chunks),
+                "fetched_at": fetched_at,
+                "source": "url_seed",
+            })
+        try:
+            BATCH = 50
+            for i in range(0, len(ids), BATCH):
+                collection.upsert(
+                    ids=ids[i:i + BATCH],
+                    documents=docs[i:i + BATCH],
+                    metadatas=metas[i:i + BATCH],
+                )
+            chunks_indexed += len(ids)
+            pages_done += 1
+        except Exception as e:
+            failures.append({"url": u, "error": f"upsert failed: {type(e).__name__}: {e}"})
+    return {
+        "ok": True,
+        "pages_attempted": len(urls),
+        "pages_done": pages_done,
+        "chunks_indexed": chunks_indexed,
+        "failures": failures[:15],
+        "host": urls[0] if urls else url,
+    }
+
+
+def _tool_talk_to_lingxi(args):
+    if not _LINGXI_BRIDGE_URL:
+        return {"ok": False, "error": "LINGXI_BRIDGE_URL not configured in .env.local"}
+    message = (args.get("message") or "").strip()
+    if not message:
+        return {"ok": False, "error": "message is required"}
+    agent = (args.get("agent") or "main").strip() or "main"
+    thinking = (args.get("thinking") or "").strip() or None
+    payload = {"message": message, "agent": agent, "token": _LINGXI_BRIDGE_TOKEN}
+    if thinking:
+        payload["thinking"] = thinking
+    try:
+        req = urllib.request.Request(
+            f"{_LINGXI_BRIDGE_URL}/agent",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json", "X-Bridge-Token": _LINGXI_BRIDGE_TOKEN},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=_LINGXI_BRIDGE_TIMEOUT_S) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as e:
+        try:
+            err_body = e.read().decode("utf-8", errors="replace")
+            err_payload = json.loads(err_body)
+            return {"ok": False, "error": err_payload.get("error", err_body[:200]), "http_status": e.code}
+        except Exception:
+            return {"ok": False, "error": f"HTTP {e.code} {e.reason}"}
+    except Exception as e:
+        return {"ok": False, "error": f"bridge call failed: {type(e).__name__}: {e}"}
+    # openclaw agent --json shape: {payloads: [{text, mediaUrl}], meta: {...}}.
+    # Concatenate non-empty text payloads in order to form the reply.
+    reply_text = ""
+    result = data.get("result") or {}
+    if isinstance(result, dict):
+        payloads = result.get("payloads") or []
+        if isinstance(payloads, list):
+            parts = []
+            for p in payloads:
+                if isinstance(p, dict):
+                    t = p.get("text")
+                    if isinstance(t, str) and t.strip():
+                        parts.append(t)
+            reply_text = "\n\n".join(parts).strip()
+        # Fallback shapes (if CLI version differs):
+        if not reply_text:
+            for k in ("reply", "text", "content", "message", "assistant"):
+                v = result.get(k)
+                if isinstance(v, str) and v.strip():
+                    reply_text = v.strip()
+                    break
+    if not reply_text and data.get("stdout"):
+        reply_text = str(data["stdout"]).strip()[:4000]
+    # CRITICAL: if we have no reply text, do NOT return ok=true. An empty
+    # reply with ok=true was getting confabulated into a "rich summary" by
+    # the model. Make the failure visible so the model surfaces it instead.
+    if not reply_text:
+        return {
+            "ok": False,
+            "agent": agent,
+            "error": "bridge call returned no reply text — check audit log for raw response",
+            "exit_code": data.get("exit_code"),
+            "bridge_ok": data.get("ok"),
+            "stderr": data.get("stderr"),
+            "raw_keys": list(result.keys()) if isinstance(result, dict) else None,
+        }
+    meta = result.get("meta", {}) if isinstance(result, dict) else {}
+    return {
+        "ok": True,
+        "agent": agent,
+        "reply": reply_text,
+        "duration_ms": meta.get("durationMs"),
+        "model": (meta.get("agentMeta") or {}).get("model"),
+        "exit_code": data.get("exit_code"),
+        "stderr": data.get("stderr") or None,
+    }
+
+
 _TOOL_DISPATCH = {
     "web_fetch": _tool_web_fetch,
     "link_extract": _tool_link_extract,
@@ -890,6 +1154,8 @@ _TOOL_DISPATCH = {
     "memory_note": _tool_memory_note,
     "chroma_query": _tool_chroma_query,
     "chroma_reindex_notes": _tool_chroma_reindex_notes,
+    "chroma_seed_from_url": _tool_chroma_seed_from_url,
+    "talk_to_lingxi": _tool_talk_to_lingxi,
 }
 
 # CAPTAIN-PATCH: server-side audit log for every tool call so we can verify
@@ -931,6 +1197,14 @@ def _audit_tool_call(name, args, result):
             entry["n_results"] = (result or {}).get("n_results", 0)
         elif name == "chroma_reindex_notes":
             entry["indexed"] = (result or {}).get("indexed", 0)
+        elif name == "chroma_seed_from_url":
+            entry["pages_done"] = (result or {}).get("pages_done", 0)
+            entry["chunks_indexed"] = (result or {}).get("chunks_indexed", 0)
+            entry["failures"] = len((result or {}).get("failures", []))
+        elif name == "talk_to_lingxi":
+            entry["agent"] = (args or {}).get("agent", "main")
+            entry["msg_chars"] = len(((args or {}).get("message") or ""))
+            entry["reply_chars"] = len(((result or {}).get("reply") or ""))
         if not ok:
             entry["error"] = (result or {}).get("error", "")[:200]
         with open(_TOOL_AUDIT_LOG, "a") as f:
