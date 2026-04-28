@@ -1,12 +1,21 @@
 {
   "description": "",
   "demo": false,
+  "served": {
+    "name": "",
+    "role": ""
+  },
   "nodes": [],
   "edges": [],
   "reports": [],
   "risks": [],
 
   "_schema": {
+    "_served_shape": {
+      "_doc": "Top-level field describing who/what this deployment serves. Surfaced as a 'Serves <name> · <role>' kicker on the dashboard. Both fields optional; the kicker is hidden when name is empty.",
+      "name": "Person or archetype this Oma serves (e.g., 'Larry Greenblatt', 'Max Quasar', 'Ishtar')",
+      "role": "Their role/title (e.g., 'Head of InterNetwork Defense', 'Chaos agent operator')"
+    },
     "_doc": "Copy this file to memory/ecosystem.json (gitignored) and fill in your real organization data. Each field below shows the shape of one entry — DELETE the _schema block before saving as ecosystem.json.",
 
     "_node_shape": {

@@ -2187,11 +2187,35 @@ def _no_swipl_fallback_send(text):
 
             reply = ""
             cap_hit = False
+            # CAPTAIN-PATCH: accumulate token usage across the loop so we
+            # can record a per-turn total in the audit log for cost
+            # estimation. DeepSeek/OpenAI return resp.usage with
+            # prompt_tokens / completion_tokens / total_tokens; some
+            # providers also surface cached counts on prompt_tokens_details.
+            tokens_input = 0
+            tokens_output = 0
+            tokens_cache_read = 0
+            tokens_cache_write = 0
+            def _accum_usage(usage_obj):
+                nonlocal tokens_input, tokens_output, tokens_cache_read, tokens_cache_write
+                if not usage_obj:
+                    return
+                tokens_input += getattr(usage_obj, "prompt_tokens", 0) or 0
+                tokens_output += getattr(usage_obj, "completion_tokens", 0) or 0
+                # Cached-read counts (when present): both major providers
+                # surface them slightly differently. Try the common shapes.
+                ptd = getattr(usage_obj, "prompt_tokens_details", None)
+                if ptd is not None:
+                    tokens_cache_read += getattr(ptd, "cached_tokens", 0) or 0
+                else:
+                    # DeepSeek's bespoke fields
+                    tokens_cache_read += getattr(usage_obj, "prompt_cache_hit_tokens", 0) or 0
             for _iter in range(_FALLBACK_TOOL_LOOP_MAX):
                 turn_kwargs = dict(base_kwargs)
                 if _iter == 0 and force_first_fetch:
                     turn_kwargs["tool_choice"] = "required"
                 resp = client.chat.completions.create(messages=messages, **turn_kwargs)
+                _accum_usage(getattr(resp, "usage", None))
                 msg = resp.choices[0].message
                 tool_calls = getattr(msg, "tool_calls", None) or []
                 if not tool_calls:
@@ -2283,6 +2307,7 @@ def _no_swipl_fallback_send(text):
                 final_kwargs["tool_choice"] = "none"
                 try:
                     final = client.chat.completions.create(messages=messages, **final_kwargs)
+                    _accum_usage(getattr(final, "usage", None))
                     reply = (final.choices[0].message.content or "").strip()
                 except Exception as e:
                     reply = f"(tool loop exhausted; forced-summary call failed: {e})"
@@ -2313,6 +2338,10 @@ def _no_swipl_fallback_send(text):
                 "cap_hit": cap_hit if 'cap_hit' in locals() else False,
                 "provider": provider_lc,
                 "model": model,
+                "tokens_input": tokens_input if 'tokens_input' in locals() else 0,
+                "tokens_output": tokens_output if 'tokens_output' in locals() else 0,
+                "tokens_cache_read": tokens_cache_read if 'tokens_cache_read' in locals() else 0,
+                "tokens_cache_write": tokens_cache_write if 'tokens_cache_write' in locals() else 0,
             }) + "\n")
     except Exception:
         pass
@@ -2432,6 +2461,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             turn_count_24h = 0
             total_duration_ms = 0
             total_reply_chars = 0
+            tok_in = 0
+            tok_out = 0
+            tok_cache_r = 0
+            tok_cache_w = 0
             last_turn = None
             try:
                 with open(_TOOL_AUDIT_LOG, "r", errors="replace") as f:
@@ -2451,6 +2484,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             total_duration_ms += e.get("duration_ms", 0) or 0
                             total_reply_chars += e.get("reply_chars", 0) or 0
                             urls_fetched_24h += len(e.get("urls_fetched") or [])
+                            tok_in += e.get("tokens_input", 0) or 0
+                            tok_out += e.get("tokens_output", 0) or 0
+                            tok_cache_r += e.get("tokens_cache_read", 0) or 0
+                            tok_cache_w += e.get("tokens_cache_write", 0) or 0
                             last_turn = e
                         else:
                             tool_calls_24h += 1
@@ -2470,18 +2507,57 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     if k:
                         key_fp = f"{k[:6]}...{k[-4:]}"
                     break
+            # CAPTAIN-PATCH: cost estimation from accumulated tokens.
+            # Per-token rates by provider/model; only the actively-used
+            # ones need to be defined. Pricing in USD per token.
+            PRICING = {
+                ("DeepSeek", "deepseek-v4-pro"):   {"in": 2e-6, "out": 8e-6, "cache_r": 1e-6, "cache_w": 2e-6},
+                ("DeepSeek", "deepseek-v4-flash"): {"in": 2e-7, "out": 8e-7, "cache_r": 1e-7, "cache_w": 2e-7},
+                ("OpenAI", "gpt-5.5"):             {"in": 1.25e-6, "out": 1e-5, "cache_r": 0, "cache_w": 0},
+                ("Anthropic", "claude-opus-4-7"):  {"in": 1.5e-5, "out": 7.5e-5, "cache_r": 0, "cache_w": 0},
+            }
+            rate = PRICING.get((active.get("provider"), active.get("model"))) or {"in": 0, "out": 0, "cache_r": 0, "cache_w": 0}
+            cost_usd = (
+                (tok_in - tok_cache_r) * rate["in"]    # uncached input billed at full rate
+                + tok_cache_r * rate["cache_r"]
+                + tok_cache_w * rate["cache_w"]
+                + tok_out * rate["out"]
+            )
+            # CAPTAIN-PATCH: "served by" header — surface the deployment's
+            # served person/archetype from ecosystem.json so the dashboard
+            # can identify who this Oma serves at a glance. Empty if not
+            # configured.
+            served = ""
+            served_role = ""
+            try:
+                cfg, _ = risk_register._load_ecosystem_config()
+                served_val = cfg.get("served")
+                if isinstance(served_val, dict):
+                    served = served_val.get("name", "") or ""
+                    served_role = served_val.get("role", "") or ""
+                elif isinstance(served_val, str):
+                    served = served_val
+            except Exception as e:
+                pass
             return self._json({
                 "ok": True,
                 "active_route": active.get("route"),
                 "provider": active.get("provider"),
                 "model": active.get("model"),
                 "key_fingerprint": key_fp,
+                "served": served,
+                "served_role": served_role,
                 "tool_calls_24h": tool_calls_24h,
                 "tools_by_name_24h": tools_by_name_24h,
                 "turns_24h": turn_count_24h,
                 "urls_fetched_24h": urls_fetched_24h,
                 "avg_duration_ms": int(avg_duration_ms),
                 "avg_reply_chars": int(avg_reply_chars),
+                "tokens_input_24h": tok_in,
+                "tokens_output_24h": tok_out,
+                "tokens_cache_read_24h": tok_cache_r,
+                "tokens_cache_write_24h": tok_cache_w,
+                "cost_usd_24h": round(cost_usd, 6),
                 "last_turn": last_turn,
                 "audit_log": _TOOL_AUDIT_LOG,
             })
@@ -2779,6 +2855,22 @@ INDEX_HTML = """<!DOCTYPE html>
           letter-spacing: 0; color: var(--dim); font-size: 11px;
           font-style: italic; opacity: 0.8; margin-left: 6px; }
   /* CAPTAIN-PATCH: collapsible local-runtime drawer + API-mode tiles */
+  .served-by { padding: 8px 16px 0; font-size: 11px; color: var(--dim);
+          letter-spacing: 0.4px; }
+  .served-by .served-by-kicker { text-transform: uppercase; opacity: 0.7;
+          font-size: 10px; margin-right: 6px; }
+  .served-by .served-by-name { color: var(--snet-teal); font-weight: 600;
+          font-size: 13px; }
+  .served-by .served-by-role { color: var(--dim); font-style: italic;
+          font-size: 11px; margin-left: 8px; }
+  .tool-breakdown { padding: 0 16px 8px; font-size: 11px; color: var(--dim);
+          font-family: ui-monospace, SFMono-Regular, monospace; }
+  .tool-breakdown .tb-label { text-transform: uppercase; letter-spacing: 0.5px;
+          opacity: 0.7; margin-right: 8px; font-size: 10px; }
+  .tool-breakdown .tb-tool { display: inline-block; margin-right: 10px;
+          color: var(--fg); }
+  .tool-breakdown .tb-tool .tb-count { color: var(--snet-teal); font-weight: 600;
+          margin-left: 4px; }
   .api-grid { padding: 12px 16px 4px; }
   .local-runtime-details { padding: 0 16px 8px; flex-shrink: 0; }
   .local-runtime-details summary { cursor: pointer; padding: 8px 0;
@@ -2921,6 +3013,15 @@ INDEX_HTML = """<!DOCTYPE html>
         </div>
       </div>
 
+      <!-- CAPTAIN-PATCH: served-by kicker. Surfaces who/what this
+           deployment serves — pulled from memory/ecosystem.json's
+           "served" field. Empty until configured. -->
+      <div class="served-by" id="served_by_row" style="display:none;">
+        <span class="served-by-kicker">Serves</span>
+        <span class="served-by-name" id="served_by_name">—</span>
+        <span class="served-by-role" id="served_by_role"></span>
+      </div>
+
       <!-- CAPTAIN-PATCH: API-mode metrics row, always visible. Populated
            from /api-metrics. -->
       <div class="grid api-grid" id="api_grid">
@@ -2929,8 +3030,10 @@ INDEX_HTML = """<!DOCTYPE html>
         <div class="tile"><div class="label">Turns · 24h</div><div class="value" id="api_turns">…</div></div>
         <div class="tile"><div class="label">Tool calls · 24h</div><div class="value" id="api_tools">…</div></div>
         <div class="tile"><div class="label">Avg latency</div><div class="value" id="api_latency">…</div></div>
-        <div class="tile"><div class="label">URLs fetched · 24h</div><div class="value" id="api_urls">…</div></div>
+        <div class="tile"><div class="label">Cost · 24h</div><div class="value" id="api_cost">…</div></div>
       </div>
+      <!-- Tool-by-name breakdown · 24h. Reads tools_by_name_24h. -->
+      <div class="tool-breakdown" id="tool_breakdown" style="display:none;"></div>
 
       <!-- CAPTAIN-PATCH: local-runtime tiles wrapped in collapsible details -->
       <details class="local-runtime-details" id="local_runtime_details">
@@ -3990,7 +4093,35 @@ async function fetchApiMetrics() {
     $('api_latency').textContent = d.avg_duration_ms
       ? (d.avg_duration_ms < 1000 ? `${d.avg_duration_ms} ms` : `${(d.avg_duration_ms/1000).toFixed(1)} s`)
       : '—';
-    $('api_urls').textContent = d.urls_fetched_24h || 0;
+    // Cost — show $0.000000 precision when sub-cent, else $0.0000.
+    const c = d.cost_usd_24h || 0;
+    $('api_cost').textContent = c > 0
+      ? (c < 0.01 ? `$${c.toFixed(6)}` : `$${c.toFixed(4)}`)
+      : '—';
+
+    // Served-by header
+    const sbRow = document.getElementById('served_by_row');
+    if (d.served) {
+      sbRow.style.display = '';
+      $('served_by_name').textContent = d.served;
+      $('served_by_role').textContent = d.served_role ? `· ${d.served_role}` : '';
+    } else {
+      sbRow.style.display = 'none';
+    }
+
+    // Tool breakdown — render the tools_by_name dict as inline chips.
+    const tb = document.getElementById('tool_breakdown');
+    const breakdown = d.tools_by_name_24h || {};
+    const entries = Object.entries(breakdown).sort((a, b) => b[1] - a[1]);
+    if (entries.length) {
+      tb.style.display = '';
+      tb.innerHTML = '<span class="tb-label">tools · 24h</span>'
+        + entries.map(([name, n]) =>
+            `<span class="tb-tool">${escapeHtml(name)}<span class="tb-count">${n}</span></span>`
+          ).join('');
+    } else {
+      tb.style.display = 'none';
+    }
   } catch (e) { /* swallow — webui staying up is the priority */ }
 }
 
