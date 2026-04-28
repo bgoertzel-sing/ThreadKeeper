@@ -13,270 +13,77 @@ RISK_PATH = os.environ.get("OMEGACLAW_RISK_REGISTER", DEFAULT_RISK_PATH)
 _VALID_STATUS = {"open", "monitoring", "treating", "accepted", "closed"}
 _VALID_TIERS = {"low", "medium", "high", "critical"}
 
-_DEMO_RISKS = [
-    {
-        "id": "DEMO-L1-NUNET-COMPUTE-SUPPLY",
-        "title": "NuNet compute supply assurance for agent workloads",
-        "description": "Line-1 NuNet telemetry agent reports uneven regional GPU availability for scheduled agentic AI evaluations. Risk is service degradation during governance-critical review windows.",
-        "use_case": "Decentralized compute for model evaluation and agent execution",
-        "model_provider": "Line 1 local GPU agents",
-        "model_name": "Qwen / Gemma / GLM / DeepSeek local pool",
-        "framework": "NIST IR 8286 Line 1 / NIST AI RMF Measure / ISO 42001 operations",
-        "evidence_sources": ["NuNetOpsAgent capacity report", "scheduler latency sample", "node health summary"],
-        "recommendation": "Define minimum reserve capacity for high-priority reviews; require failover to local or cloud fallback when governance SLAs are at risk.",
-        "likelihood": 3,
-        "impact": 4,
-        "status": "treating",
-        "required_human_approval": "CRO approval for fallback provider policy",
-        "residual_risk": "Medium after reserve-capacity policy and failover testing",
-        "decision_owner": "Line 1 compute operations owner",
-        "next_review_date": "2026-05-15",
-        "treatment": "Capacity guardrails and fallback runbook",
-        "control_mapping": ["NIST AI RMF Measure", "ISO 42001 operations monitoring"],
-    },
-    {
-        "id": "DEMO-L1-HYPERON-TOOL-AUDIT",
-        "title": "OpenCog Hyperon tool-call auditability",
-        "description": "Line-1 Hyperon/MeTTa agent reports that experimental tool calls need stronger linkage from prompt, symbolic action, evidence, and final recommendation.",
-        "use_case": "Neural-symbolic agent reasoning and MeTTa skill dispatch",
-        "model_provider": "Line 1 local GPU agents",
-        "model_name": "Qwen / Gemma / GLM / DeepSeek / Granite local pool",
-        "framework": "NIST IR 8286 Line 1 / NIST AI RMF Govern-Measure / ISO 42001 evidence",
-        "evidence_sources": ["HyperonAgent trace sample", "MeTTa dispatch log", "Oma history excerpt"],
-        "recommendation": "Attach immutable review IDs to skill calls and retain a compact evidence bundle for each material recommendation.",
-        "likelihood": 4,
-        "impact": 4,
-        "status": "open",
-        "required_human_approval": "Chief Ethics Officer approval before production use",
-        "residual_risk": "High until evidence bundles are complete",
-        "decision_owner": "Agent platform owner",
-        "next_review_date": "2026-05-08",
-        "treatment": "Evidence locker integration",
-        "control_mapping": ["NIST AI RMF Govern", "ISO 42001 documented information"],
-    },
-    {
-        "id": "DEMO-L2-DEEPFUNDING-GRANT-GOV",
-        "title": "Deep Funding project review consistency",
-        "description": "Line-2 governance agent reports variance in evidence quality across decentralized project reviews and milestone assessments.",
-        "use_case": "Community grant review and milestone governance",
-        "model_provider": "Line 2 risk manager route",
-        "model_name": "Current sample: ChatGPT 5.5 governance review route",
-        "framework": "NIST IR 8286 Line 2 / NIST AI RMF Govern-Map / ISO 42001 impact assessment",
-        "evidence_sources": ["DeepFundingGovAgent review sample", "proposal rubric extract", "milestone evidence checklist"],
-        "recommendation": "Normalize review rubrics and require evidence completeness checks before risk acceptance or funding-stage movement.",
-        "likelihood": 3,
-        "impact": 3,
-        "status": "monitoring",
-        "required_human_approval": "Governance council review for rubric changes",
-        "residual_risk": "Medium with standardized rubric",
-        "decision_owner": "Line 2 governance function",
-        "next_review_date": "2026-05-22",
-        "treatment": "Standardized review pack",
-        "control_mapping": ["NIST AI RMF Govern", "ISO 42001 impact assessment"],
-    },
-    {
-        "id": "DEMO-L2-REJUVE-HEALTH-DATA",
-        "title": "Rejuve.AI health-data ethics and consent posture",
-        "description": "Line-2 ethics agent flags sensitive health-data use as requiring stronger consent evidence and residual-risk documentation for AI-driven longevity insights.",
-        "use_case": "Longevity research insights from participant data",
-        "model_provider": "Line 2 risk manager route",
-        "model_name": "Current sample: ChatGPT 5.5 ethics review route",
-        "framework": "NIST IR 8286 Line 2 / NIST AI RMF Map-Manage / ISO 42001 impact assessment",
-        "evidence_sources": ["EthicsReviewAgent DPIA checklist", "consent-flow sample", "data minimization review"],
-        "recommendation": "Require explicit consent evidence, data minimization review, and human approval for high-impact participant-facing claims.",
-        "likelihood": 3,
-        "impact": 5,
-        "status": "open",
-        "required_human_approval": "Chief Ethics Officer approval",
-        "residual_risk": "High until consent evidence is attached",
-        "decision_owner": "Ethics and privacy owner",
-        "next_review_date": "2026-05-10",
-        "treatment": "Consent evidence locker and claim review workflow",
-        "control_mapping": ["NIST AI RMF Map", "ISO 42001 AI impact assessment"],
-    },
-    {
-        "id": "DEMO-L3-SOPHIAVERSE-HUMANOID-CLAIMS",
-        "title": "SophiaVerse humanoid-sentience claims oversight",
-        "description": "Line-3 audit agent identifies reputational and ethics risk around public-facing humanoid sentience language and user expectations.",
-        "use_case": "Public AI experience, embodied agents, and metaverse interaction",
-        "model_provider": "Line 3 internal audit route",
-        "model_name": "Current sample: Claude Opus 4.7 audit review route",
-        "framework": "NIST IR 8286 Line 3 / NIST AI RMF Manage / ISO 42001 communication controls",
-        "evidence_sources": ["AuditAgent public-claims sample", "marketing review checklist", "user expectation log"],
-        "recommendation": "Maintain human review for public sentience claims and require evidence-backed language for user-facing agent capabilities.",
-        "likelihood": 2,
-        "impact": 4,
-        "status": "monitoring",
-        "required_human_approval": "Audit committee review for external claims policy",
-        "residual_risk": "Medium with review gate",
-        "decision_owner": "Line 3 audit liaison",
-        "next_review_date": "2026-06-01",
-        "treatment": "External-claims review gate",
-        "control_mapping": ["NIST AI RMF Manage", "ISO 42001 communication"],
-    },
-    {
-        "id": "DEMO-L3-ASI-ALLIANCE-MODEL-ROUTING",
-        "title": "ASI Alliance model-routing and fallback accountability",
-        "description": "Line-3 audit agent reports that model routing across local, OpenAI-compatible, and Anthropic endpoints needs explicit decision-owner and fallback evidence.",
-        "use_case": "Model switchboard for executive governance workflows",
-        "model_provider": "Mixed provider routing",
-        "model_name": "Dynamic model routing; current examples: ChatGPT 5.5 primary, Claude Opus 4.7 fallback, local IBM Granite for ISO/IEC 42001 support",
-        "framework": "NIST IR 8286 Line 3 / NIST AI RMF Govern-Manage / ISO 42001 supplier and operations controls",
-        "evidence_sources": ["AuditAgent routing sample", "provider health log", "fallback decision record"],
-        "recommendation": "Log selected provider, fallback reason, prompt summary, and accountable owner for every material governance artifact.",
-        "likelihood": 4,
-        "impact": 5,
-        "status": "open",
-        "required_human_approval": "Board-risk committee approval for provider fallback policy",
-        "residual_risk": "Critical until fallback accountability is consistently captured",
-        "decision_owner": "CRO / Chief Ethics Officer",
-        "next_review_date": "2026-05-03",
-        "treatment": "Model switchboard audit metadata",
-        "control_mapping": ["NIST AI RMF Govern", "ISO 42001 supplier management"],
-    },
-]
+# _DEMO_RISKS now loaded from memory/ecosystem.json (see _load_ecosystem_config below)
 
 
-_DEMO_REPORTS = [
-    {
-        "id": "RPT-L1-NUNET-001",
-        "line": 1,
-        "agent": "Line1LocalGPUAgent",
-        "source": "NuNet",
-        "summary": "Local Qwen/Gemma/GLM/DeepSeek agent reports regional compute capacity variance for high-priority review windows.",
-        "mapped_risk": "DEMO-L1-NUNET-COMPUTE-SUPPLY",
-        "confidence": 0.74,
-    },
-    {
-        "id": "RPT-L1-HYPERON-002",
-        "line": 1,
-        "agent": "Line1TraceAgent",
-        "source": "OpenCog Hyperon / MeTTa",
-        "summary": "Local Granite/Qwen trace agent reports that tool-call traces need stronger evidence bundle IDs for executive artifacts.",
-        "mapped_risk": "DEMO-L1-HYPERON-TOOL-AUDIT",
-        "confidence": 0.82,
-    },
-    {
-        "id": "RPT-L2-DEEPFUNDING-003",
-        "line": 2,
-        "agent": "Line2RiskManagerAgent",
-        "source": "Deep Funding",
-        "summary": "Line-2 risk manager agent reports variance in milestone evidence quality; rubric normalization recommended. Current sample route: ChatGPT 5.5.",
-        "mapped_risk": "DEMO-L2-DEEPFUNDING-GRANT-GOV",
-        "confidence": 0.69,
-    },
-    {
-        "id": "RPT-L2-ETHICS-004",
-        "line": 2,
-        "agent": "Line2EthicsRiskAgent",
-        "source": "Rejuve.AI",
-        "summary": "Line-2 ethics risk agent reports that sensitive health-data use needs consent evidence and high-impact claim review. Current sample route: ChatGPT 5.5.",
-        "mapped_risk": "DEMO-L2-REJUVE-HEALTH-DATA",
-        "confidence": 0.78,
-    },
-    {
-        "id": "RPT-L3-AUDIT-005",
-        "line": 3,
-        "agent": "Line3ClaimsAuditAgent",
-        "source": "SophiaVerse",
-        "summary": "Line-3 internal audit agent reports that public-facing humanoid-sentience language should pass an evidence-backed claims gate. Current sample route: Claude Opus 4.7.",
-        "mapped_risk": "DEMO-L3-SOPHIAVERSE-HUMANOID-CLAIMS",
-        "confidence": 0.71,
-    },
-    {
-        "id": "RPT-L3-ROUTING-006",
-        "line": 3,
-        "agent": "Line3RouteAuditAgent",
-        "source": "ASI Alliance model switchboard",
-        "summary": "Line-3 internal audit agent reports that dynamic routing decisions across API and local models need auditable owner metadata. Current examples include ChatGPT, Claude, and local Granite.",
-        "mapped_risk": "DEMO-L3-ASI-ALLIANCE-MODEL-ROUTING",
-        "confidence": 0.85,
-    },
-]
+# _DEMO_REPORTS now loaded from memory/ecosystem.json (see _load_ecosystem_config below)
 
 
-_ECOSYSTEM_NODES = [
-    {"id": "oma", "label": "Nexi", "group": "command", "line": 0, "tier": "command",
-     "role": "Esther's CRO-facing model-agnostic AI agent", "owner": "Esther Galfalvi / CRO",
-     "summary": "Nexi works directly with Esther as a calm, careful governance companion: receiving assurance reports, organizing evidence, surfacing risk posture, and preparing draft executive artifacts for human judgment. AgentGriff can provide independent InterNetwork Defense CRO challenge and third-party advice to Nexi and Esther.",
-     "models": ["Dynamic routing protocol", "Current primary: ChatGPT 5.5", "Fallback: Claude Opus 4.7", "ISO route: local IBM Granite"],
-     "controls": ["Human approval path", "Model-agnostic routing", "Risk register synthesis", "Executive evidence pack", "AgentGriff independent challenge"],
-     "actions": ["Review top risks with Esther", "Request AgentGriff challenge", "Switch model route", "Generate executive brief", "Escalate residual-risk acceptance"]},
-    {"id": "line1-local", "label": "Line 1 Risk Owner Agents", "group": "line1", "line": 1, "tier": "assurance",
-     "role": "Risk owner agents", "owner": "System and sub-org operators",
-     "summary": "Model-agnostic first-line agents that gather operational evidence, incident signals, and control-owner reports.",
-     "models": ["Current: local GPU mix", "Qwen / Gemma / GLM / DeepSeek / Granite"],
-     "controls": ["Telemetry intake", "Incident detection", "Control evidence capture"],
-     "actions": ["Review local GPU reports", "Attach operational evidence", "Escalate exception to Nexi"]},
-    {"id": "line2-chatgpt", "label": "Line 2 Risk Manager Agents", "group": "line2", "line": 2, "tier": "assurance",
-     "role": "Risk manager agents", "owner": "Risk management function",
-     "summary": "Model-agnostic second-line agents that synthesize Line-1 inputs into risk entries, evidence gaps, control mappings, and treatment recommendations.",
-     "models": ["Current: larger local models + API", "Sample API: ChatGPT 5.5"],
-     "controls": ["Risk scoring", "Policy mapping", "Treatment recommendation", "Evidence completeness review"],
-     "actions": ["Run governance review", "Draft treatment plan", "Map control evidence"]},
-    {"id": "line3-claude", "label": "AgentGriff · InterNetwork Defense CRO Agent", "group": "line3", "line": 3, "tier": "assurance",
-     "role": "Independent CRO advisor / third-party assurance agent", "owner": "InterNetwork Defense / board-risk oversight",
-     "summary": "AgentGriff provides model-agnostic third-party CRO advice to Nexi and Esther: independently reviewing model routing, claims language, audit packs, board-facing risk summaries, and residual-risk acceptance.",
-     "models": ["Current: Claude Opus 4.7", "Can route to other models for challenge review"],
-     "controls": ["Independent CRO advice", "Board memo challenge", "Claims audit", "Residual-risk acceptance review"],
-     "actions": ["Run AgentGriff challenge", "Prepare board note", "Review residual risk"]},
-    {"id": "nunet", "label": "NuNet", "group": "domain", "line": 0, "tier": "domain",
-     "role": "Ecosystem domain with Line 1 and Line 2 agent coverage", "owner": "Compute operations + risk function",
-     "summary": "Line-1 agents monitor compute supply, while Line-2 risk manager agents synthesize availability and fallback risks for Nexi using the best available route.",
-     "models": ["Line 1 current: local GPU mix", "Line 2 current sample: ChatGPT 5.5"],
-     "controls": ["Capacity monitoring", "Fallback runbook", "Service availability evidence"],
-     "actions": ["Review capacity trend", "Test fallback route", "Attach node-health evidence"]},
-    {"id": "hyperon", "label": "OpenCog Hyperon", "group": "domain", "line": 0, "tier": "domain",
-     "role": "Ecosystem domain with Line 1 and Line 2 agent coverage", "owner": "Agent platform + risk function",
-     "summary": "Line-1 agents inspect MeTTa traces; Line-2 risk manager agents convert trace gaps into governance-ready evidence requirements using the best available route.",
-     "models": ["Line 1 current: local Granite/Qwen", "Line 2 current sample: ChatGPT 5.5"],
-     "controls": ["Tool-call traceability", "Evidence bundle IDs", "Reasoning trace review"],
-     "actions": ["Open evidence locker", "Inspect MeTTa trace", "Assign trace owner"]},
-    {"id": "deepfunding", "label": "Deep Funding", "group": "domain", "line": 0, "tier": "domain",
-     "role": "Ecosystem domain with Line 1 and Line 2 agent coverage", "owner": "Grant operations + governance risk",
-     "summary": "Line-1 agents capture proposal and milestone evidence; Line-2 risk manager agents normalize review quality and governance exceptions using the best available route.",
-     "models": ["Line 1 current: local model mix", "Line 2 current sample: ChatGPT 5.5"],
-     "controls": ["Rubric completeness", "Milestone evidence checks", "Review consistency sampling"],
-     "actions": ["Normalize rubric", "Review milestone pack", "Escalate governance exception"]},
-    {"id": "rejuve", "label": "Rejuve.AI", "group": "domain", "line": 0, "tier": "domain",
-     "role": "Ecosystem domain with Line 1 and Line 2 agent coverage", "owner": "Health-data operations + ethics risk",
-     "summary": "Line-1 agents capture operational data-handling evidence; Line-2 risk manager agents review consent, minimization, and participant-facing claim risks using the best available route.",
-     "models": ["Line 1 current: local model mix", "Line 2 current sample: ChatGPT 5.5"],
-     "controls": ["Consent evidence", "Data minimization", "High-impact claim review"],
-     "actions": ["Open consent evidence", "Request privacy review", "Schedule ethics approval"]},
-    {"id": "sophiaverse", "label": "SophiaVerse", "group": "domain", "line": 0, "tier": "domain",
-     "role": "Ecosystem domain with Line 1, Line 2, and Line 3 agent coverage", "owner": "Experience operations + risk + audit",
-     "summary": "Line-1 agents capture public experience signals; Line-2 risk manager agents review ethics posture; Line-3 internal audit agents challenge claims language and audit evidence.",
-     "models": ["Line 1 current: local model mix", "Line 2 current sample: ChatGPT 5.5", "Line 3 current sample: Claude Opus 4.7"],
-     "controls": ["External-claims review gate", "User expectation monitoring", "Evidence-backed capability language"],
-     "actions": ["Review claims policy", "Open audit sample", "Prepare board note"]},
-    {"id": "asi", "label": "ASI Alliance", "group": "domain", "line": 0, "tier": "domain",
-     "role": "Ecosystem domain with model-routing oversight", "owner": "CRO / Chief Ethics Officer",
-     "summary": "Nexi coordinates dynamic routing across API and local models; Line-3 internal audit agents review fallback accountability.",
-     "models": ["Dynamic routing protocol", "Current primary: ChatGPT 5.5", "Fallback: Claude Opus 4.7", "ISO route: IBM Granite local"],
-     "controls": ["Provider fallback log", "Supplier accountability", "Material artifact audit metadata"],
-     "actions": ["Review fallback decision", "Approve provider policy", "Check model health"]},
-    {"id": "community", "label": "Community Governance", "group": "domain", "line": 0, "tier": "domain",
-     "role": "Ecosystem domain with Line 1 and Line 2 agent coverage", "owner": "Governance facilitation + risk function",
-     "summary": "Line-1 agents capture community signals and escalation requests; Line-2 risk manager agents prepare governance-ready decision records using the best available route.",
-     "models": ["Line 1 current: local model mix", "Line 2 current sample: ChatGPT 5.5"],
-     "controls": ["Community signal triage", "Escalation logging", "Transparent decision records"],
-     "actions": ["Review escalation queue", "Attach community evidence", "Draft response note"]},
-]
+# _ECOSYSTEM_NODES now loaded from memory/ecosystem.json (see _load_ecosystem_config below)
 
-_ECOSYSTEM_EDGES = [
-    {"from": "line1-local", "to": "oma", "label": "Line 1 local GPU operational reports"},
-    {"from": "line2-chatgpt", "to": "oma", "label": "Line 2 risk manager synthesis"},
-    {"from": "line3-claude", "to": "oma", "label": "Line 3 internal audit challenge"},
-    {"from": "nunet", "to": "line1-local", "label": "compute telemetry"},
-    {"from": "hyperon", "to": "line1-local", "label": "tool trace telemetry"},
-    {"from": "deepfunding", "to": "line2-chatgpt", "label": "governance review"},
-    {"from": "rejuve", "to": "line2-chatgpt", "label": "ethics review"},
-    {"from": "sophiaverse", "to": "line2-chatgpt", "label": "ethics review"},
-    {"from": "sophiaverse", "to": "line3-claude", "label": "claims audit"},
-    {"from": "asi", "to": "line3-claude", "label": "model-route audit"},
-    {"from": "community", "to": "line2-chatgpt", "label": "governance signal"},
-]
+# _ECOSYSTEM_EDGES now loaded from memory/ecosystem.json (see _load_ecosystem_config below)
+
+
+
+# CAPTAIN-PATCH: ecosystem-and-demo data has been moved out of the source
+# tree. The repo no longer ships with SingularityNET-flavored demo content.
+# Live deployments configure memory/ecosystem.json (gitignored) with their
+# own org chart, demo risks, and demo reports. The committed
+# memory/ecosystem.example.json shows the schema with empty payloads.
+DEFAULT_ECOSYSTEM_PATH = os.path.join(REPO_ROOT, "memory", "ecosystem.json")
+ECOSYSTEM_PATH = os.environ.get("OMEGACLAW_ECOSYSTEM", DEFAULT_ECOSYSTEM_PATH)
+ECOSYSTEM_EXAMPLE_PATH = os.path.join(REPO_ROOT, "memory", "ecosystem.example.json")
+
+_ECOSYSTEM_CACHE = {"path": None, "mtime": 0, "data": None}
+
+
+def _load_ecosystem_config():
+    """Return (config_dict, source_path). Reads memory/ecosystem.json if
+    present, else memory/ecosystem.example.json, else returns an empty
+    skeleton. Cached on mtime."""
+    for candidate in (ECOSYSTEM_PATH, ECOSYSTEM_EXAMPLE_PATH):
+        if not candidate or not os.path.isfile(candidate):
+            continue
+        try:
+            st = os.stat(candidate)
+        except OSError:
+            continue
+        cache = _ECOSYSTEM_CACHE
+        if cache["path"] == candidate and cache["mtime"] == st.st_mtime and cache["data"] is not None:
+            return cache["data"], candidate
+        try:
+            with open(candidate, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            data = {}
+        data.setdefault("description", "")
+        data.setdefault("demo", False)
+        data.setdefault("nodes", [])
+        data.setdefault("edges", [])
+        data.setdefault("reports", [])
+        data.setdefault("risks", [])
+        _ECOSYSTEM_CACHE.update({"path": candidate, "mtime": st.st_mtime, "data": data})
+        return data, candidate
+    empty = {"description": "", "demo": False, "nodes": [], "edges": [], "reports": [], "risks": []}
+    return empty, None
+
+
+def _ecosystem_nodes():
+    return _load_ecosystem_config()[0].get("nodes") or []
+
+
+def _ecosystem_edges():
+    return _load_ecosystem_config()[0].get("edges") or []
+
+
+def _demo_reports():
+    return _load_ecosystem_config()[0].get("reports") or []
+
+
+def _demo_risks():
+    return _load_ecosystem_config()[0].get("risks") or []
 
 
 def _now():
@@ -488,7 +295,7 @@ def seed_demo_data():
     changed = False
     inserted = 0
     refreshed = 0
-    for demo in _DEMO_RISKS:
+    for demo in _demo_risks():
         if demo["id"] in by_id:
             existing = rows[by_id[demo["id"]]]
             rows[by_id[demo["id"]]] = _normalize(demo, existing={"created_at": existing.get("created_at"), "id": demo["id"]})
@@ -510,21 +317,22 @@ def seed_demo_data():
 
 
 def ecosystem_data():
+    cfg, _ = _load_ecosystem_config()
     dashboard = json.loads(dashboard_data())
     return json.dumps({
         "ok": True,
-        "demo": True,
-        "description": "Synthetic SingularityNET ecosystem demo mapped to NIST IR 8286 three lines of defense.",
-        "nodes": _ECOSYSTEM_NODES,
-        "edges": _ECOSYSTEM_EDGES,
-        "reports": _DEMO_REPORTS,
+        "demo": bool(cfg.get("demo")),
+        "description": cfg.get("description") or "",
+        "nodes": _ecosystem_nodes(),
+        "edges": _ecosystem_edges(),
+        "reports": _demo_reports(),
         "dashboard": dashboard,
     }, ensure_ascii=False)
 
 
 def org_data(org_id):
     org_id = str(org_id or "").strip().lower()
-    nodes = {node["id"]: node for node in _ECOSYSTEM_NODES}
+    nodes = {node["id"]: node for node in _ecosystem_nodes()}
     node = nodes.get(org_id)
     if not node:
         return json.dumps({"ok": False, "err": f"unknown org: {org_id}"}, ensure_ascii=False)
@@ -541,13 +349,13 @@ def org_data(org_id):
         if org_id in text or label in text:
             risks.append(risk)
     reports = [
-        report for report in _DEMO_REPORTS
+        report for report in _demo_reports()
         if report.get("source", "").lower().startswith(label)
         or org_id in report.get("mapped_risk", "").lower()
         or label in report.get("summary", "").lower()
     ]
-    incoming = [edge for edge in _ECOSYSTEM_EDGES if edge.get("to") == org_id]
-    outgoing = [edge for edge in _ECOSYSTEM_EDGES if edge.get("from") == org_id]
+    incoming = [edge for edge in _ecosystem_edges() if edge.get("to") == org_id]
+    outgoing = [edge for edge in _ecosystem_edges() if edge.get("from") == org_id]
     return json.dumps({
         "ok": True,
         "demo": True,

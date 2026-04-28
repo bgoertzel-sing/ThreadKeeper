@@ -1,0 +1,55 @@
+{
+  "description": "",
+  "demo": false,
+  "nodes": [],
+  "edges": [],
+  "reports": [],
+  "risks": [],
+
+  "_schema": {
+    "_doc": "Copy this file to memory/ecosystem.json (gitignored) and fill in your real organization data. Each field below shows the shape of one entry — DELETE the _schema block before saving as ecosystem.json.",
+
+    "_node_shape": {
+      "id": "short-slug",
+      "label": "Display Name",
+      "group": "command | line1 | line2 | line3 | domain",
+      "line": 0,
+      "tier": "command | assurance | domain",
+      "role": "What this node is in the org chart",
+      "owner": "Human or function responsible",
+      "summary": "One-paragraph description of this node's mandate",
+      "models": ["List of model providers / routes this node uses"],
+      "controls": ["List of controls / mechanisms this node operates"],
+      "actions": ["List of actions a Captain might take from this node's panel"]
+    },
+
+    "_edge_shape": {
+      "from": "node-id-source",
+      "to": "node-id-target",
+      "label": "What flows along this edge"
+    },
+
+    "_report_shape": {
+      "id": "RPT-XXX-001",
+      "line": 1,
+      "agent": "AgentClassName",
+      "source": "Originating org / system",
+      "summary": "What the report says",
+      "mapped_risk": "RISK-ID-IF-ANY",
+      "confidence": 0.0
+    },
+
+    "_risk_shape": {
+      "id": "RISK-XXX-001",
+      "title": "Short title",
+      "description": "Plain-language description",
+      "tier": "low | medium | high | critical",
+      "likelihood": 1,
+      "impact": 1,
+      "evidence_sources": [],
+      "decision_owner": "",
+      "treatment": "",
+      "next_review_date": ""
+    }
+  }
+}
