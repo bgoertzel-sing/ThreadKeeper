@@ -23,6 +23,7 @@ BIND_HOST = os.environ.get("LINGXI_BRIDGE_BIND", "0.0.0.0")
 BIND_PORT = int(os.environ.get("LINGXI_BRIDGE_PORT", "18890"))
 SHARED_TOKEN = os.environ.get("LINGXI_BRIDGE_TOKEN", "").strip()
 DEFAULT_AGENT = os.environ.get("LINGXI_BRIDGE_DEFAULT_AGENT", "main")
+DEFAULT_SESSION = os.environ.get("LINGXI_BRIDGE_DEFAULT_SESSION", "lingxi-bridge")
 TIMEOUT_S = int(os.environ.get("LINGXI_BRIDGE_TIMEOUT_S", "300"))
 
 
@@ -66,7 +67,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         agent = (body.get("agent") or DEFAULT_AGENT).strip() or DEFAULT_AGENT
         thinking = (body.get("thinking") or "").strip() or None
 
-        argv = ["openclaw", "agent", "--agent", agent, "--message", message, "--json"]
+        argv = ["openclaw", "agent", "--agent", agent, "--session-id", DEFAULT_SESSION, "--message", message, "--json"]
         if thinking:
             argv += ["--thinking", thinking]
         try:
