@@ -2105,6 +2105,7 @@ def _replay_history(limit_turns):
 
 
 def _no_swipl_fallback_send(text):
+    turn_start = time.time()
     global _FALLBACK_ROUTE
     with _FALLBACK_LOCK:
         route = _FALLBACK_ROUTE
@@ -2255,22 +2256,6 @@ def _no_swipl_fallback_send(text):
                         "name": fn.get("name", "?"),
                         "args": a,
                     })
-            # CAPTAIN-PATCH: always record a per-turn summary so we can audit
-            # confabulation even when zero tools fired (most dangerous case).
-            try:
-                with open(_TOOL_AUDIT_LOG, "a") as f:
-                    f.write(json.dumps({
-                        "ts": time.time(),
-                        "turn_summary": True,
-                        "user_chars": len(text),
-                        "tool_calls_made": len(actual_calls),
-                        "tools_used": [c["name"] for c in actual_calls],
-                        "urls_fetched": [c["args"].get("url") for c in actual_calls if c["name"] == "web_fetch"],
-                        "cap_hit": cap_hit,
-                    }) + "\n")
-            except Exception:
-                pass
-
             if cap_hit:
                 # Tool budget exhausted. Force a final synthesis turn with
                 # tools disabled, so the user gets a coherent summary built
@@ -2313,6 +2298,25 @@ def _no_swipl_fallback_send(text):
             return False, "", f"unsupported fallback provider: {provider_lc}"
     except Exception as e:
         return False, "", f"chat completion failed: {e}"
+    duration_ms = int((time.time() - turn_start) * 1000)
+    try:
+        with open(_TOOL_AUDIT_LOG, "a") as f:
+            f.write(json.dumps({
+                "ts": time.time(),
+                "turn_summary": True,
+                "duration_ms": duration_ms,
+                "user_chars": len(text),
+                "reply_chars": len(reply or ""),
+                "tool_calls_made": len(actual_calls) if 'actual_calls' in locals() else 0,
+                "tools_used": [c["name"] for c in actual_calls] if 'actual_calls' in locals() else [],
+                "urls_fetched": [c["args"].get("url") for c in actual_calls if c["name"] == "web_fetch"] if 'actual_calls' in locals() else [],
+                "cap_hit": cap_hit if 'cap_hit' in locals() else False,
+                "provider": provider_lc,
+                "model": model,
+            }) + "\n")
+    except Exception:
+        pass
+
     if not reply.strip():
         return False, "", "empty reply from provider"
     # Persist to LOG_PATH in the shape the swipl loop would emit, so
@@ -2419,6 +2423,68 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._json({"ok": False, "error": str(e)}, 500)
             return self._json({"ok": True, "entries": entries, "count": len(entries),
                                "audit_log": _TOOL_AUDIT_LOG})
+        if path == "/api-metrics":
+            now = time.time()
+            day_ago = now - 86400
+            tool_calls_24h = 0
+            tools_by_name_24h = {}
+            urls_fetched_24h = 0
+            turn_count_24h = 0
+            total_duration_ms = 0
+            total_reply_chars = 0
+            last_turn = None
+            try:
+                with open(_TOOL_AUDIT_LOG, "r", errors="replace") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            e = json.loads(line)
+                        except Exception:
+                            continue
+                        ts = e.get("ts", 0)
+                        if ts < day_ago:
+                            continue
+                        if e.get("turn_summary"):
+                            turn_count_24h += 1
+                            total_duration_ms += e.get("duration_ms", 0) or 0
+                            total_reply_chars += e.get("reply_chars", 0) or 0
+                            urls_fetched_24h += len(e.get("urls_fetched") or [])
+                            last_turn = e
+                        else:
+                            tool_calls_24h += 1
+                            n = e.get("tool", "?")
+                            tools_by_name_24h[n] = tools_by_name_24h.get(n, 0) + 1
+            except FileNotFoundError:
+                pass
+            avg_duration_ms = (total_duration_ms / turn_count_24h) if turn_count_24h else 0
+            avg_reply_chars = (total_reply_chars / turn_count_24h) if turn_count_24h else 0
+            active = active_provider_model()
+            key_fp = ""
+            for var, prov in (("DEEPSEEK_API_KEY", "DeepSeek"),
+                              ("OPENAI_API_KEY", "OpenAI"),
+                              ("ANTHROPIC_API_KEY", "Anthropic")):
+                if active.get("provider") == prov:
+                    k = os.environ.get(var, "")
+                    if k:
+                        key_fp = f"{k[:6]}...{k[-4:]}"
+                    break
+            return self._json({
+                "ok": True,
+                "active_route": active.get("route"),
+                "provider": active.get("provider"),
+                "model": active.get("model"),
+                "key_fingerprint": key_fp,
+                "tool_calls_24h": tool_calls_24h,
+                "tools_by_name_24h": tools_by_name_24h,
+                "turns_24h": turn_count_24h,
+                "urls_fetched_24h": urls_fetched_24h,
+                "avg_duration_ms": int(avg_duration_ms),
+                "avg_reply_chars": int(avg_reply_chars),
+                "last_turn": last_turn,
+                "audit_log": _TOOL_AUDIT_LOG,
+            })
         if path == "/notebook":
             try:
                 with open(_XUAN_NOTEBOOK_PATH, "r", errors="replace") as f:
@@ -2712,6 +2778,20 @@ INDEX_HTML = """<!DOCTYPE html>
   .local-runtime-header .local-runtime-note { text-transform: none;
           letter-spacing: 0; color: var(--dim); font-size: 11px;
           font-style: italic; opacity: 0.8; margin-left: 6px; }
+  /* CAPTAIN-PATCH: collapsible local-runtime drawer + API-mode tiles */
+  .api-grid { padding: 12px 16px 4px; }
+  .local-runtime-details { padding: 0 16px 8px; flex-shrink: 0; }
+  .local-runtime-details summary { cursor: pointer; padding: 8px 0;
+          font-size: 11px; color: var(--dim); text-transform: uppercase;
+          letter-spacing: 0.6px; list-style: none; user-select: none; }
+  .local-runtime-details summary::-webkit-details-marker { display: none; }
+  .local-runtime-details summary::before { content: "▸ "; color: var(--snet-teal);
+          display: inline-block; transition: transform 0.15s; }
+  .local-runtime-details[open] summary::before { content: "▾ "; }
+  .local-runtime-details .grid { padding: 4px 0 8px; }
+  .local-runtime-details summary .local-runtime-note { text-transform: none;
+          letter-spacing: 0; color: var(--dim); font-size: 11px;
+          font-style: italic; opacity: 0.8; margin-left: 6px; }
   .grid { display:grid; grid-template-columns: repeat(6, 1fr); gap:8px;
           padding: 4px 16px 12px; flex-shrink: 0; }
   .grid.local-runtime-inactive .tile { opacity: 0.55; }
@@ -2841,20 +2921,34 @@ INDEX_HTML = """<!DOCTYPE html>
         </div>
       </div>
 
-      <div class="local-runtime-header" id="local_runtime_header">
-        Local runtime · Ollama / swipl
-        <span class="local-runtime-note" id="local_runtime_note">
-          — values populate when a local LLM (Granite, Qwen, etc.) is the active route. Currently using a remote API; switch to a local model for hot-path independence and DR.
-        </span>
+      <!-- CAPTAIN-PATCH: API-mode metrics row, always visible. Populated
+           from /api-metrics. -->
+      <div class="grid api-grid" id="api_grid">
+        <div class="tile"><div class="label">Provider · Model</div><div class="value" id="api_provider">…</div></div>
+        <div class="tile"><div class="label">Key fingerprint</div><div class="value" id="api_keyfp">…</div></div>
+        <div class="tile"><div class="label">Turns · 24h</div><div class="value" id="api_turns">…</div></div>
+        <div class="tile"><div class="label">Tool calls · 24h</div><div class="value" id="api_tools">…</div></div>
+        <div class="tile"><div class="label">Avg latency</div><div class="value" id="api_latency">…</div></div>
+        <div class="tile"><div class="label">URLs fetched · 24h</div><div class="value" id="api_urls">…</div></div>
       </div>
-      <div class="grid">
-        <div class="tile"><div class="label">Channel</div><div class="value" id="channel">…</div></div>
-        <div class="tile"><div class="label">Status</div><div class="value" id="status">…</div></div>
-        <div class="tile"><div class="label">Iter / min</div><div class="value" id="iter_rate">…</div></div>
-        <div class="tile"><div class="label">Sends</div><div class="value" id="sends">…</div></div>
-        <div class="tile"><div class="label">RSS</div><div class="value" id="rss">…</div></div>
-        <div class="tile"><div class="label">VRAM (local)</div><div class="value" id="vram">…</div></div>
-      </div>
+
+      <!-- CAPTAIN-PATCH: local-runtime tiles wrapped in collapsible details -->
+      <details class="local-runtime-details" id="local_runtime_details">
+        <summary class="local-runtime-summary">
+          <span>Local runtime · Ollama / swipl</span>
+          <span class="local-runtime-note" id="local_runtime_note">
+            — values populate when a local LLM is the active route.
+          </span>
+        </summary>
+        <div class="grid">
+          <div class="tile"><div class="label">Channel</div><div class="value" id="channel">…</div></div>
+          <div class="tile"><div class="label">Status</div><div class="value" id="status">…</div></div>
+          <div class="tile"><div class="label">Iter / min</div><div class="value" id="iter_rate">…</div></div>
+          <div class="tile"><div class="label">Sends</div><div class="value" id="sends">…</div></div>
+          <div class="tile"><div class="label">RSS</div><div class="value" id="rss">…</div></div>
+          <div class="tile"><div class="label">VRAM (local)</div><div class="value" id="vram">…</div></div>
+        </div>
+      </details>
 
       <div class="messages" id="messages"></div>
       <div class="scroll-hint" id="scrollhint">↓ new messages</div>
@@ -3881,9 +3975,50 @@ async function loadSettings() {
   }
 }
 
-fetchStats(); fetchMessages();
+// CAPTAIN-PATCH: API-mode metrics polling + collapsible local-runtime drawer.
+async function fetchApiMetrics() {
+  try {
+    const r = await fetch('/api-metrics');
+    const d = await r.json();
+    if (!d.ok) return;
+    $('api_provider').textContent = d.provider && d.model
+      ? `${d.provider} · ${d.model}`
+      : (d.active_route || '—');
+    $('api_keyfp').textContent = d.key_fingerprint || '—';
+    $('api_turns').textContent = d.turns_24h || 0;
+    $('api_tools').textContent = d.tool_calls_24h || 0;
+    $('api_latency').textContent = d.avg_duration_ms
+      ? (d.avg_duration_ms < 1000 ? `${d.avg_duration_ms} ms` : `${(d.avg_duration_ms/1000).toFixed(1)} s`)
+      : '—';
+    $('api_urls').textContent = d.urls_fetched_24h || 0;
+  } catch (e) { /* swallow — webui staying up is the priority */ }
+}
+
+// Persist <details> open/closed across reloads. Default collapsed
+// when no swipl runtime (i.e., remote API mode) so the panel doesn't
+// eat dashboard space; default open when local runtime is up.
+(function setupLocalRuntimeDrawer() {
+  const det = document.getElementById('local_runtime_details');
+  if (!det) return;
+  const KEY = 'oma.localRuntimeOpen';
+  const stored = localStorage.getItem(KEY);
+  if (stored === '1') det.open = true;
+  else if (stored === '0') det.open = false;
+  else {
+    // No stored preference yet — wait for first /stats to decide.
+    fetch('/stats').then(r => r.json()).then(d => {
+      det.open = !!d.running;  // open if a local swipl is running
+    }).catch(() => {});
+  }
+  det.addEventListener('toggle', () => {
+    localStorage.setItem(KEY, det.open ? '1' : '0');
+  });
+})();
+
+fetchStats(); fetchMessages(); fetchApiMetrics();
 setInterval(fetchStats, 2000);
 setInterval(fetchMessages, 1500);
+setInterval(fetchApiMetrics, 5000);
 </script>
 </body></html>
 """
