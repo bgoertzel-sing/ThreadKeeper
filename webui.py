@@ -1731,7 +1731,6 @@ def settings_view():
         ("repo", repo),
         ("history.metta", os.path.join(repo, "memory", "history.metta")),
         ("prompt.txt", os.path.join(repo, "memory", "prompt.txt")),
-        ("prompt-esther.txt", os.path.join(repo, "memory", "prompt-esther.txt")),
         ("risks.jsonl", risk_register.RISK_PATH),
         ("models.yaml", os.path.join(repo, "models.yaml")),
         ("chroma_db", "/home/omaclaw/PeTTa/chroma_db"),
@@ -2622,13 +2621,13 @@ INDEX_HTML = """<!DOCTYPE html>
   .command-row { border:1px solid rgba(22,212,212,0.45); border-radius:6px;
                  background: linear-gradient(135deg, rgba(22,212,212,0.11), rgba(217,70,239,0.07));
                  padding:10px; }
-  .nexi-head { display:flex; align-items:center; gap:10px; margin-bottom:8px; }
-  .nexi-mark { width:32px; height:32px; border-radius:50%;
+  .cmd-head { display:flex; align-items:center; gap:10px; margin-bottom:8px; }
+  .cmd-mark { width:32px; height:32px; border-radius:50%;
                background: radial-gradient(circle at 35% 30%, #fff, var(--snet-teal) 38%, var(--snet-magenta));
                box-shadow: 0 0 18px rgba(22,212,212,0.22); flex-shrink:0; }
-  .nexi-kicker { color:var(--dim); font-size:10px; text-transform:uppercase; letter-spacing:.5px; }
-  .nexi-title { color:var(--fg); font-size:15px; font-weight:700; }
-  .nexi-copy { color:var(--fg); font-size:12px; line-height:1.45; margin:6px 0 10px; max-width: 900px; }
+  .cmd-kicker { color:var(--dim); font-size:10px; text-transform:uppercase; letter-spacing:.5px; }
+  .cmd-title { color:var(--fg); font-size:15px; font-weight:700; }
+  .cmd-copy { color:var(--fg); font-size:12px; line-height:1.45; margin:6px 0 10px; max-width: 900px; }
   .defense-row { border:1px solid rgba(48,54,61,0.85); border-radius:6px;
                  background: rgba(13,17,23,0.72); padding:10px; }
   .defense-head { display:flex; align-items:baseline; justify-content:space-between;
@@ -3487,11 +3486,11 @@ async function loadEcosystem() {
     let html = '<div class="org-chart" role="img" aria-label="Oma above NIST IR 8286 assurance lines org chart">';
     if (command) {
       html += `<div class="command-row">
-        <div class="nexi-head">
-          <div class="nexi-mark"></div>
+        <div class="cmd-head">
+          <div class="cmd-mark"></div>
           <div>
-            <div class="nexi-kicker">CRO command node · coordinates the three lines</div>
-            <div class="nexi-title">${escapeHtml(command.label || 'CRO node')} coordinates across all three assurance lines</div>
+            <div class="cmd-kicker">CRO command node · coordinates the three lines</div>
+            <div class="cmd-title">${escapeHtml(command.label || 'CRO node')} coordinates across all three assurance lines</div>
           </div>
         </div>
         <div class="defense-head">
@@ -3898,8 +3897,14 @@ class _ReusableServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 def main():
     # Background tps prober — non-blocking, refreshes every ~30s
     threading.Thread(target=_tps_refresh_worker, daemon=True).start()
-    with _ReusableServer(("127.0.0.1", PORT), Handler) as httpd:
-        print(f"Oma webui on http://127.0.0.1:{PORT}")
+    # CAPTAIN-PATCH: bind host is configurable. Default 127.0.0.1 keeps
+    # the upstream "local-only by design" posture. Set OMA_WEBUI_HOST=0.0.0.0
+    # in .env.local to expose on the LAN (no auth — only do this on a
+    # trusted single-user VM lab subnet).
+    bind_host = os.environ.get("OMA_WEBUI_HOST", "127.0.0.1")
+    with _ReusableServer((bind_host, PORT), Handler) as httpd:
+        scheme_host = "127.0.0.1" if bind_host in ("127.0.0.1", "localhost") else bind_host
+        print(f"Oma webui on http://{scheme_host}:{PORT} (bound {bind_host})")
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:
