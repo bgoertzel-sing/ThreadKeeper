@@ -2466,6 +2466,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             tok_cache_r = 0
             tok_cache_w = 0
             last_turn = None
+            # CAPTAIN-PATCH: 24-bucket activity histogram for the dashboard
+            # sparkline. Each bucket = one hour, ending at "now".
+            # buckets[0] = hour 23h-24h ago … buckets[23] = last hour.
+            turns_by_hour = [0] * 24
             try:
                 with open(_TOOL_AUDIT_LOG, "r", errors="replace") as f:
                     for line in f:
@@ -2489,6 +2493,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             tok_cache_r += e.get("tokens_cache_read", 0) or 0
                             tok_cache_w += e.get("tokens_cache_write", 0) or 0
                             last_turn = e
+                            hours_ago = (now - ts) / 3600.0
+                            bucket_idx = 23 - int(hours_ago)
+                            if 0 <= bucket_idx < 24:
+                                turns_by_hour[bucket_idx] += 1
                         else:
                             tool_calls_24h += 1
                             n = e.get("tool", "?")
@@ -2529,6 +2537,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # configured.
             served = ""
             served_role = ""
+            cost_alert_threshold = None
             try:
                 cfg, _ = risk_register._load_ecosystem_config()
                 served_val = cfg.get("served")
@@ -2537,6 +2546,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     served_role = served_val.get("role", "") or ""
                 elif isinstance(served_val, str):
                     served = served_val
+                # Alerts: threshold for the 24h cost tile.
+                alerts = cfg.get("alerts") or {}
+                if isinstance(alerts, dict):
+                    cost_alert_threshold = alerts.get("cost_24h_max_usd")
             except Exception as e:
                 pass
             return self._json({
@@ -2558,6 +2571,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "tokens_cache_read_24h": tok_cache_r,
                 "tokens_cache_write_24h": tok_cache_w,
                 "cost_usd_24h": round(cost_usd, 6),
+                "cost_alert_threshold": cost_alert_threshold,
+                "cost_alert_tripped": (cost_alert_threshold is not None
+                                       and cost_usd > float(cost_alert_threshold)),
+                "turns_by_hour": turns_by_hour,
                 "last_turn": last_turn,
                 "audit_log": _TOOL_AUDIT_LOG,
             })
@@ -2863,6 +2880,19 @@ INDEX_HTML = """<!DOCTYPE html>
           font-size: 13px; }
   .served-by .served-by-role { color: var(--dim); font-style: italic;
           font-size: 11px; margin-left: 8px; }
+  /* CAPTAIN-PATCH: cost-alert tile (turns red when over threshold) */
+  .tile.alert { border-color: var(--warn); background: rgba(255,123,114,0.08); }
+  .tile.alert .label { color: var(--warn); }
+  .tile.alert .value { color: var(--warn); }
+  /* 24h activity sparkline */
+  .sparkline-row { display: flex; align-items: center; padding: 0 16px 8px;
+          font-size: 10px; color: var(--dim); letter-spacing: 0.4px;
+          text-transform: uppercase; gap: 10px; }
+  .sparkline-row .sparkline-label { white-space: nowrap; }
+  .sparkline-row .sparkline-now { color: var(--snet-teal); white-space: nowrap; }
+  .sparkline { width: 240px; height: 28px; flex: 0 0 240px; }
+  .sparkline rect { fill: var(--snet-teal); opacity: 0.85; }
+  .sparkline rect.zero { fill: var(--dim); opacity: 0.18; }
   .tool-breakdown { padding: 0 16px 8px; font-size: 11px; color: var(--dim);
           font-family: ui-monospace, SFMono-Regular, monospace; }
   .tool-breakdown .tb-label { text-transform: uppercase; letter-spacing: 0.5px;
@@ -3031,6 +3061,12 @@ INDEX_HTML = """<!DOCTYPE html>
         <div class="tile"><div class="label">Tool calls · 24h</div><div class="value" id="api_tools">…</div></div>
         <div class="tile"><div class="label">Avg latency</div><div class="value" id="api_latency">…</div></div>
         <div class="tile"><div class="label">Cost · 24h</div><div class="value" id="api_cost">…</div></div>
+      </div>
+      <!-- CAPTAIN-PATCH: 24h activity sparkline (turns per hour) -->
+      <div class="sparkline-row" id="sparkline_row" style="display:none;">
+        <span class="sparkline-label">activity · 24h (turns / hour)</span>
+        <svg class="sparkline" id="sparkline" viewBox="0 0 240 28" preserveAspectRatio="none"></svg>
+        <span class="sparkline-now">now →</span>
       </div>
       <!-- Tool-by-name breakdown · 24h. Reads tools_by_name_24h. -->
       <div class="tool-breakdown" id="tool_breakdown" style="display:none;"></div>
@@ -3255,7 +3291,17 @@ INDEX_HTML = """<!DOCTYPE html>
           </p>
           <div class="pager">
             <button id="audit_refresh">refresh</button>
-            <span id="audit_meta" style="color:var(--dim);">—</span>
+            <label style="color:var(--dim); font-size:11px; margin-left:12px;">
+              filter
+              <select id="audit_filter" style="margin-left:6px; padding:3px 6px;
+                      background:var(--bg); color:var(--fg); border:1px solid var(--border); border-radius:3px;">
+                <option value="all">all entries</option>
+                <option value="turns">turn summaries only</option>
+                <option value="tools">tool calls only</option>
+                <option value="errors">errors only</option>
+              </select>
+            </label>
+            <span id="audit_meta" style="color:var(--dim); margin-left:12px;">—</span>
           </div>
           <div id="audit_list" style="font-family: ui-monospace, monospace;
                font-size: 12px; line-height: 1.5; margin-top: 12px;"></div>
@@ -3549,14 +3595,39 @@ function showPage(name) {
 async function loadAudit() {
   const list = document.getElementById('audit_list');
   const meta = document.getElementById('audit_meta');
+  const filterEl = document.getElementById('audit_filter');
+  const filterVal = filterEl ? filterEl.value : 'all';
   list.textContent = 'loading…';
   try {
-    const r = await fetch('/audit?limit=80');
+    const r = await fetch('/audit?limit=200');
     const d = await r.json();
     if (!d.ok) { list.textContent = 'error: ' + (d.error || 'unknown'); return; }
     if (!d.entries.length) { list.textContent = '(no tool calls recorded yet)'; return; }
-    meta.textContent = `${d.count} entries · ${d.audit_log}`;
-    const rows = d.entries.slice().reverse().map(e => {
+    // Build the dynamic per-tool filter options if not yet present.
+    if (filterEl && !filterEl.dataset.populated) {
+      const toolNames = Array.from(new Set(d.entries
+        .filter(e => !e.turn_summary && e.tool)
+        .map(e => e.tool))).sort();
+      toolNames.forEach(n => {
+        const opt = document.createElement('option');
+        opt.value = `tool:${n}`;
+        opt.textContent = `tool: ${n}`;
+        filterEl.appendChild(opt);
+      });
+      filterEl.dataset.populated = '1';
+    }
+    // Apply the active filter.
+    let filtered = d.entries;
+    if (filterVal === 'turns') filtered = filtered.filter(e => e.turn_summary);
+    else if (filterVal === 'tools') filtered = filtered.filter(e => !e.turn_summary);
+    else if (filterVal === 'errors') filtered = filtered.filter(e => e.ok === false);
+    else if (filterVal && filterVal.startsWith('tool:')) {
+      const t = filterVal.slice(5);
+      filtered = filtered.filter(e => !e.turn_summary && e.tool === t);
+    }
+    meta.textContent = `${filtered.length} of ${d.count} entries · ${d.audit_log}`;
+    if (!filtered.length) { list.innerHTML = '<div style="color:var(--dim); padding:8px 0;">(no entries match this filter)</div>'; return; }
+    const rows = filtered.slice().reverse().map(e => {
       const ts = e.ts ? new Date(e.ts * 1000).toLocaleString() : '?';
       if (e.turn_summary) {
         const tools = (e.tools_used || []).join(', ') || '(none)';
@@ -3595,6 +3666,7 @@ async function loadAudit() {
   }
 }
 document.getElementById('audit_refresh')?.addEventListener('click', loadAudit);
+document.getElementById('audit_filter')?.addEventListener('change', loadAudit);
 
 // ============ Notebook page ============
 async function loadNotebook() {
@@ -4095,9 +4167,36 @@ async function fetchApiMetrics() {
       : '—';
     // Cost — show $0.000000 precision when sub-cent, else $0.0000.
     const c = d.cost_usd_24h || 0;
-    $('api_cost').textContent = c > 0
+    const costEl = $('api_cost');
+    costEl.textContent = c > 0
       ? (c < 0.01 ? `$${c.toFixed(6)}` : `$${c.toFixed(4)}`)
       : '—';
+    // Alert tile when 24h cost exceeds the configured threshold.
+    const costTile = costEl.closest('.tile');
+    if (costTile) costTile.classList.toggle('alert', !!d.cost_alert_tripped);
+
+    // 24h activity sparkline — render 24 bars from turns_by_hour
+    const sparkRow = document.getElementById('sparkline_row');
+    const spark = document.getElementById('sparkline');
+    const buckets = Array.isArray(d.turns_by_hour) ? d.turns_by_hour : [];
+    if (buckets.length && buckets.some(v => v > 0)) {
+      sparkRow.style.display = '';
+      const maxV = Math.max.apply(null, buckets);
+      const W = 240, H = 28, gap = 1;
+      const barW = (W - gap * (buckets.length - 1)) / buckets.length;
+      let svg = '';
+      buckets.forEach((v, i) => {
+        const h = maxV > 0 ? Math.max(1, Math.round((v / maxV) * (H - 2))) : 1;
+        const x = i * (barW + gap);
+        const y = H - h;
+        const cls = v > 0 ? '' : 'zero';
+        const title = `${24 - i}h ago · ${v} turn${v === 1 ? '' : 's'}`;
+        svg += `<rect class="${cls}" x="${x.toFixed(2)}" y="${y}" width="${barW.toFixed(2)}" height="${h}"><title>${title}</title></rect>`;
+      });
+      spark.innerHTML = svg;
+    } else {
+      sparkRow.style.display = 'none';
+    }
 
     // Served-by header
     const sbRow = document.getElementById('served_by_row');

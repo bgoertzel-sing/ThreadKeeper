@@ -5,6 +5,9 @@
     "name": "",
     "role": ""
   },
+  "alerts": {
+    "cost_24h_max_usd": null
+  },
   "nodes": [],
   "edges": [],
   "reports": [],
@@ -15,6 +18,10 @@
       "_doc": "Top-level field describing who/what this deployment serves. Surfaced as a 'Serves <name> · <role>' kicker on the dashboard. Both fields optional; the kicker is hidden when name is empty.",
       "name": "Person or archetype this Oma serves (e.g., 'Larry Greenblatt', 'Max Quasar', 'Ishtar')",
       "role": "Their role/title (e.g., 'Head of InterNetwork Defense', 'Chaos agent operator')"
+    },
+    "_alerts_shape": {
+      "_doc": "Optional thresholds that trigger visual alerts on the dashboard. Set cost_24h_max_usd to a USD float (e.g., 1.0 for $1/day) to make the Cost · 24h tile turn red when 24h fallback-mode spend exceeds it. Leave null/absent to disable.",
+      "cost_24h_max_usd": "float | null"
     },
     "_doc": "Copy this file to memory/ecosystem.json (gitignored) and fill in your real organization data. Each field below shows the shape of one entry — DELETE the _schema block before saving as ecosystem.json.",
 
