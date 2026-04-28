@@ -17,9 +17,11 @@ _auth_secret = ""
 _authenticated_user_id = None
 
 # ---- Mattermost config (dummy token ok) ----
-MM_URL = "https://chat.singularitynet.io"
-CHANNEL_ID = "8fjrmabjx7gupy7e5kjznpt5qh" #NOT AN ID JUST NAME: "omegaclaw"x
-BOT_TOKEN = ""
+# CAPTAIN-PATCH: defaults are placeholders. Override per deployment via
+# environment variables.
+MM_URL = os.environ.get("MM_URL", "")
+CHANNEL_ID = os.environ.get("MM_CHANNEL_ID", "")
+BOT_TOKEN = os.environ.get("MM_BOT_TOKEN", "")
 
 def _get_bot_user_id():
     global headers

@@ -432,10 +432,13 @@ def context_snapshot():
         for r in top
     ]
     anchors = _recent_history_anchors()
-    parts = [
-        "Identity: Ellie is Captain Larry's active local Oma agent and Chief Ethics Officer for InterNetwork Defense; Agent_Griff is Larry's OpenClaw assistant and CRO/security copilot.",
-        "Deployment distinction: Esther Galfalvi is the CRO at SingularityNET, and Nexi is her planned Oma agent; do not confuse Nexi with Ellie.",
-        "Mission: support AI ethics, risk, and compliance workflows for InterNetwork Defense and SingularityNET-related planning; assist review and evidence collection; never claim certification or replace human approval.",
+    # CAPTAIN-PATCH: deployment-specific identity / mission strings are now
+    # loaded from the ecosystem config rather than hardcoded into source.
+    cfg, _src = _load_ecosystem_config()
+    cfg_context = cfg.get("context_snapshot") or []
+    if isinstance(cfg_context, str):
+        cfg_context = [cfg_context]
+    parts = list(cfg_context) + [
         "Voice rule: do not volunteer disclaimers about feelings, consciousness, inner experience, or pretending; keep the focus on ethics, evidence, accountability, and the work.",
         "Primary framework: NIST AI RMF 1.0 (NIST AI 100-1) with Govern, Map, Measure, Manage as the default AI risk review structure.",
         "RMF lenses: valid/reliable, safe, secure/resilient, accountable/transparent, explainable/interpretable, privacy-enhanced, and harmful-bias-managed.",
