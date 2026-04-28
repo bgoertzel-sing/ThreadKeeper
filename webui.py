@@ -2557,8 +2557,7 @@ INDEX_HTML = """<!DOCTYPE html>
     --bg: #0d1117; --fg: #c9d1d9; --dim: #6e7681; --accent: #79c0ff;
     --you: #7ee787; --oma: #ffa657; --warn: #ff7b72; --card: #161b22;
     --border: #30363d;
-    /* SingularityNET-inspired accents — deep teal + magenta, the colors
-       most associated with their decentralized-AGI brand presentations */
+    /* Accent palette — deep teal + magenta. */
     --snet-teal: #16d4d4; --snet-magenta: #d946ef; --snet-deep: #1a0b2e;
   }
   *,*:before,*:after { box-sizing: border-box; }
@@ -2784,9 +2783,8 @@ INDEX_HTML = """<!DOCTYPE html>
 </head><body>
 <header>
   <div class="brand">
-    <!-- A small SVG nod: three interconnected nodes evoking decentralized AGI,
-         the SingularityNET / OpenCog Hyperon visual concept of
-         distributed-intelligence-as-network. Teal + magenta gradient. -->
+    <!-- Three interconnected nodes — distributed intelligence as network.
+         Teal + magenta gradient. -->
     <svg class="brand-svg" viewBox="0 0 60 60" xmlns="http://www.w3.org/2000/svg">
       <defs>
         <linearGradient id="g1" x1="0" y1="0" x2="1" y2="1">
@@ -2888,16 +2886,19 @@ INDEX_HTML = """<!DOCTYPE html>
       <div class="page-content">
         <div class="section">
           <h2>Chief Risk Officer Dashboard</h2>
+          <div style="color:var(--dim); font-size:12px; margin: 4px 0 10px;">
+            Three Lines of Defense view (NIST IR 8286 / IIA): <strong>Line 1 Risk Owners</strong> capture and manage risk in operations; <strong>Line 2 Risk Managers</strong> set policy and synthesize signals; <strong>Line 3 Independent Audit</strong> challenges evidence and residual-risk decisions. Each agent or org node can be tagged to a line.
+          </div>
           <div class="pager">
             <button id="seed_demo">Seed sample dashboard</button>
-            <span>Configure your org chart in <code>memory/ecosystem.json</code>; nodes / edges / reports are loaded from that file. Empty by default.</span>
+            <span>Org chart, agents, edges, and reports are loaded from <code>memory/ecosystem.json</code> (empty by default; per-deployment).</span>
           </div>
           <div class="viz-wrap">
             <div class="network-panel" id="network_panel">loading…</div>
             <div>
-              <div class="line-band l1"><strong>Line 1</strong><br><span style="color:var(--dim)">Operational owners: NuNet and Hyperon agents report local control and system telemetry.</span></div>
-              <div class="line-band l2"><strong>Line 2</strong><br><span style="color:var(--dim)">Risk function: Oma synthesizes governance, ethics, model, and evidence signals.</span></div>
-              <div class="line-band l3"><strong>Line 3</strong><br><span style="color:var(--dim)">Oversight: AgentGriff provides independent InterNetwork Defense CRO challenge, claims review, fallback accountability, and board-facing evidence review.</span></div>
+              <div class="line-band l1"><strong>Line 1 · Risk Owners</strong><br><span style="color:var(--dim)">Operational management. Owns and manages risk in day-to-day activity; captures evidence, raises incidents, runs first-line controls.</span></div>
+              <div class="line-band l2"><strong>Line 2 · Risk Managers</strong><br><span style="color:var(--dim)">Risk and compliance function. Sets policy, monitors Line 1, synthesizes signals into governance-ready risk and treatment recommendations.</span></div>
+              <div class="line-band l3"><strong>Line 3 · Independent Audit</strong><br><span style="color:var(--dim)">Independent assurance. Challenges Line 1 and Line 2 evidence, claims, and residual-risk decisions; reports to the governing body.</span></div>
               <div class="section" style="margin:10px 0 0;padding:10px 12px">
                 <h2>Incoming agent reports</h2>
                 <div id="report_feed">loading…</div>
@@ -3011,7 +3012,7 @@ INDEX_HTML = """<!DOCTYPE html>
               <input type="text" id="report_audience" value="CRO / Chief Ethics Officer / board-risk committee">
             </label>
             <label>Owner
-              <input type="text" id="report_owner" value="Esther Galfalvi">
+              <input type="text" id="report_owner" value="">
             </label>
             <label>Period
               <input type="text" id="report_period" value="Current review cycle">
@@ -3113,8 +3114,7 @@ INDEX_HTML = """<!DOCTYPE html>
 </div>
 
 <footer>
-  <span>OmegaClaw-Core · forked from <a href="https://github.com/patham9/mettaclaw" target="_blank">patham9/mettaclaw</a></span>
-  <span>Built for <a href="https://singularitynet.io" target="_blank">SingularityNET</a> · <a href="https://github.com/asi-alliance/OmegaClaw-Core" target="_blank">asi-alliance/OmegaClaw-Core</a></span>
+  <span>WebUI for <a href="https://github.com/asi-alliance/OmegaClaw-Core" target="_blank">SingularityNET's OmegaClaw "Oma"</a></span>
 </footer>
 
 <script>
@@ -3466,9 +3466,9 @@ async function loadEcosystem() {
       }
     }
     const lineMeta = {
-      1: ['Line 1 · Risk Owner Agents', 'Model agnostic · current config: local GPU mix'],
-      2: ['Line 2 · Risk Manager Agents', 'Model agnostic · current config: larger local models + API; sample route ChatGPT 5.5'],
-      3: ['Line 3 · AgentGriff CRO Challenge', 'Model agnostic · current config: Claude Opus 4.7'],
+      1: ['Line 1 · Risk Owners', 'Operational management — owns and manages risk in day-to-day activity'],
+      2: ['Line 2 · Risk Managers', 'Risk and compliance function — sets policy, monitors Line 1, synthesizes signals'],
+      3: ['Line 3 · Independent Audit', 'Independent assurance — challenges evidence, claims, and residual-risk decisions'],
     };
     const renderCard = n => `
       <div class="org-card ${escapeHtml(n.tier || '')} line${n.line || 0}${n.id === 'oma' ? ' primary' : ''}" data-org="${escapeHtml(n.id)}">
@@ -3490,23 +3490,23 @@ async function loadEcosystem() {
         <div class="nexi-head">
           <div class="nexi-mark"></div>
           <div>
-            <div class="nexi-kicker">Esther Galfalvi's AI governance companion</div>
-            <div class="nexi-title">Nexi supports Esther across all three assurance lines</div>
+            <div class="nexi-kicker">CRO command node · coordinates the three lines</div>
+            <div class="nexi-title">${escapeHtml(command.label || 'CRO node')} coordinates across all three assurance lines</div>
           </div>
         </div>
         <div class="defense-head">
-          <div class="defense-title">Top layer · Nexi reporting to Esther</div>
-          <div class="defense-note">Dynamic model routing · current examples: ChatGPT 5.5 primary, Claude Opus 4.7 fallback, local IBM Granite for ISO/IEC 42001 support</div>
+          <div class="defense-title">Top layer · CRO / Governing body</div>
+          <div class="defense-note">Sets risk appetite, accepts residual risk, reports to the board</div>
         </div>
         <div class="defense-cards">${renderCard(command)}</div>
       </div>
-      <div class="flow-strip"><span>Nexi gathers assurance signals; AgentGriff can challenge evidence and provide third-party CRO advice</span></div>`;
+      <div class="flow-strip"><span>Three Lines of Defense — Line 1 owns risk, Line 2 manages it, Line 3 independently audits</span></div>`;
     }
-    html += '<div class="defense-row assurance"><div class="defense-head"><div class="defense-title">Assurance agent layers</div><div class="defense-note">NIST IR 8286 lines reporting upward into Nexi, with AgentGriff available for independent challenge</div></div><div class="defense-cards">';
+    html += '<div class="defense-row assurance"><div class="defense-head"><div class="defense-title">Assurance agent layers</div><div class="defense-note">Three Lines Model (NIST IR 8286 / IIA): Risk Owners → Risk Managers → Independent Audit</div></div><div class="defense-cards">';
     for (const line of [1, 2, 3]) {
       html += assurance.filter(n => n.line === line).map(renderCard).join('');
     }
-    html += '</div></div><div class="flow-strip"><span>sub-org Line 1 and Line 2 agents feed the assurance layers</span></div>';
+    html += '</div></div><div class="flow-strip"><span>Domain-level Line 1 and Line 2 agents feed the assurance layers above</span></div>';
     for (const line of [1, 2, 3]) {
       const [title, note] = lineMeta[line];
       html += `<div class="defense-row line${line}">
