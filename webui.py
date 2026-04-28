@@ -2120,6 +2120,44 @@ class Handler(http.server.BaseHTTPRequestHandler):
             })
         if path == "/messages":
             return self._json({"messages": recent_messages()})
+        # CAPTAIN-PATCH: audit log (tool calls) and notebook viewers.
+        if path == "/audit":
+            qs_audit = dict(p.split("=", 1) for p in (urlparse(self.path).query or "").split("&") if "=" in p)
+            try:
+                limit = int(qs_audit.get("limit", "40"))
+            except Exception:
+                limit = 40
+            limit = max(1, min(limit, 500))
+            entries = []
+            try:
+                with open(_TOOL_AUDIT_LOG, "r", errors="replace") as f:
+                    lines = f.readlines()
+                for line in lines[-limit:]:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entries.append(json.loads(line))
+                    except Exception:
+                        entries.append({"raw": line})
+            except FileNotFoundError:
+                pass
+            except Exception as e:
+                return self._json({"ok": False, "error": str(e)}, 500)
+            return self._json({"ok": True, "entries": entries, "count": len(entries),
+                               "audit_log": _TOOL_AUDIT_LOG})
+        if path == "/notebook":
+            try:
+                with open(_XUAN_NOTEBOOK_PATH, "r", errors="replace") as f:
+                    content = f.read()
+                size = os.path.getsize(_XUAN_NOTEBOOK_PATH)
+            except FileNotFoundError:
+                content = ""
+                size = 0
+            except Exception as e:
+                return self._json({"ok": False, "error": str(e)}, 500)
+            return self._json({"ok": True, "content": content, "size_bytes": size,
+                               "path": _XUAN_NOTEBOOK_PATH})
         if path == "/history":
             # Full transcript — no 5MB tail cap. Pages of 100 most recent
             # by default. Optional ?offset=N&limit=N.
@@ -2396,8 +2434,15 @@ INDEX_HTML = """<!DOCTYPE html>
   .brand-text .sub { color: var(--snet-teal); font-size:10px; margin-top:2px;
                      letter-spacing: 0.3px; opacity: 0.85; }
   header .ver { color: var(--dim); font-size:11px; text-align: right; }
+  .local-runtime-header { padding: 12px 16px 4px; font-size: 11px;
+          color: var(--dim); text-transform: uppercase; letter-spacing: 0.6px;
+          flex-shrink: 0; }
+  .local-runtime-header .local-runtime-note { text-transform: none;
+          letter-spacing: 0; color: var(--dim); font-size: 11px;
+          font-style: italic; opacity: 0.8; margin-left: 6px; }
   .grid { display:grid; grid-template-columns: repeat(6, 1fr); gap:8px;
-          padding:12px 16px; flex-shrink: 0; }
+          padding: 4px 16px 12px; flex-shrink: 0; }
+  .grid.local-runtime-inactive .tile { opacity: 0.55; }
   .tile { background: var(--card); border:1px solid var(--border);
           border-radius:6px; padding:10px 12px; }
   .tile .label { color: var(--dim); font-size:10px; text-transform: uppercase;
@@ -2502,6 +2547,8 @@ INDEX_HTML = """<!DOCTYPE html>
     <a class="nav-link" data-page="heatmap">Heatmap</a>
     <a class="nav-link" data-page="reports">Reports</a>
     <a class="nav-link" data-page="channels">Channels</a>
+    <a class="nav-link" data-page="audit">Audit</a>
+    <a class="nav-link" data-page="notebook">Notebook</a>
     <a class="nav-link" data-page="settings">Settings</a>
   </nav>
 
@@ -2523,13 +2570,19 @@ INDEX_HTML = """<!DOCTYPE html>
         </div>
       </div>
 
+      <div class="local-runtime-header" id="local_runtime_header">
+        Local runtime · Ollama / swipl
+        <span class="local-runtime-note" id="local_runtime_note">
+          — values populate when a local LLM (Granite, Qwen, etc.) is the active route. Currently using a remote API; switch to a local model for hot-path independence and DR.
+        </span>
+      </div>
       <div class="grid">
         <div class="tile"><div class="label">Channel</div><div class="value" id="channel">…</div></div>
         <div class="tile"><div class="label">Status</div><div class="value" id="status">…</div></div>
         <div class="tile"><div class="label">Iter / min</div><div class="value" id="iter_rate">…</div></div>
         <div class="tile"><div class="label">Sends</div><div class="value" id="sends">…</div></div>
         <div class="tile"><div class="label">RSS</div><div class="value" id="rss">…</div></div>
-        <div class="tile"><div class="label">VRAM</div><div class="value" id="vram">…</div></div>
+        <div class="tile"><div class="label">VRAM (local)</div><div class="value" id="vram">…</div></div>
       </div>
 
       <div class="messages" id="messages"></div>
@@ -2718,6 +2771,49 @@ INDEX_HTML = """<!DOCTYPE html>
     </div>
 
     <!-- ============ Page: Settings ============ -->
+    <!-- ============ Page: Audit ============ -->
+    <div class="page" id="page-audit">
+      <div class="page-content">
+        <div class="section">
+          <h2>Tool-call audit log</h2>
+          <p style="color:var(--dim); font-size:12px; margin: 4px 0 12px;">
+            Every tool call the agent makes is recorded here. Per-turn summary lines
+            show which tools fired and which URLs were fetched. If a reply makes a
+            factual claim about a URL or file but the audit shows no corresponding
+            tool call, the claim is not grounded.
+          </p>
+          <div class="pager">
+            <button id="audit_refresh">refresh</button>
+            <span id="audit_meta" style="color:var(--dim);">—</span>
+          </div>
+          <div id="audit_list" style="font-family: ui-monospace, monospace;
+               font-size: 12px; line-height: 1.5; margin-top: 12px;"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ Page: Notebook ============ -->
+    <div class="page" id="page-notebook">
+      <div class="page-content">
+        <div class="section">
+          <h2>Persistent notebook (xuan-notes.md)</h2>
+          <p style="color:var(--dim); font-size:12px; margin: 4px 0 12px;">
+            The agent's append-only notebook. Each entry is also indexed
+            into the vector store, so chroma_query can find it semantically.
+          </p>
+          <div class="pager">
+            <button id="notebook_refresh">refresh</button>
+            <span id="notebook_meta" style="color:var(--dim);">—</span>
+          </div>
+          <pre id="notebook_content" style="margin-top:12px; white-space:pre-wrap;
+               background:var(--bg); border:1px solid var(--border);
+               border-radius:6px; padding:12px; font-size:12px;
+               font-family: ui-monospace, monospace; max-height: 70vh;
+               overflow-y: auto;">…</pre>
+        </div>
+      </div>
+    </div>
+
     <div class="page" id="page-settings">
       <div class="page-content">
         <div class="section">
@@ -2776,6 +2872,18 @@ async function fetchStats() {
     $('sends').textContent = d.sends;
     $('rss').textContent = d.rss_mb ? `${d.rss_mb} MB` : '—';
     $('vram').textContent = d.vram_mb ? `${(d.vram_mb/1024).toFixed(1)} GB` : '—';
+    // CAPTAIN-PATCH: dim the local-runtime grid when a remote API
+    // (deepseek/openai/anthropic) is the active route, so the user
+    // sees the panel exists for local LLM context but isn't confused
+    // by zero values when running on a hosted model.
+    {
+      const grid = document.querySelector('.grid');
+      const note = document.getElementById('local_runtime_note');
+      const route = (d.active_route || '').toLowerCase();
+      const remote = route.startsWith('deepseek:') || route.startsWith('openai:') || route.startsWith('anthropic:');
+      if (grid) grid.classList.toggle('local-runtime-inactive', !!remote && !d.running);
+      if (note) note.style.display = (remote && !d.running) ? '' : 'none';
+    }
     $('branch').textContent = d.git_branch;
     $('commit').textContent = d.git_commit;
     // Hero tps tile — show "—" instead of "0" when a probe returned no
@@ -2962,8 +3070,78 @@ function showPage(name) {
   if (name === 'heatmap') loadHeatmap();
   if (name === 'reports') loadReport();
   if (name === 'channels') loadChannels();
+  if (name === 'audit') loadAudit();
+  if (name === 'notebook') loadNotebook();
   if (name === 'settings') loadSettings();
 }
+
+// ============ Audit page ============
+async function loadAudit() {
+  const list = document.getElementById('audit_list');
+  const meta = document.getElementById('audit_meta');
+  list.textContent = 'loading…';
+  try {
+    const r = await fetch('/audit?limit=80');
+    const d = await r.json();
+    if (!d.ok) { list.textContent = 'error: ' + (d.error || 'unknown'); return; }
+    if (!d.entries.length) { list.textContent = '(no tool calls recorded yet)'; return; }
+    meta.textContent = `${d.count} entries · ${d.audit_log}`;
+    const rows = d.entries.slice().reverse().map(e => {
+      const ts = e.ts ? new Date(e.ts * 1000).toLocaleString() : '?';
+      if (e.turn_summary) {
+        const tools = (e.tools_used || []).join(', ') || '(none)';
+        return `<div style="border-left:3px solid var(--snet-teal); padding-left:8px; margin:4px 0;">
+          <span style="color:var(--snet-teal);">— turn —</span> ${ts} ·
+          ${e.tool_calls_made} tool calls · tools: ${tools} ·
+          urls: ${(e.urls_fetched || []).length} · cap_hit: ${e.cap_hit}
+        </div>`;
+      }
+      const ok = e.ok ? '✓' : '✗';
+      const okColor = e.ok ? 'var(--you)' : 'var(--warn)';
+      const detail = e.url ? `url=${e.url}`
+                  : e.path ? `path=${e.path}`
+                  : e.query ? `query="${e.query}"`
+                  : e.host ? `host=${e.host}` : '';
+      const extras = [];
+      if (e.status != null) extras.push(`status=${e.status}`);
+      if (e.bytes != null) extras.push(`${e.bytes}B`);
+      if (e.count != null) extras.push(`count=${e.count}`);
+      if (e.url_count != null) extras.push(`urls=${e.url_count}`);
+      if (e.n_results != null) extras.push(`n=${e.n_results}`);
+      if (e.indexed != null) extras.push(`indexed=${e.indexed}`);
+      if (e.tag) extras.push(`tag=${e.tag}`);
+      if (e.error) extras.push(`<span style="color:var(--warn)">err: ${e.error}</span>`);
+      return `<div style="padding:2px 0;">
+        <span style="color:${okColor}">${ok}</span>
+        <span style="color:var(--accent)">${e.tool || '?'}</span>
+        ${detail ? '<span style="color:var(--dim)">  ' + detail + '</span>' : ''}
+        ${extras.length ? '<span style="color:var(--dim)">  · ' + extras.join(' · ') + '</span>' : ''}
+        <span style="float:right; color:var(--dim); font-size:10px;">${ts}</span>
+      </div>`;
+    });
+    list.innerHTML = rows.join('');
+  } catch (e) {
+    list.textContent = 'fetch failed: ' + e;
+  }
+}
+document.getElementById('audit_refresh')?.addEventListener('click', loadAudit);
+
+// ============ Notebook page ============
+async function loadNotebook() {
+  const pre = document.getElementById('notebook_content');
+  const meta = document.getElementById('notebook_meta');
+  pre.textContent = 'loading…';
+  try {
+    const r = await fetch('/notebook');
+    const d = await r.json();
+    if (!d.ok) { pre.textContent = 'error: ' + (d.error || 'unknown'); return; }
+    pre.textContent = d.content || '(notebook empty)';
+    meta.textContent = `${d.size_bytes} bytes · ${d.path}`;
+  } catch (e) {
+    pre.textContent = 'fetch failed: ' + e;
+  }
+}
+document.getElementById('notebook_refresh')?.addEventListener('click', loadNotebook);
 document.querySelectorAll('.nav-link').forEach(a => {
   a.addEventListener('click', () => showPage(a.dataset.page));
 });
