@@ -18,6 +18,10 @@
     "- Add, list, get, or summarize structured AI ethics and enterprise risk records: risk-register action payload_json_or_text"
     "- Update an existing structured risk record by ID: risk-update risk_id patch_json"
     "- Return JSON dashboard data for the AI ethics and risk cockpit: risk-dashboard"
+    ;SUBAGENT DISPATCH:
+    "- Delegate a bounded sub-task to a specialist subagent and receive a digest: delegate goal tools_csv persona_key max_turns"
+    "  Example: (delegate \"fetch 5 InterNetwork Defense blog posts about openclaw and summarize themes\" \"search,read-file\" \"researcher\" 8)"
+    "  The persona_key names a config at memory/personas-subagent/<key>.json that specifies which model executes."
     ;CODE EXECUTION:
     "- Execute MeTTa expression: metta sexpression"
     "Example to invoke Non-Axiomatic Logic via MeTTa: "
@@ -70,6 +74,12 @@
 (= (risk-dashboard)
    (py-call (risk_register.dashboard_data)))
 
+(= (delegate $goal $tools $persona $max_turns)
+   (py-call (subagent.dispatch $goal $tools $persona $max_turns)))
+
+(= (delegate $goal $tools $persona)
+   (py-call (subagent.dispatch $goal $tools $persona 8)))
+
 !(import_prolog_functions_from_file (library OmegaClaw-Core ./src/skills.pl) (shell first_char))
 
 (= (metta $str)
@@ -109,4 +119,6 @@
 (= (risk-register       (action $a) (payload $p))     (risk-register       $a $p))
 (= (risk-register       (action $a))                  (risk-register       $a))
 (= (risk-update         (risk_id $id) (payload $p))   (risk-update         $id $p))
+(= (delegate (goal $g) (tools $t) (persona $p) (max_turns $n))   (delegate $g $t $p $n))
+(= (delegate (goal $g) (tools $t) (persona $p))                  (delegate $g $t $p 8))
 (= (metta        (code $s))                           (metta        $s))

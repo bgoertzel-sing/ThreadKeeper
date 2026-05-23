@@ -1,0 +1,10 @@
+{
+  "persona_file":       "prompt-researcher.txt",
+  "provider":           "Ollama-local",
+  "model":              "glm-4.7-flash",
+  "base_url":           "http://192.168.86.248:11434/v1",
+  "api_key_env":        "OLLAMA_API_KEY",
+  "max_output_tokens":  1500,
+  "default_tool_subset": ["search", "read-file"],
+  "notes": "Testbed-configured 2026-05-23 for Agent_10 / 隙 dispatch verification. Bound to MQ-LLMsrv (.248, RTX 3090) running Ollama 0.24.0 + glm-4.7-flash (30B MoE, 3B active, q4_K_M). max_output_tokens=1500 leaves room for the model's <think> phase (Ollama strips <think> from message.content automatically for this model). See memory/project_mqllmsrv_248_glm47flash.md for the host's num_ctx-default-4K gotcha — subagent prompts must fit under ~3K chars or switch to a Modelfile variant with PARAMETER num_ctx 65536."
+}
