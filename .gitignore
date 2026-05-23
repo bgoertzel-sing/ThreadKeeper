@@ -24,3 +24,18 @@ chroma_db.snapshot-*
 memory/xuan-notes.md
 memory/ecosystem.json
 memory/prompt-xuan.txt
+
+# from upstream/main resync
+# embedded vector store
+memory/chroma_db/
+# pulled in repos
+repos/
+# secrets
+# editor backup files
+*~
+Autotests/venv/
+Autotests/__pycache__/
+*.pyc
+Autotests/logs/
+# IDE
+.idea/

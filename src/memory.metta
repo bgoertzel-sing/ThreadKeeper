@@ -19,9 +19,13 @@
    (read-file (py-call (risk_register.prompt_file))))
 
 (= (getHistory)
-   (let* (($ret (read-file (library OmegaClaw-Core ./memory/history.metta)))
-          ($snapshot (py-call (risk_register.context_snapshot)))
-          ($tail (last_chars $ret (maxHistory))))
+   ;; Hybrid resolution (resync 2026-05-23): adopt upstream's MemoryLeakFix
+   ;; (read_file_tail instead of full read + last_chars) AND keep the fork's
+   ;; risk_register.context_snapshot prepend feature. Net behavior: same
+   ;; CONTEXT_SNAPSHOT + RECENT_HISTORY shape the fork produced, now without
+   ;; the per-iteration full-file RAM cost.
+   (let* (($tail (read_file_tail (library OmegaClaw-Core ./memory/history.metta) (maxHistory)))
+          ($snapshot (py-call (risk_register.context_snapshot))))
          (py-str ("CONTEXT_SNAPSHOT: " $snapshot " RECENT_HISTORY: " $tail))))
 
 (= (addToHistory $lastmessage $response $sexpr $msgnew)

@@ -10,6 +10,8 @@
 !(import! &self (library OmegaClaw-Core ./src/risk_register.py))
 !(import! &self (library OmegaClaw-Core ./channels/irc.py))
 !(import! &self (library OmegaClaw-Core ./channels/mattermost.py))
+!(import! &self (library OmegaClaw-Core ./channels/telegram.py))
+!(import! &self (library OmegaClaw-Core ./channels/slack.py))
 !(import! &self (library OmegaClaw-Core ./channels/websearch.py))
 !(import! &self (library OmegaClaw-Core ./channels/local.py))
 !(import! &self (library OmegaClaw-Core ./src/utils))

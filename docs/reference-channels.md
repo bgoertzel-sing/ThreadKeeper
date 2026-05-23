@@ -18,7 +18,11 @@ The MeTTa side reads `commchannel` and branches:
 (= (receive)
    (if (== (commchannel) irc)
        (py-call (irc.getLastMessage))
-       (py-call (mattermost.getLastMessage))))
+       (if (== (commchannel) telegram)
+           (py-call (telegram.getLastMessage))
+           (if (== (commchannel) slack)
+               (py-call (slack.getLastMessage))
+               (py-call (mattermost.getLastMessage))))))
 ```
 
 ## `channels/irc.py`
@@ -35,6 +39,25 @@ Mattermost adapter using a bot token.
 
 - `start_mattermost(url, channel_id, bot_token)` — connect to a Mattermost instance.
 - Requires `MM_BOT_TOKEN` configured (empty by default — set via `configure` or command line).
+
+## `channels/telegram.py`
+
+Telegram adapter using Bot API long polling.
+
+- `start_telegram(bot_token, chat_id, poll_timeout)` — starts a poll loop.
+- `TG_CHAT_ID` is optional; if empty, the adapter can auto-bind to the first valid inbound chat.
+- Outbound messages are chunked to Telegram-safe lengths.
+
+## `channels/slack.py`
+
+Slack adapter using Slack Web API polling.
+
+- `start_slack(bot_token, channel_id, poll_interval)` — starts a poll loop.
+- Requires `SL_BOT_TOKEN`; `SL_CHANNEL_ID` is optional.
+- The bot user must already be invited to the target channel.
+- If `SL_CHANNEL_ID` is empty, the adapter auto-binds to the first channel where auth succeeds.
+- Adapter respects Slack `Retry-After` backoff on HTTP 429 and enforces a minimum 60s poll interval.
+- Uses the same one-time `auth <secret>` ownership gate as the other adapters.
 
 ## `channels/websearch.py`
 

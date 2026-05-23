@@ -70,7 +70,10 @@
 (= (risk-dashboard)
    (py-call (risk_register.dashboard_data)))
 
-!(import_prolog_functions_from_file (library OmegaClaw-Core ./src/skills.pl) (shell first_char))
+;; Hybrid (resync 2026-05-23): keep fork's risk-* skills AND adopt upstream's
+;; expanded prolog import (adds gc + read_file_tail — the latter is required
+;; for the MemoryLeakFix-adopted getHistory in src/memory.metta).
+!(import_prolog_functions_from_file (library OmegaClaw-Core ./src/skills.pl) (shell first_char gc read_file_tail))
 
 (= (metta $str)
    (let $code (sread $str)
