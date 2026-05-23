@@ -18,6 +18,10 @@
     "- Add, list, get, or summarize structured AI ethics and enterprise risk records: risk-register action payload_json_or_text"
     "- Update an existing structured risk record by ID: risk-update risk_id patch_json"
     "- Return JSON dashboard data for the AI ethics and risk cockpit: risk-dashboard"
+    ;SUBAGENT DISPATCH:
+    "- Delegate a bounded sub-task to the default specialist subagent (1-arg form): delegate goal"
+    "  Example: (delegate \"find current Anthropic Opus per-million-token input price\")"
+    "  Uses the 'researcher' persona (config at memory/personas-subagent/researcher.json) with its default tools."
     ;CODE EXECUTION:
     "- Execute MeTTa expression: metta sexpression"
     "Example to invoke Non-Axiomatic Logic via MeTTa: "
@@ -70,6 +74,18 @@
 (= (risk-dashboard)
    (py-call (risk_register.dashboard_data)))
 
+(= (delegate $goal $tools $persona $max_turns)
+   (py-call (subagent.dispatch $goal $tools $persona $max_turns)))
+
+(= (delegate $goal $tools $persona)
+   (py-call (subagent.dispatch $goal $tools $persona 8)))
+
+;; v1 testbed convenience: 1-arg form for metta-mode parents (matches OmegaClaw's
+;; single-arg-per-skill convention). Hardcodes "researcher" persona; tools default
+;; to the persona's default_tool_subset; max_turns = 8. Configurable in v1.1.
+(= (delegate $goal)
+   (py-call (subagent.dispatch $goal "" "researcher" 8)))
+
 ;; Hybrid (resync 2026-05-23): keep fork's risk-* skills AND adopt upstream's
 ;; expanded prolog import (adds gc + read_file_tail — the latter is required
 ;; for the MemoryLeakFix-adopted getHistory in src/memory.metta).
@@ -112,4 +128,6 @@
 (= (risk-register       (action $a) (payload $p))     (risk-register       $a $p))
 (= (risk-register       (action $a))                  (risk-register       $a))
 (= (risk-update         (risk_id $id) (payload $p))   (risk-update         $id $p))
+(= (delegate (goal $g) (tools $t) (persona $p) (max_turns $n))   (delegate $g $t $p $n))
+(= (delegate (goal $g) (tools $t) (persona $p))                  (delegate $g $t $p 8))
 (= (metta        (code $s))                           (metta        $s))
