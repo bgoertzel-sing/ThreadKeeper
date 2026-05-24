@@ -86,10 +86,14 @@
 (= (delegate $goal)
    (py-call (subagent.dispatch $goal "" "researcher" 8)))
 
-;; Hybrid (resync 2026-05-23): keep fork's risk-* skills AND adopt upstream's
-;; expanded prolog import (adds gc + read_file_tail — the latter is required
-;; for the MemoryLeakFix-adopted getHistory in src/memory.metta).
-!(import_prolog_functions_from_file (library OmegaClaw-Core ./src/skills.pl) (shell first_char gc read_file_tail))
+;; Resync 2026-05-23: revert prolog import to the image's original arg list.
+;; The fork's getHistory now uses a Python shim (helper.history_with_snapshot)
+;; instead of upstream's read_file_tail prolog predicate, so the fork no
+;; longer depends on upstream's gc/read_file_tail additions. This sidesteps
+;; the overlay-mount layering fragility where prolog imports declared in a
+;; mounted skills.metta don't reliably register predicates from the
+;; correspondingly-mounted skills.pl in the image's MeTTa loader.
+!(import_prolog_functions_from_file (library OmegaClaw-Core ./src/skills.pl) (shell first_char))
 
 (= (metta $str)
    (let $code (sread $str)

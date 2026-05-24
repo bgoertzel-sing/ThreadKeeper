@@ -2,6 +2,70 @@ from collections import deque
 import re
 from datetime import datetime
 
+
+# ----------------------------------------------------------------------
+# getHistory shim — see history_with_snapshot below.
+# Resync 2026-05-23: ports upstream src/skills.pl:read_file_tail/3
+# byte-cap logic to Python so the fork's getHistory can preserve its
+# risk_register.context_snapshot prepend without depending on the
+# upstream prolog predicate (which doesn't load reliably through
+# Agent_10's image-overlay mount layering).
+# ----------------------------------------------------------------------
+
+def _read_file_tail(path, max_chars):
+    """Return the last max_chars bytes of `path` decoded as UTF-8.
+    If the file is shorter than max_chars, return the whole file.
+    If the file doesn't exist or can't be read, return "".
+
+    Faithful Python port of upstream src/skills.pl:read_file_tail/3:
+
+        read_file_tail(Path, MaxChars, Text) :-
+            setup_call_cleanup(
+                open(Path, read, In, [type(text), encoding(utf8)]),
+                ( seek(In, 0, eof, End),
+                  Start is max(0, End - MaxChars),
+                  seek(In, Start, bof, _),
+                  read_string(In, _, Text) ),
+                close(In)).
+
+    The Prolog source opens text-mode UTF-8 but seeks at OS-byte level,
+    so the tail may start mid-character. We mirror that: read bytes,
+    decode with errors='replace' so a mid-character start doesn't raise."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            end = f.tell()
+            start = max(0, end - int(max_chars))
+            f.seek(start)
+            data = f.read()
+        return data.decode("utf-8", errors="replace")
+    except (FileNotFoundError, IOError):
+        return ""
+
+
+def history_with_snapshot(max_chars):
+    """getHistory shim. Called from src/memory.metta as
+    `(py-call (helper.history_with_snapshot (maxHistory)))`.
+
+    Returns the "CONTEXT_SNAPSHOT: ... RECENT_HISTORY: ..." string
+    the fork's original MeTTa getHistory produced, but without
+    depending on the upstream prolog read_file_tail predicate. The
+    fork already routes getPrompt through risk_register via py-call,
+    so adding this one more py-call here is idiomatic, not a special
+    case.
+
+    Path is the same one upstream's getHistory and src/helper.py
+    around_time both use: 'repos/OmegaClaw-Core/memory/history.metta'
+    relative to the MeTTa interpreter's CWD."""
+    history_path = "repos/OmegaClaw-Core/memory/history.metta"
+    tail = _read_file_tail(history_path, max_chars)
+    try:
+        import risk_register
+        snap = risk_register.context_snapshot() or ""
+    except Exception as e:
+        snap = f"(context_snapshot error: {type(e).__name__}: {e})"
+    return f"CONTEXT_SNAPSHOT: {snap} RECENT_HISTORY: {tail}"
+
 TS_RE = re.compile(r'^\("(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})"')
 
 def extract_timestamp(line):

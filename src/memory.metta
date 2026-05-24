@@ -19,22 +19,16 @@
    (read-file (py-call (risk_register.prompt_file))))
 
 (= (getHistory)
-   ;; Resync 2026-05-23: adopt upstream's MemoryLeakFix wholesale.
-   ;;
-   ;; Initial hybrid attempt wrapped read_file_tail inside a let* to combine
-   ;; with the fork's risk_register.context_snapshot prepend, but read_file_tail
-   ;; is a prolog-imported function — it doesn't evaluate as a normal MeTTa
-   ;; function inside let*. The let* bound the literal unevaluated atom
-   ;; `(read_file_tail <path> <cap>)` to $tail, so the prompt contained the
-   ;; function-call shape instead of the file content. Caught by the post-rebase
-   ;; §4.11 test (parent input collapsed from 15K → 2.7K tokens because
-   ;; HISTORY was effectively empty).
-   ;;
-   ;; The fork's CONTEXT_SNAPSHOT feature has been temporarily dropped from
-   ;; getHistory. To re-add it post-rebase, define a separate prolog-side
-   ;; combinator or write a small helper that calls read_file_tail via
-   ;; translatePredicate. Tracked as a follow-up.
-   (read_file_tail (library OmegaClaw-Core ./memory/history.metta) (maxHistory)))
+   ;; Resync 2026-05-23 — Python-shim path. helper.history_with_snapshot
+   ;; reads the byte-tail of memory/history.metta (Python port of
+   ;; upstream src/skills.pl:read_file_tail/3) and prepends
+   ;; risk_register.context_snapshot(). Returns the same
+   ;; "CONTEXT_SNAPSHOT: <snap> RECENT_HISTORY: <tail>" shape the
+   ;; fork's original MeTTa getHistory produced, without depending on
+   ;; upstream's prolog read_file_tail predicate. The fork already
+   ;; routes getPrompt through risk_register via py-call, so this is
+   ;; idiomatic — not a special case.
+   (py-call (helper.history_with_snapshot (maxHistory))))
 
 (= (addToHistory $lastmessage $response $sexpr $msgnew)
    (if $msgnew
