@@ -1,0 +1,10 @@
+{
+  "persona_file": "prompt-researcher.txt",
+  "provider": "Anthropic",
+  "model": "claude-opus-4-6",
+  "base_url": "https://api.anthropic.com/v1/",
+  "api_key_env": "ANTHROPIC_API_KEY",
+  "max_output_tokens": 4000,
+  "default_tool_subset": ["search", "read-file"],
+  "notes": "EXAMPLE cloud-specialist persona for ThreadKeeper's 'cloud specialist' node. Copy to researcher.json and edit. provider/model are EXAMPLES — swap for whatever your deployment reaches. NEVER put a key here: api_key_env names the env var that carries it. For a cheap LOCAL specialist instead, set provider=Ollama-local, base_url=http://localhost:11434/v1, api_key_env=OLLAMA_API_KEY."
+}
