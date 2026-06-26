@@ -14,10 +14,13 @@ specialized model than the parent runs. See
 docs/reference-skills-subagent.md for the skill reference and
 docs/tutorial-09-subagents.md for the end-to-end walkthrough.
 
-Provider integration uses lib_llm_ext.AIProvider — instantiated
-fresh per dispatch from the persona's JSON config. Stays inside
-the existing class abstraction; does not mutate
-lib_llm_ext._provider_registry.
+Provider integration builds a plain OpenAI-compatible client per
+dispatch from the persona's JSON config. LOCAL Ollama workers are
+called via the native /api/chat path with {"think": false} (reasoning
+models return empty content via /v1 on current Ollama builds); CLOUD
+workers (e.g. GLM 5.2) use the standard /v1 chat path. Worker token
+usage is logged to memory/usage.jsonl so delegated work appears on the
+ThreadKeeper mesh dashboard's Local Worker tile.
 
 The minimal response-cleanup logic below (strip <think> blocks,
 strip markdown fences, parse line-leading s-exprs) keeps the
@@ -39,6 +42,26 @@ import os
 import re
 import subprocess
 import sys
+import time
+
+# Worker-call usage log — SAME file the parent loop + dashboard read, so
+# delegated work shows up on the ThreadKeeper mesh's Local Worker tile.
+_USAGE_LOG_PATH = os.path.join(
+    os.environ.get("MEMORY_DIR", "/PeTTa/repos/OmegaClaw-Core/memory"),
+    "usage.jsonl",
+)
+
+
+def _log_worker_usage(model, in_tok, out_tok):
+    """Append a worker LLM call to usage.jsonl. Never raises."""
+    try:
+        rec = {"ts": time.time(), "model": model,
+               "input_tokens": int(in_tok or 0), "output_tokens": int(out_tok or 0)}
+        with open(_USAGE_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec) + "\n")
+    except Exception:
+        pass
+
 
 # Persona-config directory. Configurable via env var; default is
 # memory/personas-subagent/ resolved relative to this module's
@@ -225,56 +248,105 @@ def validate_endpoint_compat(tool_names, cfg):
 # ----------------------------------------------------------------------
 
 def resolve_or_instantiate_provider(provider_name, model_name, base_url, var_name):
-    """Build an AIProvider scoped to this dispatch. Stays inside
-    lib_llm_ext's existing class abstraction; does not mutate
-    _provider_registry.
+    """Build a per-dispatch OpenAI-compatible client + binding handle.
 
-    A fresh AIProvider instance per dispatch ensures each persona's
-    (provider, model, base_url, api_key_env) binding is honored
-    exactly — no shared mutable state across dispatches with
-    different bindings. AIProvider's _ensure_client lazy-inits the
-    underlying openai client on first .chat() call, so this is
-    cheap at construction (no network).
+    A fresh client per dispatch ensures each persona's (provider, model,
+    base_url, api_key_env) binding is honored exactly — no shared mutable
+    state across dispatches with different bindings. The local Ollama path
+    in _call_subagent_llm uses native urllib and ignores the client, so a
+    client failure here never breaks local delegation.
 
-    Returns a dict with keys: provider (AIProvider), model, provider_name."""
+    Returns a dict with keys: provider (openai client | None), model,
+    provider_name, base_url, var_name."""
     api_key = os.environ.get(var_name)
     if not api_key:
         raise RuntimeError(
             f"env var '{var_name}' is unset; cannot reach endpoint for "
             f"provider '{provider_name}'"
         )
-    # Defer the lib_llm_ext import to dispatch time so this module
-    # remains importable even in environments where openai isn't
-    # installed (e.g. tooling that lints subagent.py without the
-    # full runtime).
-    from lib_llm_ext import AIProvider
-    provider = AIProvider(
-        name=f"subagent:{provider_name}",
-        var_name=var_name,
-        model_name=model_name,
-        base_url=base_url or "",
-    )
+    # Build a plain OpenAI-compatible client for the CLOUD worker path
+    # (e.g. GLM 5.2 specialist). The LOCAL Ollama path in
+    # _call_subagent_llm uses native urllib and ignores this client, so a
+    # client failure here doesn't break local delegation. Import deferred
+    # so the module stays lint-importable without openai installed.
+    client = None
+    try:
+        import openai
+        client = openai.OpenAI(api_key=api_key, base_url=(base_url or None))
+    except Exception:
+        client = None  # local path doesn't need it
     return {
-        "provider": provider,
+        "provider": client,
         "model": model_name,
         "provider_name": provider_name,
+        "base_url": base_url or "",
+        "var_name": var_name,
     }
 
 
 # ----------------------------------------------------------------------
-# LLM call — uses AIProvider.chat from lib_llm_ext.
+# Worker LLM call — local (native /api/chat + think:false) or cloud (/v1).
 # ----------------------------------------------------------------------
 
 def _call_subagent_llm(provider_handle, content, max_tokens):
-    """Call the subagent's LLM via AIProvider.chat. Returns the response
-    text as a string. On failure, returns a structured error string —
-    never raises into the MeTTa interpreter."""
-    provider = provider_handle["provider"]
+    """Call the subagent's worker LLM and return response text.
+
+    For LOCAL Ollama endpoints we use the NATIVE /api/chat path with
+    {"think": false} — the OpenAI /v1 path on this Ollama build returns
+    EMPTY content for reasoning models (qwen/gemma/gpt-oss/granite) because
+    hidden <think> tokens consume the whole budget. The native path with
+    thinking disabled returns real content. For non-Ollama (cloud) endpoints
+    we use the standard OpenAI /v1 chat path, which is correct there.
+
+    Never raises into the MeTTa interpreter — returns a (subagent ...) string
+    on failure.
+    """
+    base_url = (provider_handle.get("base_url") or "").rstrip("/")
+    model = provider_handle["model"]
+    is_local = ("11434" in base_url) or ("localhost" in base_url) or ("ollama" in base_url.lower())
+
+    if base_url and is_local:
+        import json as _json
+        import urllib.request as _u
+        root = base_url[:-3] if base_url.endswith("/v1") else base_url
+        try:
+            body = _json.dumps({
+                "model": model,
+                "messages": [{"role": "user", "content": content}],
+                "stream": False,
+                "think": False,
+                "options": {"num_predict": max_tokens},
+            }).encode()
+            req = _u.Request(root + "/api/chat", data=body,
+                             headers={"Content-Type": "application/json"})
+            with _u.urlopen(req, timeout=180) as r:
+                data = _json.loads(r.read().decode("utf-8", errors="replace"))
+            _log_worker_usage(model, data.get("prompt_eval_count", 0),
+                              data.get("eval_count", 0))
+            return (data.get("message") or {}).get("content", "") or ""
+        except Exception as e:
+            return f"(subagent LLM call failed: {type(e).__name__}: {e})"
+
+    # Cloud endpoint — standard OpenAI /v1 chat (GLM/DeepSeek separate
+    # reasoning from content correctly here).
+    client = provider_handle["provider"]
+    if client is None:
+        return "(subagent error: no cloud client available)"
     try:
-        text = provider.chat(content=content, max_tokens=max_tokens)
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": content}],
+            max_tokens=max_tokens,
+        )
+        try:
+            u = resp.usage
+            _log_worker_usage(model, getattr(u, "prompt_tokens", 0),
+                              getattr(u, "completion_tokens", 0))
+        except Exception:
+            pass
+        return resp.choices[0].message.content or ""
     except Exception as e:
         return f"(subagent LLM call failed: {type(e).__name__}: {e})"
-    return text or ""
 
 
 # ----------------------------------------------------------------------
