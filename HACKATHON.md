@@ -5,7 +5,7 @@
 **Team:** ThreadKeeper
 **Repository:** this repo — a fork of
 [`asi-alliance/OmegaClaw-Core`](https://github.com/asi-alliance/OmegaClaw-Core),
-synced to current upstream and extended.
+branched from a recent upstream `main` (June 2026) and extended.
 
 ---
 
@@ -69,7 +69,7 @@ runs exactly as before.
 
 ## Status & notes
 
-- The base is synced to current `asi-alliance/OmegaClaw-Core` `main`.
+- The base is a recent `asi-alliance/OmegaClaw-Core` `main` (branched June 2026); ThreadKeeper's additions are layered on top.
 - The subagent dispatch primitive and the budget module are working
   code (import-checked and functionally exercised), not vaporware; the
   escalation *policy* is a deliberate v1 designed as a swappable seam.

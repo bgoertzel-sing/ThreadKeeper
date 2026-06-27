@@ -26,3 +26,5 @@ Autotests/logs/
 
 # IDE
 .idea/
+*.env
+telegram.env

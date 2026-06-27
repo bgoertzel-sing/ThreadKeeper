@@ -237,6 +237,8 @@ ThreadKeeper-specific docs:
 - [`docs/architecture.md`](./docs/architecture.md) — the four-node mesh.
 - [`docs/reference-skills-subagent.md`](./docs/reference-skills-subagent.md) — the `delegate` skill.
 - [`docs/tutorial-09-subagents.md`](./docs/tutorial-09-subagents.md) — end-to-end subagent walkthrough.
+- [`docs/recursive-self-improvement.md`](./docs/recursive-self-improvement.md) — **RSI demonstrated**: the agent diagnosed its own failure, designed the fix, had it built, and improved itself — with a human-in-the-loop governor it insisted on. ([full transcript](./docs/xi-interview.md))
+- [`docs/disaster-recovery-and-migration.md`](./docs/disaster-recovery-and-migration.md) — memory persistence + cross-provider migration.
 
 ---
 
