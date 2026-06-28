@@ -280,6 +280,8 @@ _DEFAULT_PRICING_PER_M = {
     "granite4.1:30b": (0.0, 0.0),
     "gpt-oss:20b": (0.0, 0.0),
     "qwen3.5:9b": (0.0, 0.0),
+    "qwen2.5:14b": (0.0, 0.0),
+    "qwen2.5-14b": (0.0, 0.0),
     # Cloud specialists (example public rates per million tokens, 2026).
     "accounts/fireworks/models/glm-5p2": (0.55, 2.19),
     "glm-5p2": (0.55, 2.19),
@@ -317,16 +319,18 @@ _PRICING_FALLBACK = (15.0, 75.0)  # opus-tier conservative
 # local-vs-cloud token/cost split. Reasoning DIVERSITY: the local column runs
 # multiple model FAMILIES (IBM Granite + Alibaba Qwen) across two GPUs.
 _ENGINE_ROLES = [
+    # PRIMARY = the sovereign spine: now a LOCAL model on our own GPU (the agent's
+    # own recommendation, realized). tier=local because it is genuinely on-prem + free.
     {"id": "control", "label": "Primary Reasoning Engine", "sub": "always-on thread manager · holds the thread",
-     "loc": "MiniMax 3 · cloud (hackathon promo)", "column": "primary", "tier": "control",
-     "models": ["minimax/minimax-m3", "minimax/minimax-m3-f", "minimax/minimax-m2.7"]},
+     "loc": "Qwen2.5-14B · LOCAL · RTX 3090 (.248)", "column": "primary", "tier": "local",
+     "models": ["qwen2.5:14b", "qwen2.5-14b", "qwen2.5:14b-instruct"]},
 
-    {"id": "worker-granite", "label": "Granite-30B", "sub": "local worker · IBM family",
+    {"id": "worker-248", "label": "Qwen2.5-14B", "sub": "local worker · Alibaba family · CURRENT",
      "loc": "RTX 3090 (.248)", "column": "local", "tier": "local",
-     "models": ["granite4.1-30b-16k", "granite4.1-30b-64k", "granite4.1:30b"]},
-    {"id": "worker-qwen", "label": "Qwen-9B", "sub": "local worker · Alibaba family",
+     "models": ["qwen2.5:14b", "qwen2.5-14b", "qwen2.5:14b-instruct"]},
+    {"id": "worker-41", "label": "Gemma 4 12B", "sub": "local worker · Google family · CURRENT",
      "loc": "A4000 (.41)", "column": "local", "tier": "local",
-     "models": ["qwen3.5:9b", "qwen3.5-9b-nothink", "gpt-oss:20b"]},
+     "models": ["gemma4:12b", "gemma4-12b", "gemma4:12b-instruct"]},
 
     {"id": "specialistA", "label": "GLM 5.2", "sub": "cloud specialist · advanced reasoning",
      "loc": "Fireworks", "column": "cloud", "tier": "cloud",
@@ -347,6 +351,78 @@ _ENGINE_ROLES = [
 # never "lose" your data). Set to a positive number of minutes only if you
 # specifically want a rolling window for a fresh-looking demo.
 _MESH_WINDOW_MIN = float(os.environ.get("OMEGACLAW_MESH_WINDOW_MIN", "0"))
+
+# The CURRENT control-loop model — read live from the running container's env,
+# so the top "Primary Reasoning Engine" tile is DYNAMIC: it shows whatever model
+# is holding the thread right now (qwen2.5:14b, minimax, deepseek, whatever),
+# and auto-updates when the control loop is swapped + the channel restarts.
+_CURRENT_PRIMARY = os.environ.get("PRIMARY_LLM_MODEL", "").strip()
+# Friendly display for the current primary + whether it's local or cloud.
+_PRIMARY_DISPLAY = {
+    "qwen2.5:14b": ("Qwen2.5-14B", "LOCAL · RTX 3090 (.248)", "local"),
+    "qwen2.5-14b": ("Qwen2.5-14B", "LOCAL · RTX 3090 (.248)", "local"),
+    "qwen3.5:9b": ("Qwen-9B", "LOCAL · A4000 (.41)", "local"),
+    "granite4.1-30b-16k": ("Granite-30B", "LOCAL · RTX 3090 (.248)", "local"),
+    "granite4.1:30b": ("Granite-30B", "LOCAL · RTX 3090 (.248)", "local"),
+    "gemma4:12b": ("Gemma 4 12B", "LOCAL · A4000 (.41)", "local"),
+    "gemma4-12b": ("Gemma 4 12B", "LOCAL · A4000 (.41)", "local"),
+    "minimax/minimax-m3": ("MiniMax 3", "cloud · hackathon promo", "control"),
+    "deepseek-v4-pro": ("DeepSeek V4 Pro", "cloud · API", "cloud"),
+    "accounts/fireworks/models/glm-5p2": ("GLM 5.2", "cloud · Fireworks", "cloud"),
+}
+
+
+def _current_primary_meta():
+    """(label, loc, tier, [model-aliases]) for whatever is the control loop NOW."""
+    m = _CURRENT_PRIMARY
+    if m in _PRIMARY_DISPLAY:
+        label, loc, tier = _PRIMARY_DISPLAY[m]
+    elif m:
+        label, loc, tier = m, "current control loop", ("local" if "11434" not in m and ":" in m else "cloud")
+    else:
+        label, loc, tier = "Primary Reasoning Engine", "current control loop", "local"
+    # which usage.jsonl model-names map to this primary (for its token count)
+    aliases = [m] if m else []
+    if m.startswith("qwen2.5"):
+        aliases = ["qwen2.5:14b", "qwen2.5-14b", "qwen2.5:14b-instruct"]
+    elif m.startswith("minimax"):
+        aliases = ["minimax/minimax-m3", "minimax/minimax-m3-f", "minimax/minimax-m2.7"]
+    return label, loc, tier, aliases
+
+
+def _model_ledger():
+    """ALL-TIME per-model history for the collapsible dashboard: every model
+    ever used, total tokens/calls, first-seen ('created/first run') and last-seen.
+    This is the lifetime record — nothing is hidden or windowed."""
+    pricing = _load_pricing()
+    led = {}
+    overall_first = None
+    for rec in _read_usage_log():
+        m = rec.get("model", "unknown")
+        ts = float(rec.get("ts", 0) or 0)
+        ti = int(rec.get("input_tokens", 0) or 0)
+        to = int(rec.get("output_tokens", 0) or 0)
+        e = led.setdefault(m, {"calls": 0, "input": 0, "output": 0, "cost": 0.0,
+                               "first": ts, "last": ts})
+        e["calls"] += 1; e["input"] += ti; e["output"] += to
+        if ts and ts < e["first"]: e["first"] = ts
+        if ts > e["last"]: e["last"] = ts
+        p_in, p_out = pricing.get(m, _PRICING_FALLBACK)
+        e["cost"] += (ti / 1e6) * p_in + (to / 1e6) * p_out
+        if overall_first is None or (ts and ts < overall_first):
+            overall_first = ts
+    rows = []
+    for m, e in sorted(led.items(), key=lambda x: -(x[1]["input"] + x[1]["output"])):
+        rows.append({
+            "model": m, "calls": e["calls"],
+            "tokens": e["input"] + e["output"],
+            "cost": round(e["cost"], 4),
+            "first_ts": e["first"], "last_ts": e["last"],
+        })
+    return {"rows": rows, "created_ts": overall_first or 0,
+            "total_models": len(rows),
+            "total_calls": sum(r["calls"] for r in rows),
+            "total_tokens": sum(r["tokens"] for r in rows)}
 
 
 def _compute_engine_mesh():
@@ -369,11 +445,19 @@ def _compute_engine_mesh():
         bm["calls"] += 1
         bm["cost"] += (ti / 1e6) * p_in + (to / 1e6) * p_out
 
+    # DYNAMIC primary: override the control role with whatever model is the
+    # live control loop right now (read from PRIMARY_LLM_MODEL env).
+    p_label, p_loc, p_tier, p_aliases = _current_primary_meta()
+    roles = [dict(r) for r in _ENGINE_ROLES]
+    for r in roles:
+        if r["id"] == "control" and p_aliases:
+            r["label"], r["loc"], r["tier"], r["models"] = \
+                "Primary Reasoning Engine", f"{p_label} · {p_loc}", p_tier, p_aliases
+
     tiles = []
-    # Three honest buckets: on-prem LOCAL (granite/qwen), free-cloud CONTROL
-    # (MiniMax), and PAID cloud (GLM/DeepSeek). "free" = local + control.
+    # Three honest buckets: on-prem LOCAL, free-cloud CONTROL, PAID cloud.
     local_tok = control_tok = paid_tok = 0
-    for role in _ENGINE_ROLES:
+    for role in roles:
         agg = {"input": 0, "output": 0, "calls": 0, "cost": 0.0}
         for m in role["models"]:
             v = by_model.get(m)
@@ -450,6 +534,7 @@ def _compute_engine_mesh():
         "if_all_cloud_usd": round(if_all_cloud, 4),
         "saved_usd": round(saved_usd, 4),
         "saved_pct": saved_pct,
+        "current_primary": _CURRENT_PRIMARY,   # the live control-loop model name
     }
 
 
@@ -677,6 +762,12 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(200, _compute_engine_mesh())
             except Exception as e:
                 self._send_json(500, {"error": f"mesh compute failed: {e}"})
+            return
+        if url.path == "/ledger":
+            try:
+                self._send_json(200, _model_ledger())
+            except Exception as e:
+                self._send_json(500, {"error": f"ledger compute failed: {e}"})
             return
         if url.path == "/dna":
             try:
@@ -1197,6 +1288,31 @@ _DASHBOARD_HTML = r"""<!doctype html>
   .sv-actual { color: var(--fg, #cde); }
   .sv-actual b { color: #6fe3b4; font-variant-numeric: tabular-nums; }
   .sv-promo { font-size: 11px; color: #c0a13a; opacity: .85; }
+  /* all-time ledger */
+  /* Full-history ledger — its own collapsible (mirrors #dna), collapsed by default */
+  #ledger { max-width: 1600px; margin: 14px auto 0; border: 1px solid var(--line, #2a2a35);
+    border-radius: 10px; background: var(--panel, #16161e); }
+  #ledger-head { display: flex; align-items: center; gap: 8px; padding: 11px 14px;
+    cursor: pointer; user-select: none; font-size: 13px; }
+  #ledger-head:hover { background: rgba(90,160,255,0.09); }
+  .ledger-caret { transition: transform .2s ease; color: var(--muted, #9aa); }
+  #ledger:not(.collapsed) .ledger-caret { transform: rotate(90deg); }
+  .ledger-title { font-weight: 600; color: var(--fg, #cde); }
+  .ledger-sub { color: var(--muted, #9aa); font-size: 11.5px; }
+  .ledger-status { margin-left: auto; color: var(--muted, #9aa); font-size: 11.5px; }
+  #ledger-body { max-height: 0; overflow: hidden; transition: max-height .25s ease; padding: 0 14px; }
+  #ledger:not(.collapsed) #ledger-body { max-height: 1200px; overflow-y: auto; padding: 0 14px 14px; }
+  #ledger-table { width: 100%; border-collapse: collapse; font-size: 12px;
+    font-variant-numeric: tabular-nums; }
+  #ledger-table th { text-align: right; color: var(--muted, #777); font-weight: 600;
+    padding: 3px 8px; border-bottom: 1px solid var(--line, #2a2a35); font-size: 10.5px;
+    text-transform: uppercase; letter-spacing: .05em; }
+  #ledger-table th:first-child, #ledger-table td:first-child { text-align: left; }
+  #ledger-table td { padding: 4px 8px; color: var(--ink-dim, #aab);
+    border-bottom: 1px solid rgba(120,120,160,0.06); }
+  #ledger-table td.mdl { color: var(--fg, #cde); font-family: var(--mono, monospace); font-size: 11px; }
+  #ledger-table tr.cur td { color: #6fe3b4; }   /* current primary highlighted */
+  #ledger-table td.local0 { color: #5a8; }
   .sv-saved {
     margin-left: auto; font-weight: 800; font-size: 15px; color: #3ad29f;
     background: rgba(58,210,159,0.12); padding: 3px 10px; border-radius: 999px;
@@ -1424,6 +1540,23 @@ _DASHBOARD_HTML = r"""<!doctype html>
         <span id="sv-promo" class="sv-promo"></span>
       </div>
     </div>
+  </div>
+</div>
+
+<!-- All-time ledger: every model ever used, since she was created — its OWN
+     collapsible below the current-config dashboard (collapsed by default). -->
+<div id="ledger" class="collapsed">
+  <div id="ledger-head" onclick="toggleLedger()">
+    <span class="ledger-caret">▸</span>
+    <span class="ledger-title">📜 Full history — every model ever run</span>
+    <span class="ledger-sub">all-time, since she was created</span>
+    <span id="ledger-summary" class="ledger-status"></span>
+  </div>
+  <div id="ledger-body">
+    <table id="ledger-table">
+      <thead><tr><th>model</th><th>runs</th><th>tokens</th><th>cost</th><th>first run</th></tr></thead>
+      <tbody id="ledger-rows"></tbody>
+    </table>
   </div>
 </div>
 
@@ -1778,6 +1911,7 @@ async function pollMesh() {
   try {
     const r = await fetch(`${CHANNEL_BASE}/mesh`);
     const d = await r.json();
+    window._curPrimary = d.current_primary || "";  // for ledger highlight
     const tiles = d.tiles || [];
     // (re)build the three regions
     const prim = tiles.filter(t => t.column === "primary");
@@ -1832,6 +1966,7 @@ async function pollMesh() {
 // ──────────────────────── OmegaClaw DNA panel ────────────────────────────
 function toggleMesh() { document.getElementById("mesh").classList.toggle("collapsed"); }
 function toggleDna() { document.getElementById("dna").classList.toggle("collapsed"); }
+function toggleLedger() { document.getElementById("ledger").classList.toggle("collapsed"); }
 let _dnaLoaded = false;
 async function loadDna() {
   if (_dnaLoaded) return;
@@ -1854,12 +1989,43 @@ async function loadDna() {
   } catch (e) { /* best-effort */ }
 }
 
+// ──────────────────────── all-time ledger (full history) ─────────────────
+function _ago(ts) {
+  if (!ts) return "—";
+  const s = Math.max(0, Date.now()/1000 - ts);
+  if (s < 3600) return Math.round(s/60) + "m ago";
+  if (s < 86400) return Math.round(s/3600) + "h ago";
+  return Math.round(s/86400) + "d ago";
+}
+async function pollLedger() {
+  try {
+    const r = await fetch(`${CHANNEL_BASE}/ledger`);
+    const d = await r.json();
+    const sum = document.getElementById("ledger-summary");
+    if (sum) sum.innerHTML =
+      `<b>${d.total_models}</b> models ever · <b>${d.total_calls.toLocaleString()}</b> runs · ` +
+      `<b>${fmtTok(d.total_tokens)}</b> tokens · created <b>${_ago(d.created_ts)}</b>`;
+    const body = document.getElementById("ledger-rows");
+    if (body) body.innerHTML = (d.rows || []).map(row => {
+      const cur = (window._curPrimary && row.model === window._curPrimary) ? ' class="cur"' : '';
+      return `<tr${cur}>
+        <td class="mdl">${escapeHtml(row.model)}</td>
+        <td>${row.calls.toLocaleString()}</td>
+        <td>${fmtTok(row.tokens)}</td>
+        <td>${fmtCost(row.cost)}</td>
+        <td>${_ago(row.first_ts)}</td></tr>`;
+    }).join("");
+  } catch (e) { /* best-effort */ }
+}
+
 setInterval(poll, 1500);
 poll();
 setInterval(pollReasoning, 2000);
 pollReasoning();
 setInterval(pollMesh, 2000);
 pollMesh();
+setInterval(pollLedger, 5000);
+pollLedger();
 loadDna();
 </script>
 
