@@ -71,18 +71,81 @@ def getLastMessage():
         return tmp
 
 
+# ── RSI Lever A: loop-detection on emissions ─────────────────────────────────
+# DESIGNED BY 隙 (Xì), 2026-06-27, to fix her own pin-spam failure mode.
+# Implemented to her EXACT spec. Her two design questions, answered in code:
+#   Q1 "are pins surfaced to the human, or only send?" → only `send` reaches the
+#      human (pins go to memory). So loop-detection is scoped to send. ✓
+#   Q2 "channel wrapper or prompt-side?" → "Channel wrapper is reliable;
+#      prompt-side is something I can subvert under drift. Recommend wrapper."
+#      → implemented HERE, in the send chokepoint, OUTSIDE the agent's control. ✓
+#
+# Her rule: ring buffer of the last 3 normalized emissions. Normalize (lowercase,
+# strip timestamps/hex-ids/datetime, collapse whitespace, strip punctuation,
+# tokenize), Jaccard on token sets. If <5 tokens, skip. If Jaccard >= 0.80 vs
+# ANY of the last 3 → suppress. On 3 consecutive suppressions, emit once
+# 'loop_detected: 3 emissions suppressed', reset, re-evaluate.
+# Reversible via the rsi-backups snapshot.
+import re as _re_rsi
+_EMIT_RING = []                 # last 3 normalized token-sets
+_SUPPRESS_THRESHOLD = float(os.environ.get("RSI_LOOP_SUPPRESS_THRESHOLD", "0.80"))
+_consec_suppressed = 0
+_suppressed_total = 0
+
+_RSI_TS = _re_rsi.compile(r"\d{4}-\d\d-\d\d[ t]\d\d:\d\d:\d\d|\b[0-9a-f]{8,}\b")
+
+
+def _rsi_normalize(text):
+    t = (text or "").lower()
+    t = _RSI_TS.sub(" ", t)                      # strip timestamps + hex ids
+    t = _re_rsi.sub(r"[^\w\s]", " ", t)          # strip punctuation
+    return set(t.split())                        # tokenize
+
+
+def _rsi_jaccard(a, b):
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
 def send_message(text):
-    """Queue an outbound message (Oma → user). Picked up by GET /messages."""
-    global _outbound_seq
+    """Queue an outbound message (Oma → user). Picked up by GET /messages.
+
+    RSI Lever A (designed by 隙): suppress near-duplicate emissions to break
+    the repetition loop — the channel-wrapper governor she asked us to put
+    outside her own control."""
+    global _outbound_seq, _consec_suppressed, _suppressed_total
     if text is None:
         return
     text = str(text)
     if not text.strip():
         return
+
+    toks = _rsi_normalize(text)
+    # <5 tokens: too short to judge reliably — skip the check (her rule)
+    if len(toks) >= 5 and _EMIT_RING:
+        worst = max((_rsi_jaccard(toks, prev) for prev in _EMIT_RING), default=0.0)
+        if worst >= _SUPPRESS_THRESHOLD:
+            _consec_suppressed += 1
+            _suppressed_total += 1
+            print(f"[RSI/loop-detect] suppressed (jaccard={worst:.2f} >= "
+                  f"{_SUPPRESS_THRESHOLD}); consec={_consec_suppressed} "
+                  f"total={_suppressed_total}")
+            if _consec_suppressed == 3:
+                # emit the one diagnostic, then reset and let it re-evaluate
+                _consec_suppressed = 0
+                text = "loop_detected: 3 emissions suppressed"
+                toks = _rsi_normalize(text)
+            else:
+                return
+    # accepted emission: reset consec, update the ring (keep last 3)
+    _consec_suppressed = 0
+    _EMIT_RING.append(toks)
+    if len(_EMIT_RING) > 3:
+        del _EMIT_RING[0]
     with _outbound_lock:
         _outbound_seq += 1
         _outbound.append((_outbound_seq, time.time(), text))
-        # Cap memory: retain only the most recent 1000 messages
         if len(_outbound) > 1000:
             del _outbound[: len(_outbound) - 1000]
 
@@ -223,10 +286,23 @@ _DEFAULT_PRICING_PER_M = {
     "deepseek-v4-pro": (0.55, 2.19),
     "deepseek-v4-flash": (0.27, 1.10),
     "deepseek-chat": (0.27, 1.10),
-    # Control loop = MiniMax 3 on the free s-net tier → $0 to us.
+    # Control loop = MiniMax 3. FREE to us right now via the s-net hackathon
+    # promo, but it is NOT free normally — its real list rate is below.
+    # _ACTUAL_PRICING (what we pay now) zeroes it; _NORMAL_PRICING (durable
+    # "this is what it costs to run ThreadKeeper") uses the real rate.
     "minimax/minimax-m3": (0.0, 0.0),
     "minimax/minimax-m3-f": (0.0, 0.0),
     "minimax/minimax-m2.7": (0.0, 0.0),
+}
+
+# Real (non-promo) per-M rates, used for the DURABLE savings claim so the
+# headline is honest even after the hackathon free tier ends.
+# MiniMax M3 advertised rate (Jun 2026): $0.30 in / $1.20 out per 1M tokens
+# (their standing "50% off" of the $0.60/$2.40 list). Source: minimax.io docs.
+_NORMAL_RATES = {
+    "minimax/minimax-m3": (0.30, 1.20),
+    "minimax/minimax-m3-f": (0.20, 0.80),
+    "minimax/minimax-m2.7": (0.30, 1.20),
 }
 
 # Counterfactual baseline: a frontier model's public rate (illustrative — the
@@ -234,22 +310,29 @@ _DEFAULT_PRICING_PER_M = {
 _FRONTIER_BASELINE = (15.0, 75.0)
 _PRICING_FALLBACK = (15.0, 75.0)  # opus-tier conservative
 
-# ── ThreadKeeper 4-engine mesh: map each model name to a fixed role tile ─────
-# These are the four nodes from the Configurable Hybrid OmegaClaw diagram.
-# Each entry: (tile_id, display label, location, tier). Tier drives the
-# local-vs-cloud token split shown in the dashboard headline.
+# ── ThreadKeeper engine mesh: each model maps to a role tile ─────────────────
+# Layout: a full-width PRIMARY reasoning engine (the control loop that holds
+# the thread) on top, then two columns — LOCAL workers and CLOUD specialists,
+# each expandable to more engines. `column` drives placement; `tier` drives the
+# local-vs-cloud token/cost split. Reasoning DIVERSITY: the local column runs
+# multiple model FAMILIES (IBM Granite + Alibaba Qwen) across two GPUs.
 _ENGINE_ROLES = [
-    {"id": "control", "label": "Control Loop", "sub": "always-on thread manager",
-     "loc": "MiniMax 3 · free tier", "tier": "control",
+    {"id": "control", "label": "Primary Reasoning Engine", "sub": "always-on thread manager · holds the thread",
+     "loc": "MiniMax 3 · cloud (hackathon promo)", "column": "primary", "tier": "control",
      "models": ["minimax/minimax-m3", "minimax/minimax-m3-f", "minimax/minimax-m2.7"]},
-    {"id": "worker", "label": "Local Worker Loop", "sub": "cheap iterative execution",
-     "loc": "Granite-30B · RTX 3090 / gpt-oss · A4000", "tier": "local",
-     "models": ["granite4.1-30b-16k", "granite4.1-30b-64k", "granite4.1:30b", "gpt-oss:20b", "qwen3.5:9b"]},
-    {"id": "specialistA", "label": "Cloud Specialist A", "sub": "advanced reasoning",
-     "loc": "GLM 5.2 · Fireworks", "tier": "cloud",
+
+    {"id": "worker-granite", "label": "Granite-30B", "sub": "local worker · IBM family",
+     "loc": "RTX 3090 (.248)", "column": "local", "tier": "local",
+     "models": ["granite4.1-30b-16k", "granite4.1-30b-64k", "granite4.1:30b"]},
+    {"id": "worker-qwen", "label": "Qwen-9B", "sub": "local worker · Alibaba family",
+     "loc": "A4000 (.41)", "column": "local", "tier": "local",
+     "models": ["qwen3.5:9b", "qwen3.5-9b-nothink", "gpt-oss:20b"]},
+
+    {"id": "specialistA", "label": "GLM 5.2", "sub": "cloud specialist · advanced reasoning",
+     "loc": "Fireworks", "column": "cloud", "tier": "cloud",
      "models": ["accounts/fireworks/models/glm-5p2", "glm-5p2", "glm-5p1"]},
-    {"id": "specialistB", "label": "Cloud Specialist B", "sub": "coding / domain expert",
-     "loc": "DeepSeek V4 Pro · API", "tier": "cloud",
+    {"id": "specialistB", "label": "DeepSeek V4 Pro", "sub": "cloud specialist · coding / domain",
+     "loc": "DeepSeek API", "column": "cloud", "tier": "cloud",
      "models": ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner"]},
 ]
 
@@ -259,8 +342,11 @@ _ENGINE_ROLES = [
 # runs; falls back to import time.
 # Dashboard window: show activity from the last N minutes (rolling), so the
 # demo reliably reflects recent delegations regardless of exact restart timing.
-# Configurable via OMEGACLAW_MESH_WINDOW_MIN (default 60). Set to 0 for all-time.
-_MESH_WINDOW_MIN = float(os.environ.get("OMEGACLAW_MESH_WINDOW_MIN", "60"))
+# Configurable via OMEGACLAW_MESH_WINDOW_MIN. DEFAULT 0 = ALL-TIME (cumulative
+# totals from the append-only usage.jsonl — tiles only climb, survive restarts,
+# never "lose" your data). Set to a positive number of minutes only if you
+# specifically want a rolling window for a fresh-looking demo.
+_MESH_WINDOW_MIN = float(os.environ.get("OMEGACLAW_MESH_WINDOW_MIN", "0"))
 
 
 def _compute_engine_mesh():
@@ -284,7 +370,9 @@ def _compute_engine_mesh():
         bm["cost"] += (ti / 1e6) * p_in + (to / 1e6) * p_out
 
     tiles = []
-    local_tok = cloud_tok = 0
+    # Three honest buckets: on-prem LOCAL (granite/qwen), free-cloud CONTROL
+    # (MiniMax), and PAID cloud (GLM/DeepSeek). "free" = local + control.
+    local_tok = control_tok = paid_tok = 0
     for role in _ENGINE_ROLES:
         agg = {"input": 0, "output": 0, "calls": 0, "cost": 0.0}
         for m in role["models"]:
@@ -295,20 +383,39 @@ def _compute_engine_mesh():
                 agg["calls"] += v["calls"]
                 agg["cost"] += v["cost"]
         tok = agg["input"] + agg["output"]
-        # control (MiniMax free tier) and local both count as "not billed cloud"
-        if role["tier"] in ("local", "control"):
-            local_tok += tok
+        # normal-rate cost for this tile (local engines stay $0)
+        if role["tier"] == "local":
+            agg["normal_cost"] = 0.0
         else:
-            cloud_tok += tok
+            # use the model's real rate (NORMAL_RATES override, else pricing)
+            nr_in = nr_out = None
+            for mm in role["models"]:
+                if mm in _NORMAL_RATES:
+                    nr_in, nr_out = _NORMAL_RATES[mm]; break
+            if nr_in is None:
+                nr_in, nr_out = pricing.get(role["models"][0], _PRICING_FALLBACK)
+            agg["normal_cost"] = (agg["input"] / 1e6) * nr_in + (agg["output"] / 1e6) * nr_out
+        if role["tier"] == "local":
+            local_tok += tok
+        elif role["tier"] == "control":
+            control_tok += tok
+        else:
+            paid_tok += tok
         tiles.append({
             "id": role["id"], "label": role["label"], "sub": role["sub"],
             "loc": role["loc"], "tier": role["tier"],
+            "column": role.get("column", "local"),
             "input": agg["input"], "output": agg["output"],
             "calls": agg["calls"], "cost": round(agg["cost"], 4),
+            "normal_cost": round(agg.get("normal_cost", 0.0), 4),
             "tokens": tok,
         })
-    total = local_tok + cloud_tok
+    total = local_tok + control_tok + paid_tok
+    free_tok = local_tok + control_tok          # local + free-cloud control
     actual_cost = round(sum(t["cost"] for t in tiles), 4)
+    # normal (non-promo) ThreadKeeper cost: local free, MiniMax + specialists
+    # at real list rates. This is the durable claim, true after the promo ends.
+    normal_cost = round(sum(t["normal_cost"] for t in tiles), 4)
 
     # Counterfactual: what if EVERY token had run on a FRONTIER cloud model —
     # the naive "just point it at the best model" build that most agent stacks
@@ -319,15 +426,26 @@ def _compute_engine_mesh():
     total_out = sum(t["output"] for t in tiles)
     cf_in_rate, cf_out_rate = _FRONTIER_BASELINE  # see pricing block
     if_all_cloud = (total_in / 1e6) * cf_in_rate + (total_out / 1e6) * cf_out_rate
-    saved_usd = max(0.0, if_all_cloud - actual_cost)
+    # DURABLE savings: frontier baseline vs ThreadKeeper at NORMAL rates
+    # (not the promo $0). This stays true after the hackathon free tier ends.
+    saved_usd = max(0.0, if_all_cloud - normal_cost)
     saved_pct = round(100 * saved_usd / if_all_cloud, 1) if if_all_cloud else 0.0
 
     return {
         "tiles": tiles,
         "local_tokens": local_tok,
-        "cloud_tokens": cloud_tok,
+        "control_tokens": control_tok,
+        "paid_cloud_tokens": paid_tok,
+        "cloud_tokens": control_tok + paid_tok,   # all cloud (control + paid)
+        "free_tokens": free_tok,
+        # % of tokens that ran on OUR hardware (the durable, always-true claim)
         "local_pct": round(100 * local_tok / total, 1) if total else 0.0,
-        "total_cost": actual_cost,
+        # % on cloud (control + paid)
+        "cloud_pct": round(100 * (control_tok + paid_tok) / total, 1) if total else 0.0,
+        # % that hit a PAID model (the real cost driver)
+        "paid_pct": round(100 * paid_tok / total, 1) if total else 0.0,
+        "total_cost": actual_cost,        # what we pay NOW (promo: ~$0)
+        "normal_cost": normal_cost,       # what it costs at real rates (durable)
         "total_calls": sum(t["calls"] for t in tiles),
         "if_all_cloud_usd": round(if_all_cloud, 4),
         "saved_usd": round(saved_usd, 4),
@@ -738,9 +856,9 @@ _DASHBOARD_HTML = r"""<!doctype html>
   }
 
   .wrap {
-    max-width: 880px;
+    max-width: 1600px;   /* fills the screen full-width, capped for ultrawides */
     margin: 0 auto;
-    padding: 32px 24px 24px;
+    padding: 32px 40px 24px;
     position: relative;
     z-index: 1;
   }
@@ -990,20 +1108,50 @@ _DASHBOARD_HTML = r"""<!doctype html>
   #dna-claim b { color: #6fe3b4; }
 
   /* ThreadKeeper 4-engine mesh dashboard */
-  #mesh { margin: 10px 0 4px; }
-  #mesh-head {
-    display: flex; align-items: center; gap: 10px;
-    margin: 0 2px 8px; color: var(--muted, #9aa); font-size: 12px;
-    text-transform: uppercase; letter-spacing: .08em;
+  #mesh {
+    margin: 10px 0 4px; border: 1px solid var(--line, #2a2a35);
+    border-radius: 12px; background: rgba(120,120,160,0.04); overflow: hidden;
   }
+  #mesh-head {
+    display: flex; align-items: center; gap: 10px; cursor: pointer;
+    padding: 10px 12px; margin: 0; color: var(--muted, #9aa); font-size: 12px;
+    text-transform: uppercase; letter-spacing: .08em; user-select: none;
+  }
+  #mesh-head:hover { background: rgba(120,120,160,0.08); }
+  .mesh-caret { transition: transform .15s; display: inline-block; }
+  #mesh:not(.collapsed) .mesh-caret { transform: rotate(90deg); }
+  /* collapsed by default — chat is the star; click to expand the dashboard */
+  #mesh-body { max-height: 0; overflow: hidden; transition: max-height .3s ease; padding: 0 12px; }
+  #mesh:not(.collapsed) #mesh-body { max-height: 1400px; padding: 0 12px 12px; }
   .mesh-title { font-weight: 700; color: var(--fg, #ccd); }
   .mesh-split { margin-left: auto; text-transform: none; letter-spacing: 0; font-size: 12px; }
   .mesh-split b { color: #3ad29f; }
   .mesh-split i { color: #5aa0ff; font-style: normal; }
-  #mesh-tiles {
-    display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;
+  .mesh-split .ms-paid { color: #e0a85f; font-weight: 700; }
+  /* Primary engine — full width, holds the thread */
+  #mesh-primary { margin-bottom: 12px; }
+  #mesh-primary .mtile { padding: 12px 16px; }
+  #mesh-primary .mt-role { font-size: 15px; }
+  #mesh-primary .mt-tok { font-size: 24px; }
+  /* Local vs Cloud columns */
+  #mesh-columns {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 14px;
   }
-  @media (max-width: 720px) { #mesh-tiles { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 720px) { #mesh-columns { grid-template-columns: 1fr; } }
+  .mesh-col {
+    border-radius: 12px; padding: 8px; background: rgba(120,120,160,0.04);
+    border: 1px solid var(--line, #2a2a35);
+  }
+  .mesh-col.local-col  { border-top: 2px solid rgba(43,191,134,0.6); }
+  .mesh-col.cloud-col  { border-top: 2px solid rgba(74,134,232,0.6); }
+  .mesh-col-head {
+    font-size: 11px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--muted, #9aa); padding: 4px 6px 8px; display: flex; align-items: center; gap: 7px;
+  }
+  .mc-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .mc-dot.local { background: #2bbf86; box-shadow: 0 0 8px #2bbf86; }
+  .mc-dot.cloud { background: #4a86e8; box-shadow: 0 0 8px #4a86e8; }
+  .mesh-col-tiles { display: flex; flex-direction: column; gap: 8px; }
   .mtile {
     border-radius: 12px; padding: 10px 12px; position: relative;
     border: 1px solid var(--line, #2a2a35); background: rgba(120,120,160,0.05);
@@ -1048,6 +1196,7 @@ _DASHBOARD_HTML = r"""<!doctype html>
   .sv-arrow { color: #6a7; }
   .sv-actual { color: var(--fg, #cde); }
   .sv-actual b { color: #6fe3b4; font-variant-numeric: tabular-nums; }
+  .sv-promo { font-size: 11px; color: #c0a13a; opacity: .85; }
   .sv-saved {
     margin-left: auto; font-weight: 800; font-size: 15px; color: #3ad29f;
     background: rgba(58,210,159,0.12); padding: 3px 10px; border-radius: 999px;
@@ -1243,49 +1392,37 @@ _DASHBOARD_HTML = r"""<!doctype html>
   </div>
 </header>
 
-<!-- ThreadKeeper 4-engine mesh dashboard -->
-<div id="mesh">
-  <div id="mesh-head">
+<!-- ThreadKeeper engine mesh dashboard — collapsible (collapsed by default so
+     chat is the star; click the header to geek out on the token counts) -->
+<div id="mesh" class="collapsed">
+  <div id="mesh-head" onclick="toggleMesh()">
+    <span class="mesh-caret">▸</span>
     <span class="mesh-title">⚙ reasoning engines</span>
     <span id="mesh-split" class="mesh-split"></span>
   </div>
-  <div id="mesh-tiles">
-    <div class="mtile control" data-id="control">
-      <div class="mt-role">Control Loop</div>
-      <div class="mt-sub">always-on thread manager</div>
-      <div class="mt-loc">MiniMax 3 · free tier</div>
-      <div class="mt-tok"><span class="mt-n">0</span> tokens</div>
-      <div class="mt-meta"><span class="mt-calls">0</span> calls · <span class="mt-cost">$0</span></div>
+  <div id="mesh-body">
+    <!-- Primary reasoning engine (control loop, holds the thread) -->
+    <div id="mesh-primary"></div>
+    <!-- Local vs Cloud columns, each expandable -->
+    <div id="mesh-columns">
+      <div class="mesh-col local-col">
+        <div class="mesh-col-head"><span class="mc-dot local"></span>LOCAL · on-prem</div>
+        <div class="mesh-col-tiles" id="col-local"></div>
+      </div>
+      <div class="mesh-col cloud-col">
+        <div class="mesh-col-head"><span class="mc-dot cloud"></span>CLOUD · on demand</div>
+        <div class="mesh-col-tiles" id="col-cloud"></div>
+      </div>
     </div>
-    <div class="mtile local" data-id="worker">
-      <div class="mt-role">Local Worker Loop</div>
-      <div class="mt-sub">cheap iterative execution</div>
-      <div class="mt-loc">Granite-30B · gpt-oss</div>
-      <div class="mt-tok"><span class="mt-n">0</span> tokens</div>
-      <div class="mt-meta"><span class="mt-calls">0</span> calls · <span class="mt-cost">$0</span></div>
-    </div>
-    <div class="mtile cloud" data-id="specialistA">
-      <div class="mt-role">Cloud Specialist A</div>
-      <div class="mt-sub">advanced reasoning</div>
-      <div class="mt-loc">GLM 5.2 · Fireworks</div>
-      <div class="mt-tok"><span class="mt-n">0</span> tokens</div>
-      <div class="mt-meta"><span class="mt-calls">0</span> calls · <span class="mt-cost">$0</span></div>
-    </div>
-    <div class="mtile cloud" data-id="specialistB">
-      <div class="mt-role">Cloud Specialist B</div>
-      <div class="mt-sub">coding / domain expert</div>
-      <div class="mt-loc">DeepSeek V4 Pro · API</div>
-      <div class="mt-tok"><span class="mt-n">0</span> tokens</div>
-      <div class="mt-meta"><span class="mt-calls">0</span> calls · <span class="mt-cost">$0</span></div>
-    </div>
-  </div>
-  <div id="savings">
-    <div id="savings-bar"><div id="savings-fill"></div><span id="savings-bar-label"></span></div>
-    <div id="savings-headline">
-      <span class="sv-cf">all-cloud: <b id="sv-cf">$0</b></span>
-      <span class="sv-arrow">→</span>
-      <span class="sv-actual">ThreadKeeper: <b id="sv-actual">$0</b></span>
-      <span id="sv-saved" class="sv-saved">SAVED 0%</span>
+    <div id="savings">
+      <div id="savings-bar"><div id="savings-fill"></div><span id="savings-bar-label"></span></div>
+      <div id="savings-headline">
+        <span class="sv-cf">all-frontier: <b id="sv-cf">$0</b></span>
+        <span class="sv-arrow">→</span>
+        <span class="sv-actual">ThreadKeeper: <b id="sv-actual">$0</b></span>
+        <span id="sv-saved" class="sv-saved">SAVED 0%</span>
+        <span id="sv-promo" class="sv-promo"></span>
+      </div>
     </div>
   </div>
 </div>
@@ -1616,6 +1753,7 @@ async function pollReasoning() {
 
 // ──────────────────────── ThreadKeeper engine mesh ───────────────────────
 const _meshPrev = {};   // tile id -> last token count (to flash on change)
+function round1(n) { return Math.round(n * 10) / 10; }
 function fmtTok(n) {
   if (n >= 1e6) return (n/1e6).toFixed(2) + "M";
   if (n >= 1e3) return (n/1e3).toFixed(1) + "k";
@@ -1626,42 +1764,73 @@ function fmtCost(c) {
   if (c < 0.01) return "$" + c.toFixed(4);
   return "$" + c.toFixed(2);
 }
+function tileHtml(t) {
+  const cls = t.column === "primary" ? "control" : (t.column === "cloud" ? "cloud" : "local");
+  return `<div class="mtile ${cls}" data-id="${t.id}">
+    <div class="mt-role">${escapeHtml(t.label)}</div>
+    <div class="mt-sub">${escapeHtml(t.sub)}</div>
+    <div class="mt-loc">${escapeHtml(t.loc)}</div>
+    <div class="mt-tok"><span class="mt-n">${fmtTok(t.tokens)}</span> tokens</div>
+    <div class="mt-meta"><span class="mt-calls">${t.calls}</span> calls · <span class="mt-cost">${fmtCost(t.cost)}</span></div>
+  </div>`;
+}
 async function pollMesh() {
   try {
     const r = await fetch(`${CHANNEL_BASE}/mesh`);
     const d = await r.json();
-    for (const t of d.tiles || []) {
+    const tiles = d.tiles || [];
+    // (re)build the three regions
+    const prim = tiles.filter(t => t.column === "primary");
+    const loc  = tiles.filter(t => t.column === "local");
+    const cld  = tiles.filter(t => t.column === "cloud");
+    const setRegion = (id, list) => {
+      const el = document.getElementById(id);
+      if (el) el.innerHTML = list.map(tileHtml).join("");
+    };
+    setRegion("mesh-primary", prim);
+    setRegion("col-local", loc);
+    setRegion("col-cloud", cld);
+    // flash tiles whose tokens grew (an engine just fired)
+    for (const t of tiles) {
       const el = document.querySelector(`.mtile[data-id="${t.id}"]`);
-      if (!el) continue;
-      el.querySelector(".mt-n").textContent = fmtTok(t.tokens);
-      el.querySelector(".mt-calls").textContent = t.calls;
-      el.querySelector(".mt-cost").textContent = fmtCost(t.cost);
-      // flash when tokens grow (an engine just fired)
-      if (_meshPrev[t.id] !== undefined && t.tokens > _meshPrev[t.id]) {
+      if (el && _meshPrev[t.id] !== undefined && t.tokens > _meshPrev[t.id]) {
         el.classList.add("active");
-        setTimeout(() => el.classList.remove("active"), 1800);
+        setTimeout(() => el && el.classList.remove("active"), 1800);
       }
       _meshPrev[t.id] = t.tokens;
     }
     const split = document.getElementById("mesh-split");
     if (split) {
-      split.innerHTML = `<b>${d.local_pct}% local</b> · <i>${(100-d.local_pct).toFixed(1)}% cloud</i> · ${fmtTok(d.local_tokens + d.cloud_tokens)} tok · ${fmtCost(d.total_cost)}`;
+      // Honest split: on-prem local vs cloud (control+specialists). The cost
+      // story is "% that hit a PAID model", since the control tier is cloud.
+      split.innerHTML = `<b>${d.local_pct}% on-prem</b> · <i>${d.cloud_pct}% cloud</i> · ` +
+        `<span class="ms-paid">${d.paid_pct}% paid</span> · ${fmtTok(d.local_tokens + d.cloud_tokens)} tok · ${fmtCost(d.total_cost)}`;
     }
-    // savings strip: local-share bar + counterfactual headline
+    // savings strip: bar shows the FREE share (on-prem local + promo control),
+    // labeled honestly — the durable claim is "% on our own hardware".
     const fill = document.getElementById("savings-fill");
-    if (fill) fill.style.width = d.local_pct + "%";
+    const freePct = (d.total_cost !== undefined && (d.local_tokens + d.cloud_tokens) > 0)
+      ? round1(100 * d.free_tokens / (d.local_tokens + d.cloud_tokens)) : 0;
+    if (fill) fill.style.width = freePct + "%";
     const blab = document.getElementById("savings-bar-label");
-    if (blab) blab.textContent = d.local_pct > 8 ? `${d.local_pct}% of work ran LOCAL ($0)` : "";
+    if (blab) blab.textContent = freePct > 8
+      ? `${d.local_pct}% on-prem · only ${d.paid_pct}% hit a paid model` : "";
     const cf = document.getElementById("sv-cf");
     const ac = document.getElementById("sv-actual");
     const sv = document.getElementById("sv-saved");
+    const pr = document.getElementById("sv-promo");
+    // HONEST: ThreadKeeper at NORMAL (non-promo) rates vs an all-frontier build.
     if (cf) cf.textContent = fmtCost(d.if_all_cloud_usd);
-    if (ac) ac.textContent = fmtCost(d.total_cost);
+    if (ac) ac.textContent = fmtCost(d.normal_cost);
     if (sv) sv.textContent = `SAVED ${d.saved_pct}%`;
+    // note the promo separately — what we pay right now
+    if (pr) pr.textContent = (d.total_cost < d.normal_cost)
+      ? `· $${d.total_cost.toFixed(4)} now (MiniMax hackathon promo)` : "";
   } catch (e) { /* best-effort */ }
 }
 
 // ──────────────────────── OmegaClaw DNA panel ────────────────────────────
+function toggleMesh() { document.getElementById("mesh").classList.toggle("collapsed"); }
 function toggleDna() { document.getElementById("dna").classList.toggle("collapsed"); }
 let _dnaLoaded = false;
 async function loadDna() {
