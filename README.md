@@ -190,6 +190,32 @@ cat memory/usage.jsonl                         # per-call token log
 cat memory/escalations.jsonl                   # audit trail of escalation decisions
 ```
 
+### What the dashboard numbers mean (honest scope)
+
+The live mesh dashboard (`channels/local.py`) and the budget tracker both read
+**one agent's `memory/usage.jsonl`** — they are accurate for *that agent, since
+its log began*, and nothing more. Read the tiles with this in mind:
+
+- **Per-agent, not fleet-wide.** Each agent keeps its own `usage.jsonl`. A
+  provider's total on the dashboard is that agent's lifetime usage, not your
+  account's total spend across every agent or direct API call. To get a
+  fleet-wide figure you would aggregate every agent's log (not done here).
+- **Tokens are dominated by re-sent context.** A persistent control loop
+  re-sends its growing history every iteration, so cumulative *input* tokens
+  vastly exceed *output* tokens (e.g. a control model can show millions of
+  input tokens against tens of thousands of output). The token count is honest
+  but is mostly the same context counted many times — not N distinct jobs.
+- **Costs use example rates.** The per-model rates in `channels/local.py` /
+  `threadkeeper.config.yaml` are illustrative public figures, not your billed
+  pricing. The cost column is a consistent estimate, not an invoice.
+- **The savings headline is a counterfactual**, comparing the local-heavy mix
+  against an all-frontier build at those same example rates — a relative
+  argument for the architecture, not a claim about absolute dollars.
+
+In short: the dashboard answers *"what did **this agent** route where, at
+illustrative rates"* — which is exactly the architecture story ThreadKeeper is
+making. It is not a billing console.
+
 ---
 
 ## Reference — OmegaClaw-Core
