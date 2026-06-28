@@ -343,8 +343,18 @@ class BudgetTracker:
                         d = json.loads(line)
                     except Exception:
                         continue
-                    if thread_id is not None and d.get("thread_id") != thread_id:
-                        continue
+                    if thread_id is not None:
+                        rec_tid = d.get("thread_id")
+                        # Records written without a thread_id (the worker/loop
+                        # usage log format + the dashboard's own records) belong
+                        # to the default thread — otherwise the per-thread
+                        # filter would exclude ALL real usage and the gate would
+                        # always see spent=0 (deny forever).
+                        if rec_tid is None:
+                            if thread_id != "default":
+                                continue
+                        elif rec_tid != thread_id:
+                            continue
                     yield d
         except Exception:
             return
@@ -371,11 +381,33 @@ class BudgetTracker:
             total += rec.cost_estimate(rates)
         return round(total, 6)
 
+    # Model-name fragments that mark a record as a CLOUD call when the record
+    # has no explicit node_role (the bare worker/loop log format omits it).
+    _CLOUD_MODEL_HINTS = (
+        "glm", "deepseek", "minimax", "gpt-", "gpt4", "gpt-4", "claude",
+        "fireworks", "openai", "o1", "o3", "mistral", "gemini",
+    )
+
+    def _is_local_record(self, d: dict) -> bool:
+        """Best-effort: is this usage record a cheap local (control/worker)
+        call? Explicit node_role wins; otherwise infer from the model name
+        (bare records from the worker loop have no node_role and run on local
+        Ollama models)."""
+        role = d.get("node_role")
+        if role in ("control_loop", "worker_loop", "local"):
+            return True
+        if role in ("cloud_specialist", "adjudicator", "cloud"):
+            return False
+        model = str(d.get("model", "")).lower()
+        return not any(h in model for h in self._CLOUD_MODEL_HINTS)
+
     def local_iterations(self, thread_id: str = "default") -> int:
-        """Count cheap (control/worker) calls logged for this thread."""
+        """Count cheap (control/worker) calls logged for this thread. Records
+        without an explicit node_role are classified by model name so the real
+        agent usage log (which omits node_role) is counted correctly."""
         n = 0
         for d in self._iter_records(thread_id):
-            if d.get("node_role") in ("control_loop", "worker_loop"):
+            if self._is_local_record(d):
                 n += 1
         return n
 

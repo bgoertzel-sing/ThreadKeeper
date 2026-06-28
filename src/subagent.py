@@ -14,13 +14,10 @@ specialized model than the parent runs. See
 docs/reference-skills-subagent.md for the skill reference and
 docs/tutorial-09-subagents.md for the end-to-end walkthrough.
 
-Provider integration builds a plain OpenAI-compatible client per
-dispatch from the persona's JSON config. LOCAL Ollama workers are
-called via the native /api/chat path with {"think": false} (reasoning
-models return empty content via /v1 on current Ollama builds); CLOUD
-workers (e.g. GLM 5.2) use the standard /v1 chat path. Worker token
-usage is logged to memory/usage.jsonl so delegated work appears on the
-ThreadKeeper mesh dashboard's Local Worker tile.
+Provider integration uses lib_llm_ext.AIProvider — instantiated
+fresh per dispatch from the persona's JSON config. Stays inside
+the existing class abstraction; does not mutate
+lib_llm_ext._provider_registry.
 
 The minimal response-cleanup logic below (strip <think> blocks,
 strip markdown fences, parse line-leading s-exprs) keeps the
@@ -61,6 +58,63 @@ def _log_worker_usage(model, in_tok, out_tok):
             f.write(json.dumps(rec) + "\n")
     except Exception:
         pass
+
+
+# ----------------------------------------------------------------------
+# ThreadKeeper escalation gate.
+#
+# Delegations to a CLOUD specialist are the expensive node — so before we
+# dispatch one, we consult ThreadKeeper's budget policy (which lives in
+# src/escalation.metta, evaluated through PeTTa by BudgetTracker). LOCAL
+# delegations (Ollama on .41/.248) are free and always proceed ungated.
+#
+# Fail-OPEN: if the policy can't be evaluated (module missing, etc.), we
+# allow the delegation. A broken governor must never silently halt the
+# agent's work — it just means that one call isn't budget-checked.
+# ----------------------------------------------------------------------
+def _persona_is_cloud(cfg):
+    """Classify a persona as cloud vs local. A persona may declare
+    `node_role` explicitly; otherwise we infer from the base_url (the
+    same local-Ollama heuristic _call_subagent_llm uses)."""
+    role = (cfg.get("node_role") or "").strip().lower()
+    if role in ("cloud_specialist", "cloud", "specialist", "adjudicator"):
+        return True
+    if role in ("worker_loop", "control_loop", "local", "worker"):
+        return False
+    base_url = (cfg.get("base_url") or "").lower()
+    is_local = ("11434" in base_url) or ("localhost" in base_url) or ("ollama" in base_url)
+    return not is_local
+
+
+def _escalation_gate(cfg, thread_id="default"):
+    """Return (allowed: bool, reason: str). Local → always allow.
+    Cloud → ThreadKeeper's MeTTa policy decides. Never raises (fail-open)."""
+    if not _persona_is_cloud(cfg):
+        return (True, "local node — no budget gate")
+    try:
+        # Locate threadkeeper_budget.py: shipped beside this overlay module,
+        # or in the repo src/. Add whichever dir holds it to sys.path.
+        here = os.path.dirname(os.path.abspath(__file__))
+        candidates = [
+            here,                                            # overlay/
+            os.path.join(here, "..", "src"),                 # repo src/
+            os.environ.get("THREADKEEPER_SRC_DIR", ""),
+        ]
+        BudgetTracker = None
+        for d in candidates:
+            if d and os.path.isfile(os.path.join(d, "threadkeeper_budget.py")):
+                if d not in sys.path:
+                    sys.path.insert(0, d)
+                from threadkeeper_budget import BudgetTracker  # noqa
+                break
+        if BudgetTracker is None:
+            return (True, "budget module unavailable — fail-open allow")
+        bt = BudgetTracker()
+        # A cloud delegation IS the "this subproblem is hard" signal.
+        d = bt.should_escalate(thread_id=thread_id, subproblem_is_hard=True)
+        return (bool(d.allowed), d.reason)
+    except Exception as e:
+        return (True, f"gate error ({type(e).__name__}) — fail-open allow")
 
 
 # Persona-config directory. Configurable via env var; default is
@@ -248,16 +302,18 @@ def validate_endpoint_compat(tool_names, cfg):
 # ----------------------------------------------------------------------
 
 def resolve_or_instantiate_provider(provider_name, model_name, base_url, var_name):
-    """Build a per-dispatch OpenAI-compatible client + binding handle.
+    """Build an AIProvider scoped to this dispatch. Stays inside
+    lib_llm_ext's existing class abstraction; does not mutate
+    _provider_registry.
 
-    A fresh client per dispatch ensures each persona's (provider, model,
-    base_url, api_key_env) binding is honored exactly — no shared mutable
-    state across dispatches with different bindings. The local Ollama path
-    in _call_subagent_llm uses native urllib and ignores the client, so a
-    client failure here never breaks local delegation.
+    A fresh AIProvider instance per dispatch ensures each persona's
+    (provider, model, base_url, api_key_env) binding is honored
+    exactly — no shared mutable state across dispatches with
+    different bindings. AIProvider's _ensure_client lazy-inits the
+    underlying openai client on first .chat() call, so this is
+    cheap at construction (no network).
 
-    Returns a dict with keys: provider (openai client | None), model,
-    provider_name, base_url, var_name."""
+    Returns a dict with keys: provider (AIProvider), model, provider_name."""
     api_key = os.environ.get(var_name)
     if not api_key:
         raise RuntimeError(
@@ -285,7 +341,7 @@ def resolve_or_instantiate_provider(provider_name, model_name, base_url, var_nam
 
 
 # ----------------------------------------------------------------------
-# Worker LLM call — local (native /api/chat + think:false) or cloud (/v1).
+# LLM call — uses AIProvider.chat from lib_llm_ext.
 # ----------------------------------------------------------------------
 
 def _call_subagent_llm(provider_handle, content, max_tokens):
@@ -296,7 +352,7 @@ def _call_subagent_llm(provider_handle, content, max_tokens):
     EMPTY content for reasoning models (qwen/gemma/gpt-oss/granite) because
     hidden <think> tokens consume the whole budget. The native path with
     thinking disabled returns real content. For non-Ollama (cloud) endpoints
-    we use the standard OpenAI /v1 chat path, which is correct there.
+    we fall back to AIProvider.chat (/v1), which is correct there.
 
     Never raises into the MeTTa interpreter — returns a (subagent ...) string
     on failure.
@@ -667,6 +723,20 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
         cfg = load_persona_config(persona_key)
     except (FileNotFoundError, ValueError) as e:
         return error(str(e))
+
+    # 2b. ThreadKeeper escalation gate. A delegation to a CLOUD specialist is
+    # the expensive node — consult the budget policy (src/escalation.metta via
+    # PeTTa) before spending. If denied, refuse the dispatch and return the
+    # [metta]-tagged reason so the parent loop sees WHY (and can finish on cheap
+    # nodes). Local delegations are free and pass through. Fail-open on errors.
+    gate_allowed, gate_reason = _escalation_gate(cfg)
+    if not gate_allowed:
+        return cap(
+            f"(escalation denied) {gate_reason} — "
+            f"cloud delegation to persona '{persona_key}' refused by the "
+            f"ThreadKeeper budget policy; finish on local/cheap nodes or stop.",
+            bounded_chars,
+        )
 
     # 3. Resolve tool subset
     subset_csv = (tool_subset_csv or "").strip()
