@@ -70,6 +70,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _DEFAULT_CONFIG_PATH = os.path.join(_REPO_ROOT, "threadkeeper.config.yaml")
 _DEFAULT_USAGE_LOG = os.path.join(_REPO_ROOT, "memory", "usage.jsonl")
 _DEFAULT_ESCALATION_LOG = os.path.join(_REPO_ROOT, "memory", "escalations.jsonl")
+_DEFAULT_ESCALATION_METTA = os.path.join(_REPO_ROOT, "src", "escalation.metta")
 
 
 # ----------------------------------------------------------------------
@@ -107,6 +108,122 @@ class EscalationDecision:
 
 
 # ----------------------------------------------------------------------
+# The escalation POLICY engine — MeTTa-first, Python-fallback.
+#
+# ThreadKeeper's routing decision lives in src/escalation.metta as Atomspace
+# rules (so the agent can read/rewrite it — the OmegaClaw self-modification
+# story). This wrapper loads that policy into OmegaClaw's MeTTa runtime (PeTTa)
+# once and evaluates `(tk-escalate ...)` against live facts. If PeTTa or the
+# policy file is unavailable (e.g. on a host/CI without the runtime), it stays
+# inert and the caller falls back to the equivalent Python rules — so behavior
+# is identical either way and the reasoning path never breaks.
+# ----------------------------------------------------------------------
+class _MettaPolicy:
+    """Loads escalation.metta into PeTTa and evaluates the verdict.
+
+    `verdict(...)` returns (allowed: bool, reason: str) or None if the MeTTa
+    runtime / policy file could not be used (caller then uses Python rules).
+    """
+
+    def __init__(self, metta_path: str):
+        self._path = metta_path
+        self._engine = None
+        self._tried = False
+
+    # Conventional locations of PeTTa's Python binding inside the runtime.
+    # `petta.py` lives at <PeTTa>/python/petta.py; the agent process is usually
+    # launched from /PeTTa, but we don't rely on that — we put the binding dir
+    # on sys.path ourselves so the import works regardless of cwd/launcher.
+    _PETTA_PYTHON_DIRS = (
+        os.environ.get("PETTA_PYTHON_DIR", ""),
+        "/PeTTa/python",
+        os.path.join(os.path.dirname(_REPO_ROOT), "python"),  # repo under <PeTTa>/repos/*
+    )
+
+    def _import_petta(self):
+        """Import PeTTa, adding its binding dir to sys.path if needed."""
+        try:
+            from petta import PeTTa  # already importable
+            return PeTTa
+        except Exception:
+            pass
+        import sys
+        for d in self._PETTA_PYTHON_DIRS:
+            if d and os.path.isfile(os.path.join(d, "petta.py")):
+                if d not in sys.path:
+                    sys.path.insert(0, d)
+                try:
+                    from petta import PeTTa
+                    return PeTTa
+                except Exception:
+                    continue
+        return None
+
+    def _ensure(self):
+        """Lazily import PeTTa and load the policy file. Never raises."""
+        if self._tried:
+            return self._engine
+        self._tried = True
+        try:
+            if not os.path.isfile(self._path):
+                return None
+            PeTTa = self._import_petta()
+            if PeTTa is None:
+                return None
+            eng = PeTTa(verbose=False)
+            eng.load_metta_file(self._path)
+            # Smoke-test one query so a broken load disables the path cleanly.
+            probe = eng.process_metta_string(
+                "!(tk-escalate 0 1 1 1 0 True)"
+            )
+            if not probe:
+                return None
+            self._engine = eng
+        except Exception:
+            self._engine = None
+        return self._engine
+
+    @staticmethod
+    def _parse(results) -> Optional[tuple]:
+        """Map PeTTa output like ['(deny "reason")'] -> (allowed, reason)."""
+        if not results:
+            return None
+        s = str(results[0]).strip()
+        low = s.lower()
+        if low.startswith("(allow"):
+            allowed = True
+        elif low.startswith("(deny"):
+            allowed = False
+        else:
+            return None
+        # reason = the quoted string inside the tuple, if present
+        reason = ""
+        if '"' in s:
+            try:
+                reason = s.split('"', 1)[1].rsplit('"', 1)[0]
+            except Exception:
+                reason = ""
+        return (allowed, reason)
+
+    def verdict(
+        self, spent, ceiling, soft, min_local, iters, hard
+    ) -> Optional[tuple]:
+        """Evaluate the MeTTa policy. Returns (allowed, reason) or None."""
+        eng = self._ensure()
+        if eng is None:
+            return None
+        try:
+            hard_atom = "True" if hard else "False"
+            call = (
+                f"!(tk-escalate {int(spent)} {int(ceiling)} {int(soft)} "
+                f"{int(min_local)} {int(iters)} {hard_atom})"
+            )
+            return self._parse(eng.process_metta_string(call))
+        except Exception:
+            return None
+
+
+# ----------------------------------------------------------------------
 # The tracker
 # ----------------------------------------------------------------------
 class BudgetTracker:
@@ -132,6 +249,12 @@ class BudgetTracker:
             "escalation_log_abs", _DEFAULT_ESCALATION_LOG
         )
         self._record_decisions = gov.get("record_escalation_decisions", True)
+
+        # Escalation policy lives in MeTTa (src/escalation.metta); the path is
+        # configurable via governance.escalation_policy_metta. The engine is
+        # lazy + degrades to None, so constructing it here is free and safe.
+        policy_path = gov.get("escalation_metta_abs", _DEFAULT_ESCALATION_METTA)
+        self._policy = _MettaPolicy(policy_path)
 
     # -- config loading -------------------------------------------------
     def _load_raw_config(self) -> dict:
@@ -160,6 +283,8 @@ class BudgetTracker:
             out["usage_log_abs"] = self._abs(gov["usage_log"])
         if gov.get("escalation_log"):
             out["escalation_log_abs"] = self._abs(gov["escalation_log"])
+        if gov.get("escalation_policy_metta"):
+            out["escalation_metta_abs"] = self._abs(gov["escalation_policy_metta"])
         return out
 
     @staticmethod
@@ -293,6 +418,31 @@ class BudgetTracker:
             self._maybe_log_decision(d)
             return d
 
+        # MeTTa-FIRST: the policy lives in src/escalation.metta (Atomspace rules).
+        # We evaluate it against the live facts; the verdict decides allow/deny.
+        # The reason is tagged [metta] so the audit trail shows the decision came
+        # from the symbolic policy, not from these Python lines. If the MeTTa
+        # runtime/policy is unavailable, `verdict` is None and we fall through to
+        # the equivalent Python rules below (identical behavior, never raises).
+        mv = self._policy.verdict(
+            spent=spent,
+            ceiling=ceiling,
+            soft=soft,
+            min_local=min_local,
+            iters=local_iters,
+            hard=subproblem_is_hard,
+        )
+        if mv is not None:
+            allowed, m_reason = mv
+            return decide(
+                allowed,
+                f"[metta] {m_reason} "
+                f"(spent={spent}, soft={soft}, ceiling={ceiling}, "
+                f"local_iters={local_iters}/{min_local}, "
+                f"hard={subproblem_is_hard})",
+            )
+
+        # ---- Python fallback (used only when MeTTa is unavailable) ----------
         if local_iters < min_local:
             return decide(
                 False,

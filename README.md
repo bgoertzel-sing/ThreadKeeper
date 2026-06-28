@@ -57,6 +57,24 @@ whether escalation is justified. Every LLM call is logged
 (`memory/escalations.jsonl`), giving an ISO/IEC 42001-friendly audit
 trail of when expensive reasoning was bought and why.
 
+**The policy itself lives in MeTTa, not Python.** The escalation *decision*
+is a set of Atomspace rules in
+[`src/escalation.metta`](./src/escalation.metta) (`tk-escalate`), evaluated
+through OmegaClaw's own MeTTa runtime (PeTTa). `threadkeeper_budget.py` is the
+seam: it supplies live facts (spend, ceiling, soft threshold, local iterations,
+hard-flag) and executes the verdict — but the routing logic is symbolic and
+**agent-readable / agent-rewritable** via the existing `(read-file ...)` /
+`(write-file ...)` skills. This is the same self-modification property
+OpenCog Hyperon is built around (see
+[`docs/recursive-self-improvement.md`](./docs/recursive-self-improvement.md),
+where the agent rewrote its own MeTTa skill). If the MeTTa runtime is
+unavailable (e.g. a host/CI without PeTTa), the gate falls back to an identical
+set of Python rules — verified by
+[`tests/test_escalation_metta_parity.py`](./tests/test_escalation_metta_parity.py),
+which checks the MeTTa verdict equals the Python spec across every branch. The
+budget *numbers* stay in `threadkeeper.config.yaml`; the `.metta` owns only the
+logic.
+
 Full design: **[`docs/architecture.md`](./docs/architecture.md)**.
 
 ---

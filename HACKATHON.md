@@ -37,7 +37,8 @@ runs exactly as before.
 | Addition | Files | Purpose |
 |---|---|---|
 | Subagent dispatch (`delegate` skill) | `src/subagent.py`, `src/skills.metta` | The "cloud specialist" node — bounded, governed delegation to a right-sized model. |
-| Cost-awareness seam | `src/threadkeeper_budget.py` | Per-loop token accounting + escalation decision against a budget. |
+| Cost-awareness seam | `src/threadkeeper_budget.py` | Per-loop token accounting; supplies live facts to the policy and executes its verdict. |
+| **Escalation policy in MeTTa** | `src/escalation.metta`, `tests/test_escalation_metta_parity.py` | The routing decision as Atomspace rules (`tk-escalate`), evaluated through PeTTa — symbolic, auditable, agent-rewritable. Python fallback proven equivalent by a parity test. |
 | Configuration surface | `threadkeeper.config.yaml` | The four-node mesh + budget threshold declared in one place. |
 | Architecture docs + diagram | `docs/architecture.md`, `docs/architecture.png` | The concept, the node responsibilities, the escalation logic. |
 | Subagent reference + tutorial | `docs/reference-skills-subagent.md`, `docs/tutorial-09-subagents.md` | How to use the `delegate` skill end to end. |

@@ -154,3 +154,13 @@ governance:
   # recorded, giving an audit trail of when expensive reasoning was
   # bought and on what budget basis.
   record_escalation_decisions: true
+
+  # The escalation/routing POLICY itself lives in MeTTa (Atomspace rules), not
+  # in Python. This is the path to that policy file; the budget gate loads it
+  # into OmegaClaw's MeTTa runtime (PeTTa) and evaluates (tk-escalate ...)
+  # against live facts. The agent can read/rewrite this file via its own
+  # (read-file ...) / (write-file ...) skills — self-modifiable governance.
+  # If the MeTTa runtime is unavailable, the gate falls back to the equivalent
+  # Python rules (identical behavior). Numbers stay in `budget:` above; this
+  # file owns only the decision logic.
+  escalation_policy_metta: src/escalation.metta
