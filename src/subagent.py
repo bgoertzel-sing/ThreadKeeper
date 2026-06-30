@@ -41,6 +41,7 @@ import shlex
 import subprocess
 import sys
 import time
+import tempfile
 
 # Worker-call usage log — SAME file the parent loop + dashboard read, so
 # delegated work shows up on the ThreadKeeper mesh's Local Worker tile.
@@ -159,6 +160,12 @@ _SUBAGENT_RESULTS_CAP = 4000
 # output truncated, default 30s timeout.
 _SHELL_OUTPUT_CAP = 4000
 _SHELL_TIMEOUT_S = 30
+
+# Subagent LLM call reliability controls. Keep defaults bounded so a stuck
+# worker endpoint cannot hang the parent loop indefinitely.
+_SUBAGENT_LLM_TIMEOUT_S = int(os.environ.get("OMEGACLAW_SUBAGENT_LLM_TIMEOUT_S", "180"))
+_SUBAGENT_LLM_RETRIES = int(os.environ.get("OMEGACLAW_SUBAGENT_LLM_RETRIES", "1"))
+_SUBAGENT_LLM_BACKOFF_S = float(os.environ.get("OMEGACLAW_SUBAGENT_LLM_BACKOFF_S", "1.0"))
 
 
 def _subagent_workspace_root():
@@ -393,6 +400,25 @@ def resolve_or_instantiate_provider(provider_name, model_name, base_url, var_nam
 # LLM call — uses AIProvider.chat from lib_llm_ext.
 # ----------------------------------------------------------------------
 
+def _call_with_retries(call_once, label):
+    """Run one bounded worker call with retry/backoff. Returns text or error."""
+    attempts = max(1, _SUBAGENT_LLM_RETRIES + 1)
+    last_exc = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return call_once()
+        except Exception as e:
+            last_exc = e
+            if attempt < attempts:
+                delay = max(0.0, _SUBAGENT_LLM_BACKOFF_S) * (2 ** (attempt - 1))
+                if delay:
+                    time.sleep(delay)
+    return (
+        f"(subagent LLM call failed after {attempts} attempt(s) "
+        f"via {label}: {type(last_exc).__name__}: {last_exc})"
+    )
+
+
 def _call_subagent_llm(provider_handle, content, max_tokens):
     """Call the subagent's worker LLM and return response text.
 
@@ -414,7 +440,7 @@ def _call_subagent_llm(provider_handle, content, max_tokens):
         import json as _json
         import urllib.request as _u
         root = base_url[:-3] if base_url.endswith("/v1") else base_url
-        try:
+        def call_once():
             body = _json.dumps({
                 "model": model,
                 "messages": [{"role": "user", "content": content}],
@@ -424,24 +450,24 @@ def _call_subagent_llm(provider_handle, content, max_tokens):
             }).encode()
             req = _u.Request(root + "/api/chat", data=body,
                              headers={"Content-Type": "application/json"})
-            with _u.urlopen(req, timeout=180) as r:
+            with _u.urlopen(req, timeout=_SUBAGENT_LLM_TIMEOUT_S) as r:
                 data = _json.loads(r.read().decode("utf-8", errors="replace"))
             _log_worker_usage(model, data.get("prompt_eval_count", 0),
                               data.get("eval_count", 0))
             return (data.get("message") or {}).get("content", "") or ""
-        except Exception as e:
-            return f"(subagent LLM call failed: {type(e).__name__}: {e})"
+        return _call_with_retries(call_once, "ollama")
 
     # Cloud endpoint — standard OpenAI /v1 chat (GLM/DeepSeek separate
     # reasoning from content correctly here).
     client = provider_handle["provider"]
     if client is None:
         return "(subagent error: no cloud client available)"
-    try:
+    def call_once():
         resp = client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": content}],
             max_tokens=max_tokens,
+            timeout=_SUBAGENT_LLM_TIMEOUT_S,
         )
         try:
             u = resp.usage
@@ -450,8 +476,7 @@ def _call_subagent_llm(provider_handle, content, max_tokens):
         except Exception:
             pass
         return resp.choices[0].message.content or ""
-    except Exception as e:
-        return f"(subagent LLM call failed: {type(e).__name__}: {e})"
+    return _call_with_retries(call_once, "openai-compatible")
 
 
 # ----------------------------------------------------------------------
@@ -644,8 +669,21 @@ def _tool_write_file(path, content):
         parent = os.path.dirname(resolved)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        with open(resolved, "w", encoding="utf-8") as f:
-            f.write(content)
+        fd, tmp = tempfile.mkstemp(
+            prefix=f".{os.path.basename(resolved)}.", suffix=".tmp", dir=parent or None
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(content)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, resolved)
+        finally:
+            try:
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
+            except Exception:
+                pass
         return "WRITE-FILE-SUCCESS"
     except Exception as e:
         return f"(write-file error: {e})"
@@ -693,6 +731,30 @@ def _tool_shell(cmd):
         return f"(shell error: {e})"
 
 
+def _validate_tool_args(name, args):
+    expected = {
+        "read-file": 1,
+        "shell": 1,
+        "search": 1,
+        "tavily-search": 1,
+        "technical-analysis": 1,
+        "write-file": 2,
+        "append-file": 2,
+    }
+    if name not in expected:
+        return None
+    want = expected[name]
+    if len(args) != want:
+        return f"expected {want} arg(s), got {len(args)}"
+    if any(a is None for a in args):
+        return "arguments must not be null"
+    if name in ("read-file", "write-file", "append-file") and not str(args[0]).strip():
+        return "path argument must not be empty"
+    if name != "append-file" and any("\x00" in str(a) for a in args):
+        return "arguments must not contain NUL bytes"
+    return None
+
+
 def run_tools(calls, allowed_names):
     """Execute each call against the registry, return aggregated result
     string for the next turn's prompt."""
@@ -712,6 +774,10 @@ def run_tools(calls, allowed_names):
         tool = reg.get(name)
         if tool is None:
             out_parts.append(f"(SKILL_UNAVAILABLE: {name} not registered)")
+            continue
+        arg_error = _validate_tool_args(name, args)
+        if arg_error:
+            out_parts.append(f"(SKILL_ARG_ERROR: {name}: {arg_error})")
             continue
         fn, _category = tool
         try:
