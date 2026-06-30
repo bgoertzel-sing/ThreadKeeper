@@ -83,9 +83,14 @@ interpreter.
 
 ### Notes / limits
 
-- The subagent's persona, tool subset, and provider/model are
+- The subagent's persona, tool subset, provider/model, and sandbox policy are
   declared at dispatch time. The subagent cannot expand its own
-  permissions inside the loop.
+  permissions inside the loop. File tools are constrained to root-scoped
+  `read_roots`, `write_roots`, and `append_roots` resolved under
+  `sandbox_root`; path traversal, absolute-path escape, and symlink escape are
+  rejected before opening the file.
+- `shell` is disabled by default even if requested in `tools_csv`; set
+  `allow_shell: true` in the persona policy to opt in to the restricted shell.
 - The subagent's loop runs in the parent's Python process; its LLM
   endpoint can live anywhere the deployment configures (local
   Ollama, remote API, etc.). The subagent's history, working state,

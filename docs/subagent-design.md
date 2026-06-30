@@ -82,6 +82,9 @@ A subagent persona is two files in `memory/personas-subagent/`
 | `api_key_env` | yes | **Name** of the env var carrying the key. Never embed key material. |
 | `max_output_tokens` | optional (1500) | Per-call output cap. |
 | `default_tool_subset` | optional | Tools used when the dispatch omits the tools arg. |
+| `sandbox_root` | optional | Root directory for subagent file tools; defaults to the repo root. Relative file paths resolve under this root. |
+| `read_roots` / `write_roots` / `append_roots` | optional | Root-scoped allow-lists for file tools. Relative roots resolve under `sandbox_root`; defaults to `["."]`. |
+| `allow_shell` | optional (`false`) | Enables the `shell` tool only when explicitly set true by persona/policy. |
 | `notes` | optional | Free-form; not consumed by the dispatcher. |
 
 See [`../memory/personas-subagent/README.md`](../memory/personas-subagent/README.md)
@@ -96,11 +99,17 @@ subset:
 |---|---|
 | `search` | `channels/websearch.py` (DuckDuckGo) |
 | `read-file` / `write-file` / `append-file` | stdlib file I/O |
-| `shell` | restricted subprocess (no apostrophes, 30 s timeout, 4 KB output cap) |
+| `shell` | disabled by default; if persona/policy sets `allow_shell: true`, restricted subprocess (no apostrophes, 30 s timeout, 4 KB output cap) |
 | `tavily-search` | `src/agentverse.py` (if `uagents` installed) |
 | `technical-analysis` | `src/agentverse.py` (if `uagents` installed) |
 
 Unknown tools are rejected at parse time with a clear error string.
+
+File tools are sandboxed before opening: relative paths resolve under the
+persona's `sandbox_root`, absolute paths must still fall within the allowed
+root for that operation, and resolved symlinks may not escape the allowed
+roots. Persona policy fields may be declared either at top level or under a
+`policy`, `sandbox`, or `subagent_policy` object.
 
 ### 4.5.2 Deliberately excluded tools
 

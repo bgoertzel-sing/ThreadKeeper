@@ -40,6 +40,7 @@ import re
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 # Worker-call usage log — SAME file the parent loop + dashboard read, so
 # delegated work shows up on the ThreadKeeper mesh's Local Worker tile.
@@ -147,6 +148,116 @@ _SUBAGENT_RESULTS_CAP = 4000
 # output truncated, default 30s timeout.
 _SHELL_OUTPUT_CAP = 4000
 _SHELL_TIMEOUT_S = 30
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+# ----------------------------------------------------------------------
+# Subagent sandbox / policy
+# ----------------------------------------------------------------------
+
+class SubagentPolicy:
+    """Small, explicit policy object for v1 subagent tools.
+
+    File tools are scoped to configured roots and resolve symlinks before
+    opening. Shell is denied unless the persona/policy explicitly enables it.
+    Config shape is intentionally permissive for a first hardening slice:
+
+      {"sandbox_root": "...", "allow_shell": false,
+       "read_roots": ["..."], "write_roots": ["..."], "append_roots": ["..."]}
+
+    The same keys may live at top level of the persona config or under
+    "policy" / "sandbox". Relative roots and tool paths are resolved against
+    sandbox_root (default: repo root).
+    """
+
+    def __init__(self, sandbox_root, read_roots=None, write_roots=None,
+                 append_roots=None, allow_shell=False):
+        self.sandbox_root = self._resolve_root(sandbox_root, _REPO_ROOT)
+        self.read_roots = self._roots(read_roots, self.sandbox_root)
+        self.write_roots = self._roots(write_roots, self.sandbox_root)
+        self.append_roots = self._roots(append_roots, self.sandbox_root)
+        self.allow_shell = bool(allow_shell)
+
+    @classmethod
+    def from_config(cls, cfg):
+        policy = {}
+        for key in ("sandbox", "policy", "subagent_policy"):
+            if isinstance(cfg.get(key), dict):
+                policy.update(cfg[key])
+        # Explicit top-level keys override nested defaults for backwards-
+        # friendly persona editing.
+        for key in (
+            "sandbox_root", "allow_shell", "read_roots", "write_roots",
+            "append_roots",
+        ):
+            if key in cfg:
+                policy[key] = cfg[key]
+        root = policy.get(
+            "sandbox_root",
+            os.environ.get("OMEGACLAW_SUBAGENT_SANDBOX_ROOT", str(_REPO_ROOT)),
+        )
+        return cls(
+            root,
+            read_roots=policy.get("read_roots"),
+            write_roots=policy.get("write_roots"),
+            append_roots=policy.get("append_roots"),
+            allow_shell=policy.get("allow_shell", False),
+        )
+
+    @staticmethod
+    def _resolve_root(path, base):
+        p = Path(path).expanduser()
+        if not p.is_absolute():
+            p = Path(base) / p
+        return p.resolve(strict=False)
+
+    @classmethod
+    def _roots(cls, roots, sandbox_root):
+        if roots in (None, ""):
+            roots = ["."]
+        if isinstance(roots, str):
+            roots = [roots]
+        resolved = [cls._resolve_root(r, sandbox_root) for r in roots]
+        return resolved or [sandbox_root]
+
+    @staticmethod
+    def _is_within(path, root):
+        try:
+            path.relative_to(root)
+            return True
+        except ValueError:
+            return False
+
+    def resolve_path(self, raw_path, mode):
+        if not raw_path or "\x00" in raw_path:
+            raise ValueError("empty or NUL-containing path rejected")
+        candidate = Path(raw_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = self.sandbox_root / candidate
+        resolved = candidate.resolve(strict=False)
+        roots = {
+            "read": self.read_roots,
+            "write": self.write_roots,
+            "append": self.append_roots,
+        }[mode]
+        if not any(self._is_within(resolved, root) for root in roots):
+            raise PermissionError(
+                f"{mode}-file path escapes subagent sandbox: {raw_path}"
+            )
+        if mode == "read" and not resolved.is_file():
+            # Preserve ordinary open() wording for missing files after the
+            # sandbox decision has been made.
+            raise FileNotFoundError(raw_path)
+        return str(resolved)
+
+    def check_shell(self):
+        if not self.allow_shell:
+            raise PermissionError("shell tool disabled by subagent policy")
+
+
+def _default_policy():
+    return SubagentPolicy.from_config({})
 
 
 # ----------------------------------------------------------------------
@@ -580,35 +691,48 @@ def _find_close_quote(s, start):
 # Tool execution
 # ----------------------------------------------------------------------
 
-def _tool_read_file(path):
+def _tool_read_file(path, policy=None):
+    policy = policy or _default_policy()
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
+        safe_path = policy.resolve_path(path, "read")
+        with open(safe_path, "r", encoding="utf-8", errors="replace") as f:
             return f.read()
     except Exception as e:
         return f"(read-file error: {e})"
 
 
-def _tool_write_file(path, content):
+def _tool_write_file(path, content, policy=None):
+    policy = policy or _default_policy()
     try:
-        with open(path, "w", encoding="utf-8") as f:
+        safe_path = policy.resolve_path(path, "write")
+        os.makedirs(os.path.dirname(safe_path), exist_ok=True)
+        with open(safe_path, "w", encoding="utf-8") as f:
             f.write(content)
         return "WRITE-FILE-SUCCESS"
     except Exception as e:
         return f"(write-file error: {e})"
 
 
-def _tool_append_file(path, content):
+def _tool_append_file(path, content, policy=None):
+    policy = policy or _default_policy()
     try:
-        with open(path, "a", encoding="utf-8") as f:
+        safe_path = policy.resolve_path(path, "append")
+        os.makedirs(os.path.dirname(safe_path), exist_ok=True)
+        with open(safe_path, "a", encoding="utf-8") as f:
             f.write(content + "\n")
         return "APPEND-FILE-SUCCESS"
     except Exception as e:
         return f"(append-file error: {e})"
 
 
-def _tool_shell(cmd):
+def _tool_shell(cmd, policy=None):
     """Restricted shell. Matches parent's no-apostrophe constraint,
     bounded timeout, output truncated."""
+    policy = policy or _default_policy()
+    try:
+        policy.check_shell()
+    except Exception as e:
+        return f"(shell error: {e})"
     if "'" in cmd:
         return "(shell error: apostrophes not allowed)"
     try:
@@ -624,7 +748,7 @@ def _tool_shell(cmd):
         return f"(shell error: {e})"
 
 
-def run_tools(calls, allowed_names):
+def run_tools(calls, allowed_names, policy=None):
     """Execute each call against the registry, return aggregated result
     string for the next turn's prompt."""
     if not calls:
@@ -646,7 +770,10 @@ def run_tools(calls, allowed_names):
             continue
         fn, _category = tool
         try:
-            result = fn(*args)
+            if name in ("read-file", "write-file", "append-file", "shell"):
+                result = fn(*args, policy=policy)
+            else:
+                result = fn(*args)
         except TypeError as e:
             out_parts.append(f"(SKILL_ARG_ERROR: {name}: {e})")
             continue
@@ -753,6 +880,10 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
     except ValueError as e:
         return error(str(e))
 
+    policy = SubagentPolicy.from_config(cfg)
+    if "shell" in tool_names and not policy.allow_shell:
+        return error("shell tool disabled by subagent policy")
+
     validate_endpoint_compat(tool_names, cfg)  # always passes in v1
 
     # 4. Load persona prompt
@@ -794,7 +925,7 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
         if emit_value is not None:
             return cap(emit_value, bounded_chars)
 
-        last_results = run_tools(calls, tool_names)
+        last_results = run_tools(calls, tool_names, policy=policy)
         history.append((turn + 1, raw, last_results))
 
     # Loop exhausted without (emit ...)
