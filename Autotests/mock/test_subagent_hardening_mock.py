@@ -56,6 +56,16 @@ def test_write_file_uses_atomic_replace_inside_workspace(tmp_path, monkeypatch):
     assert not list((tmp_path / "nested").glob(".*.tmp"))
 
 
+def test_append_file_uses_atomic_replace_inside_workspace(tmp_path, monkeypatch):
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_WORKSPACE", str(tmp_path))
+    target = tmp_path / "nested" / "artifact.txt"
+
+    assert subagent._tool_append_file("nested/artifact.txt", "first") == "APPEND-FILE-SUCCESS"
+    assert subagent._tool_append_file("nested/artifact.txt", "second") == "APPEND-FILE-SUCCESS"
+    assert target.read_text() == "first\nsecond\n"
+    assert not list((tmp_path / "nested").glob(".*.tmp"))
+
+
 def test_history_is_bounded_and_evicted_turns_are_digested(monkeypatch):
     monkeypatch.setattr(subagent, "_SUBAGENT_HISTORY_MAX_TURNS", 2)
     history = []
