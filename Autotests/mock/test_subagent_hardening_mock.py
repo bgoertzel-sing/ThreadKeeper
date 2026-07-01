@@ -149,3 +149,46 @@ def test_escalation_policy_hash_mismatch_denies_cloud_dispatch(tmp_path, monkeyp
 
     assert "escalation denied" in result
     assert "integrity mismatch" in result
+
+
+def test_task_contract_limits_file_paths_and_persists_contract(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    contract_goal = json.dumps({
+        "objective": "write only inside safe output",
+        "allowed_paths": ["safe"],
+        "done_criteria": ["safe/out.txt exists"],
+    })
+    responses = iter([
+        '(write-file "unsafe.txt" "nope")\n(write-file "safe/out.txt" "ok")',
+        '(emit "contract respected")',
+    ])
+    monkeypatch.setattr(subagent, "_call_subagent_llm", lambda *_args: next(responses))
+
+    payload = json.loads(subagent.dispatch(contract_goal, "write-file", "unit", max_turns=3))
+
+    assert payload["status"] == "ok"
+    assert payload["files_changed"] == ["safe/out.txt"]
+    assert not (tmp_path / "workspace" / "unsafe.txt").exists()
+    assert (tmp_path / "workspace" / "safe" / "out.txt").read_text() == "ok"
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["goal"] == "write only inside safe output"
+    assert saved["task_contract"]["allowed_paths"] == ["safe"]
+    assert saved["task_contract"]["done_criteria"] == ["safe/out.txt exists"]
+    assert "CONTRACT_VIOLATION" in saved["turns"][0]["tool_results"]
+
+
+def test_task_contract_forbidden_action_blocks_tool(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    contract_goal = json.dumps({
+        "objective": "do not modify files",
+        "forbidden_actions": ["write-file"],
+    })
+    monkeypatch.setattr(subagent, "_call_subagent_llm", lambda *_args: '(write-file "out.txt" "nope")')
+
+    payload = json.loads(subagent.dispatch(contract_goal, "write-file", "unit", max_turns=1))
+
+    assert payload["status"] == "incomplete"
+    assert payload["files_changed"] == []
+    assert not (tmp_path / "workspace" / "out.txt").exists()
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert "forbidden by task contract" in saved["turns"][0]["tool_results"]

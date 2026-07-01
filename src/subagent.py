@@ -293,6 +293,7 @@ def _new_run_record(persona_key, goal):
         "files_changed": [],
         "tests_run": [],
         "transcript_path": path,
+        "task_contract": {},
     }
 
 
@@ -665,6 +666,80 @@ _TOOL_DESCRIPTIONS = {
 }
 
 
+def _normalize_task_contract(goal, cfg=None):
+    """Return (objective_text, contract_dict) for optional task contracts.
+
+    Contracts are intentionally data-only and may be supplied either in the
+    persona JSON as `task_contract` or inline as a JSON goal object containing
+    `objective`, `allowed_paths`, `forbidden_actions`, and/or `done_criteria`.
+    This keeps the existing `(delegate goal tools persona max_turns)` API while
+    giving parent agents a concrete way to narrow a child task.
+    """
+    contract = dict((cfg or {}).get("task_contract") or {})
+    objective = str(goal or "")
+    try:
+        parsed = json.loads(goal) if isinstance(goal, str) else goal
+    except Exception:
+        parsed = None
+    if isinstance(parsed, dict):
+        inline = parsed.get("task_contract") if isinstance(parsed.get("task_contract"), dict) else parsed
+        if isinstance(inline, dict):
+            for key in ("allowed_paths", "forbidden_actions", "done_criteria"):
+                if key in inline:
+                    contract[key] = inline[key]
+            objective = str(inline.get("objective") or parsed.get("objective") or objective)
+    contract["allowed_paths"] = _contract_string_list(contract.get("allowed_paths"))
+    contract["forbidden_actions"] = _contract_string_list(contract.get("forbidden_actions"))
+    contract["done_criteria"] = _contract_string_list(contract.get("done_criteria"))
+    return objective, contract
+
+
+def _contract_string_list(value):
+    if value is None or value == "":
+        return []
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        value = [str(value)]
+    out = []
+    for item in value:
+        text = str(item or "").strip()
+        if text and "\x00" not in text:
+            out.append(text)
+    return out
+
+
+def _path_within_contract(path, contract):
+    allowed = (contract or {}).get("allowed_paths") or []
+    if not allowed:
+        return True
+    try:
+        resolved = _resolve_workspace_path(path)
+    except Exception:
+        return False
+    for prefix in allowed:
+        try:
+            allowed_path = _resolve_workspace_path(prefix)
+        except Exception:
+            continue
+        if os.path.commonpath([allowed_path, resolved]) == allowed_path:
+            return True
+    return False
+
+
+def _tool_forbidden_by_contract(name, contract):
+    forbidden = {x.strip().lower() for x in ((contract or {}).get("forbidden_actions") or [])}
+    aliases = {
+        name.lower(),
+        name.lower().replace("-", "_"),
+    }
+    if name in ("write-file", "append-file"):
+        aliases.update({"write", "file-write", "modify-files"})
+    if name == "shell":
+        aliases.update({"exec", "execute", "run-command", "shell-exec"})
+    return bool(forbidden & aliases)
+
+
 def tools_catalog(tool_names):
     """Build the subagent's SKILLS block — narrowed to the subset."""
     lines = []
@@ -681,7 +756,8 @@ def tools_catalog(tool_names):
 
 
 def build_subagent_prompt(persona, catalog, last_results, history, goal,
-                          iteration, max_iterations, history_digest=None):
+                          iteration, max_iterations, history_digest=None,
+                          task_contract=None):
     """Build the subagent's per-turn prompt. Shape mirrors the parent's
     getContext but with smaller per-component caps appropriate to a
     short-lived helper."""
@@ -704,6 +780,14 @@ def build_subagent_prompt(persona, catalog, last_results, history, goal,
         f"GOAL: {goal}",
         f"ITERATION: {iteration} of {max_iterations} maximum",
     ]
+    if task_contract:
+        parts.append(
+            "TASK_CONTRACT:\n"
+            f"objective: {goal}\n"
+            f"allowed_paths: {task_contract.get('allowed_paths') or []}\n"
+            f"forbidden_actions: {task_contract.get('forbidden_actions') or []}\n"
+            f"done_criteria: {task_contract.get('done_criteria') or []}"
+        )
     if last_results:
         parts.append(f"LAST_RESULTS:\n{last_results[-_SUBAGENT_RESULTS_CAP:]}")
     if history_digest:
@@ -922,7 +1006,7 @@ def _cancel_requested():
     return bool(path and os.path.exists(path))
 
 
-def run_tools(calls, allowed_names, record=None, quota=None):
+def run_tools(calls, allowed_names, record=None, quota=None, task_contract=None):
     """Execute each call against the registry, return aggregated result
     string for the next turn's prompt."""
     if not calls:
@@ -943,6 +1027,9 @@ def run_tools(calls, allowed_names, record=None, quota=None):
         if name == "emit":
             # emit is the loop terminator; handled by the caller
             continue
+        if _tool_forbidden_by_contract(name, task_contract):
+            out_parts.append(f"(CONTRACT_VIOLATION: {name} is forbidden by task contract)")
+            continue
         if name not in allowed_names:
             out_parts.append(
                 f"(SKILL_REJECTED: {name} not in this dispatch's tool subset)"
@@ -955,6 +1042,11 @@ def run_tools(calls, allowed_names, record=None, quota=None):
         arg_error = _validate_tool_args(name, args)
         if arg_error:
             out_parts.append(f"(SKILL_ARG_ERROR: {name}: {arg_error})")
+            continue
+        if name in ("read-file", "write-file", "append-file") and not _path_within_contract(args[0], task_contract):
+            out_parts.append(
+                f"(CONTRACT_VIOLATION: {name} path '{args[0]}' outside allowed_paths)"
+            )
             continue
         fn, _category = tool
         try:
@@ -1050,6 +1142,7 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
         cfg = load_persona_config(persona_key)
     except (FileNotFoundError, ValueError) as e:
         return error(str(e))
+    objective, task_contract = _normalize_task_contract(goal, cfg)
 
     # 2b. ThreadKeeper escalation gate. A delegation to a CLOUD specialist is
     # the expensive node — consult the budget policy (src/escalation.metta via
@@ -1107,7 +1200,8 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
     last_results = ""
     tool_calls_remaining = max(0, _SUBAGENT_MAX_TOOL_CALLS)
     max_out_tok = int(cfg.get("max_output_tokens", SUBAGENT_DEFAULT_OUTPUT_TOKENS))
-    run_record = _new_run_record(persona_key, goal)
+    run_record = _new_run_record(persona_key, objective)
+    run_record["task_contract"] = dict(task_contract)
 
     for turn in range(bounded_turns):
         if _cancel_requested():
@@ -1118,8 +1212,8 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
                 max_chars=bounded_chars,
             )
         prompt = build_subagent_prompt(
-            persona_text, catalog, last_results, history, goal,
-            turn + 1, bounded_turns, history_digest,
+            persona_text, catalog, last_results, history, objective,
+            turn + 1, bounded_turns, history_digest, task_contract,
         )
         raw = _call_subagent_llm(provider_handle, prompt, max_out_tok)
         turn_record = {"turn": turn + 1, "prompt": prompt, "raw_response": raw, "tool_calls": []}
@@ -1141,7 +1235,10 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
             _finish_run_record(run_record, "ok", emit_value)
             return _structured_return(emit_value, run_record, max_chars=bounded_chars)
 
-        last_results = run_tools(calls, tool_names, run_record, quota=tool_calls_remaining)
+        last_results = run_tools(
+            calls, tool_names, run_record, quota=tool_calls_remaining,
+            task_contract=task_contract,
+        )
         tool_calls_remaining = run_record.get("tool_calls_remaining", tool_calls_remaining)
         if "QUOTA_EXCEEDED" in last_results:
             turn_record["tool_results"] = last_results
