@@ -91,6 +91,7 @@ def _write_unit_persona(tmp_path, monkeypatch, node_role="local"):
         "api_key_env": "UNIT_API_KEY",
         "base_url": "http://localhost:11434" if node_role == "local" else "https://example.invalid/v1",
         "node_role": node_role,
+        "endpoint_kind": "ollama_native" if node_role == "local" else "openai_compatible",
         "default_tool_subset": ["write-file"],
     }))
     monkeypatch.setattr(subagent, "PERSONA_DIR", str(persona_dir))
@@ -98,6 +99,53 @@ def _write_unit_persona(tmp_path, monkeypatch, node_role="local"):
     monkeypatch.setenv("UNIT_API_KEY", "dummy")
     monkeypatch.setenv("OMEGACLAW_SUBAGENT_WORKSPACE", str(tmp_path / "workspace"))
     return persona_dir
+
+
+def test_persona_config_requires_explicit_node_role(tmp_path, monkeypatch):
+    persona_dir = tmp_path / "personas"
+    persona_dir.mkdir()
+    (persona_dir / "unit.txt").write_text("You are a unit-test subagent.")
+    (persona_dir / "unit.json").write_text(json.dumps({
+        "persona_file": "unit.txt",
+        "provider": "ollama",
+        "model": "unit-model",
+        "api_key_env": "UNIT_API_KEY",
+        "base_url": "http://localhost:11434",
+    }))
+    monkeypatch.setattr(subagent, "PERSONA_DIR", str(persona_dir))
+
+    try:
+        subagent.load_persona_config("unit")
+        assert False, "missing node_role should be rejected"
+    except ValueError as e:
+        assert "node_role" in str(e)
+
+
+def test_endpoint_kind_controls_llm_transport_without_base_url_heuristic(monkeypatch):
+    seen = {}
+
+    class FakeClient:
+        class Chat:
+            class Completions:
+                def create(self, **kwargs):
+                    seen["called"] = kwargs
+                    return type("Resp", (), {
+                        "usage": None,
+                        "choices": [type("Choice", (), {
+                            "message": type("Msg", (), {"content": '(emit "cloud")'})()
+                        })()],
+                    })()
+            completions = Completions()
+        chat = Chat()
+
+    handle = {
+        "provider": FakeClient(),
+        "model": "unit-model",
+        "base_url": "http://localhost:11434/v1",  # intentionally misleading
+        "endpoint_kind": "openai_compatible",
+    }
+    assert subagent._call_subagent_llm(handle, "prompt", 12) == '(emit "cloud")'
+    assert seen["called"]["timeout"] == subagent._SUBAGENT_LLM_TIMEOUT_S
 
 
 def test_dispatch_returns_structured_digest_and_persists_transcript(tmp_path, monkeypatch):

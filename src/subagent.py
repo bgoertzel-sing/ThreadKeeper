@@ -77,18 +77,48 @@ def _log_worker_usage(model, in_tok, out_tok):
 # prototype's historical fail-open behavior with
 # OMEGACLAW_SUBAGENT_BUDGET_FALLBACK=allow, but the safe default is deny.
 # ----------------------------------------------------------------------
+_LOCAL_NODE_ROLES = frozenset(["worker_loop", "control_loop", "local", "worker"])
+_CLOUD_NODE_ROLES = frozenset(["cloud_specialist", "cloud", "specialist", "adjudicator"])
+_OPENAI_COMPAT_ENDPOINTS = frozenset(["openai_compatible", "openai-compatible", "openai", "cloud"])
+_OLLAMA_ENDPOINTS = frozenset(["ollama_native", "ollama-native", "ollama"])
+
+
+def _node_role(cfg):
+    """Return the explicit persona node role.
+
+    Older prototypes guessed cloud/local status from model/base_url strings.
+    ThreadKeeper hardening now requires persona metadata to say what kind of
+    worker this is, so safety gates do not depend on fragile endpoint names.
+    """
+    return (cfg.get("node_role") or "").strip().lower()
+
+
+def _endpoint_kind(cfg):
+    """Return explicit provider transport metadata for worker LLM calls.
+
+    `endpoint_kind` is preferred. For compatibility with existing persona files,
+    provider names are accepted only as metadata labels (never by base_url/model
+    substring). This keeps cloud/local budget classification on `node_role`.
+    """
+    kind = (cfg.get("endpoint_kind") or cfg.get("provider_transport") or cfg.get("provider") or "").strip().lower()
+    if kind in _OLLAMA_ENDPOINTS:
+        return "ollama_native"
+    if kind in _OPENAI_COMPAT_ENDPOINTS:
+        return "openai_compatible"
+    return kind
+
+
 def _persona_is_cloud(cfg):
-    """Classify a persona as cloud vs local. A persona may declare
-    `node_role` explicitly; otherwise we infer from the base_url (the
-    same local-Ollama heuristic _call_subagent_llm uses)."""
-    role = (cfg.get("node_role") or "").strip().lower()
-    if role in ("cloud_specialist", "cloud", "specialist", "adjudicator"):
+    """Classify a persona from explicit `node_role` metadata only."""
+    role = _node_role(cfg)
+    if role in _CLOUD_NODE_ROLES:
         return True
-    if role in ("worker_loop", "control_loop", "local", "worker"):
+    if role in _LOCAL_NODE_ROLES:
         return False
-    base_url = (cfg.get("base_url") or "").lower()
-    is_local = ("11434" in base_url) or ("localhost" in base_url) or ("ollama" in base_url)
-    return not is_local
+    raise ValueError(
+        "persona config has invalid node_role; expected one of "
+        f"{sorted(_LOCAL_NODE_ROLES | _CLOUD_NODE_ROLES)}"
+    )
 
 
 def _escalation_policy_path():
@@ -385,13 +415,27 @@ def load_persona_config(persona_key):
             raise ValueError(
                 f"persona config '{persona_key}.json' is malformed JSON: {e}"
             )
-    required = ["persona_file", "provider", "model", "api_key_env"]
+    required = ["persona_file", "provider", "model", "api_key_env", "node_role"]
     missing = [k for k in required if k not in cfg]
     if missing:
         raise ValueError(
             f"persona config '{persona_key}.json' missing required field(s): {missing}"
         )
+    role = _node_role(cfg)
+    if role not in (_LOCAL_NODE_ROLES | _CLOUD_NODE_ROLES):
+        raise ValueError(
+            f"persona config '{persona_key}.json' has invalid node_role '{cfg.get('node_role')}'; "
+            f"expected one of {sorted(_LOCAL_NODE_ROLES | _CLOUD_NODE_ROLES)}"
+        )
+    kind = _endpoint_kind(cfg)
+    if kind not in {"ollama_native", "openai_compatible"}:
+        raise ValueError(
+            f"persona config '{persona_key}.json' has invalid endpoint_kind/provider metadata '{kind}'; "
+            "expected ollama_native or openai_compatible"
+        )
     cfg["_persona_key"] = persona_key
+    cfg["_node_role"] = role
+    cfg["_endpoint_kind"] = kind
     return cfg
 
 
@@ -518,7 +562,7 @@ def validate_endpoint_compat(tool_names, cfg):
 # Provider resolution
 # ----------------------------------------------------------------------
 
-def resolve_or_instantiate_provider(provider_name, model_name, base_url, var_name):
+def resolve_or_instantiate_provider(provider_name, model_name, base_url, var_name, endpoint_kind=None):
     """Build an AIProvider scoped to this dispatch. Stays inside
     lib_llm_ext's existing class abstraction; does not mutate
     _provider_registry.
@@ -554,6 +598,7 @@ def resolve_or_instantiate_provider(provider_name, model_name, base_url, var_nam
         "provider_name": provider_name,
         "base_url": base_url or "",
         "var_name": var_name,
+        "endpoint_kind": endpoint_kind or _endpoint_kind({"provider": provider_name}),
     }
 
 
@@ -595,9 +640,9 @@ def _call_subagent_llm(provider_handle, content, max_tokens):
     """
     base_url = (provider_handle.get("base_url") or "").rstrip("/")
     model = provider_handle["model"]
-    is_local = ("11434" in base_url) or ("localhost" in base_url) or ("ollama" in base_url.lower())
+    endpoint_kind = (provider_handle.get("endpoint_kind") or "").strip().lower()
 
-    if base_url and is_local:
+    if base_url and endpoint_kind == "ollama_native":
         import json as _json
         import urllib.request as _u
         root = base_url[:-3] if base_url.endswith("/v1") else base_url
@@ -1210,6 +1255,7 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
             model_name=cfg["model"],
             base_url=cfg.get("base_url"),
             var_name=cfg["api_key_env"],
+            endpoint_kind=cfg.get("_endpoint_kind"),
         )
     except RuntimeError as e:
         return error(str(e))
