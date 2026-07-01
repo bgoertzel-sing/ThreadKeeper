@@ -44,6 +44,10 @@ import time
 import tempfile
 import uuid
 import hashlib
+try:
+    import fcntl
+except Exception:  # pragma: no cover - non-Unix fallback
+    fcntl = None
 
 # Worker-call usage log — SAME file the parent loop + dashboard read, so
 # delegated work shows up on the ThreadKeeper mesh's Local Worker tile.
@@ -238,6 +242,7 @@ _SHELL_TIMEOUT_S = 30
 _SUBAGENT_LLM_TIMEOUT_S = int(os.environ.get("OMEGACLAW_SUBAGENT_LLM_TIMEOUT_S", "180"))
 _SUBAGENT_LLM_RETRIES = int(os.environ.get("OMEGACLAW_SUBAGENT_LLM_RETRIES", "1"))
 _SUBAGENT_LLM_BACKOFF_S = float(os.environ.get("OMEGACLAW_SUBAGENT_LLM_BACKOFF_S", "1.0"))
+_SUBAGENT_LLM_CALLS_PER_MINUTE = int(os.environ.get("OMEGACLAW_SUBAGENT_LLM_CALLS_PER_MINUTE", "60"))
 
 # Per-dispatch safety controls. Tool-call quota bounds work even if a worker
 # loops or emits many calls per turn. Cancellation is intentionally file-based
@@ -306,6 +311,52 @@ def _json_atomic_write(path, data):
                 os.unlink(tmp)
         except Exception:
             pass
+
+
+def _rate_limit_state_path(label):
+    safe = _safe_slug(label or "worker", max_len=32)
+    return os.path.join(SUBAGENT_RUN_DIR, f".llm-rate-{safe}.json")
+
+
+def _subagent_llm_rate_limit_acquire(label):
+    """Atomically reserve one worker LLM call for the current minute.
+
+    This is a small cross-process backpressure guard for ThreadKeeper workers:
+    even if several parent loops invoke subagents at once, each configured
+    endpoint label has a bounded calls/minute budget. Set
+    OMEGACLAW_SUBAGENT_LLM_CALLS_PER_MINUTE=0 to disable locally.
+    """
+    limit = max(0, int(_SUBAGENT_LLM_CALLS_PER_MINUTE))
+    if limit == 0:
+        return (True, "disabled")
+    if fcntl is None:
+        return (False, "fcntl unavailable for atomic rate-limit state")
+    path = _rate_limit_state_path(label)
+    parent = os.path.dirname(path)
+    os.makedirs(parent, exist_ok=True)
+    now = time.time()
+    window_start = now - 60.0
+    try:
+        with open(path, "a+", encoding="utf-8") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            f.seek(0)
+            try:
+                data = json.load(f)
+            except Exception:
+                data = {}
+            calls = [float(ts) for ts in data.get("calls", []) if float(ts) >= window_start]
+            if len(calls) >= limit:
+                return (False, f"{len(calls)}/{limit} calls already used in the last 60s")
+            calls.append(now)
+            f.seek(0)
+            f.truncate()
+            json.dump({"calls": calls}, f, ensure_ascii=False, sort_keys=True)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        return (True, f"{len(calls)}/{limit} calls used in the last 60s")
+    except Exception as e:
+        return (False, f"rate-limit state error: {type(e).__name__}: {e}")
 
 
 def _new_run_record(persona_key, goal):
@@ -637,6 +688,9 @@ def _call_with_retries(call_once, label):
     attempts = max(1, _SUBAGENT_LLM_RETRIES + 1)
     last_exc = None
     for attempt in range(1, attempts + 1):
+        allowed, reason = _subagent_llm_rate_limit_acquire(label)
+        if not allowed:
+            return f"(subagent LLM call rate-limited via {label}: {reason})"
         try:
             return call_once()
         except Exception as e:
@@ -1314,9 +1368,10 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
         turn_record = {"turn": turn + 1, "prompt": prompt, "raw_response": raw, "tool_calls": []}
         # If the call failed catastrophically, _call_subagent_llm
         # already returned a (subagent ...) string; surface as digest.
-        if raw.startswith("(subagent LLM call failed"):
+        if raw.startswith("(subagent LLM call failed") or raw.startswith("(subagent LLM call rate-limited"):
             run_record.setdefault("turns", []).append(turn_record)
-            _finish_run_record(run_record, "llm_failed", raw)
+            failed_status = "rate_limited" if "rate-limited" in raw else "llm_failed"
+            _finish_run_record(run_record, failed_status, raw)
             return _structured_return(
                 raw, run_record, status="error", uncertainty="high",
                 next_action="inspect transcript_path or retry later", max_chars=bounded_chars,

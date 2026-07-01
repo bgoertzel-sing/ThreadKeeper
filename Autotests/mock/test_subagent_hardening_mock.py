@@ -40,6 +40,23 @@ def test_llm_retry_backoff_returns_structured_failure(monkeypatch):
     assert "TimeoutError" in result
 
 
+def test_llm_calls_per_minute_rate_limit_is_atomic_state(tmp_path, monkeypatch):
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr(subagent, "_SUBAGENT_LLM_CALLS_PER_MINUTE", 1)
+    monkeypatch.setattr(subagent, "_SUBAGENT_LLM_RETRIES", 0)
+
+    calls = {"n": 0}
+
+    def counted():
+        calls["n"] += 1
+        return '(emit "ok")'
+
+    assert subagent._call_with_retries(counted, "unit-rate") == '(emit "ok")'
+    blocked = subagent._call_with_retries(counted, "unit-rate")
+    assert blocked.startswith("(subagent LLM call rate-limited via unit-rate")
+    assert calls["n"] == 1
+
+
 def test_run_tools_rejects_bad_arg_counts_before_dispatch():
     result = subagent.run_tools([("write-file", ["only-path"])], ["write-file"])
     assert "SKILL_ARG_ERROR: write-file" in result
