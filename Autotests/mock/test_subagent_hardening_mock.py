@@ -57,6 +57,28 @@ def test_llm_calls_per_minute_rate_limit_is_atomic_state(tmp_path, monkeypatch):
     assert calls["n"] == 1
 
 
+def test_llm_concurrency_limit_blocks_when_endpoint_slots_are_full(tmp_path, monkeypatch):
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_CONCURRENT_LLM_CALLS", 1)
+    monkeypatch.setattr(subagent, "_SUBAGENT_LLM_CALLS_PER_MINUTE", 0)
+    monkeypatch.setattr(subagent, "_SUBAGENT_LLM_RETRIES", 0)
+
+    ok, _reason, token = subagent._subagent_llm_concurrency_acquire("unit-concurrency")
+    assert ok
+    calls = {"n": 0}
+
+    def counted():
+        calls["n"] += 1
+        return '(emit "ok")'
+
+    blocked = subagent._call_with_retries(counted, "unit-concurrency")
+    assert blocked.startswith("(subagent LLM call concurrency-limited via unit-concurrency")
+    assert calls["n"] == 0
+    subagent._subagent_llm_concurrency_release("unit-concurrency", token)
+    assert subagent._call_with_retries(counted, "unit-concurrency") == '(emit "ok")'
+    assert calls["n"] == 1
+
+
 def test_run_tools_rejects_bad_arg_counts_before_dispatch():
     result = subagent.run_tools([("write-file", ["only-path"])], ["write-file"])
     assert "SKILL_ARG_ERROR: write-file" in result

@@ -243,6 +243,7 @@ _SUBAGENT_LLM_TIMEOUT_S = int(os.environ.get("OMEGACLAW_SUBAGENT_LLM_TIMEOUT_S",
 _SUBAGENT_LLM_RETRIES = int(os.environ.get("OMEGACLAW_SUBAGENT_LLM_RETRIES", "1"))
 _SUBAGENT_LLM_BACKOFF_S = float(os.environ.get("OMEGACLAW_SUBAGENT_LLM_BACKOFF_S", "1.0"))
 _SUBAGENT_LLM_CALLS_PER_MINUTE = int(os.environ.get("OMEGACLAW_SUBAGENT_LLM_CALLS_PER_MINUTE", "60"))
+_SUBAGENT_MAX_CONCURRENT_LLM_CALLS = int(os.environ.get("OMEGACLAW_SUBAGENT_MAX_CONCURRENT_LLM_CALLS", "4"))
 
 # Per-dispatch safety controls. Tool-call quota bounds work even if a worker
 # loops or emits many calls per turn. Cancellation is intentionally file-based
@@ -318,6 +319,96 @@ def _rate_limit_state_path(label):
     return os.path.join(SUBAGENT_RUN_DIR, f".llm-rate-{safe}.json")
 
 
+def _concurrency_state_path(label):
+    safe = _safe_slug(label or "worker", max_len=32)
+    return os.path.join(SUBAGENT_RUN_DIR, f".llm-inflight-{safe}.json")
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        return False
+
+
+def _read_json_state(f):
+    f.seek(0)
+    try:
+        return json.load(f)
+    except Exception:
+        return {}
+
+
+def _write_json_state(f, data):
+    f.seek(0)
+    f.truncate()
+    json.dump(data, f, ensure_ascii=False, sort_keys=True)
+    f.write("\n")
+    f.flush()
+    os.fsync(f.fileno())
+
+
+def _subagent_llm_concurrency_acquire(label):
+    """Reserve one in-flight worker LLM slot across parent processes.
+
+    This complements the calls/minute rate guard: rate limiting bounds spend over
+    time, while concurrency limiting prevents several long worker calls from
+    piling up at once. Set OMEGACLAW_SUBAGENT_MAX_CONCURRENT_LLM_CALLS=0 to
+    disable locally.
+    """
+    limit = max(0, int(_SUBAGENT_MAX_CONCURRENT_LLM_CALLS))
+    if limit == 0:
+        return (True, "disabled", "")
+    if fcntl is None:
+        return (False, "fcntl unavailable for atomic concurrency state", "")
+    path = _concurrency_state_path(label)
+    parent = os.path.dirname(path)
+    os.makedirs(parent, exist_ok=True)
+    token = f"{os.getpid()}-{uuid.uuid4().hex}"
+    now = time.time()
+    stale_before = now - 3600.0
+    try:
+        with open(path, "a+", encoding="utf-8") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            data = _read_json_state(f)
+            inflight = []
+            for entry in data.get("inflight", []):
+                try:
+                    pid = int(entry.get("pid"))
+                    ts = float(entry.get("ts", 0))
+                except Exception:
+                    continue
+                if ts >= stale_before and _pid_alive(pid):
+                    inflight.append(entry)
+            if len(inflight) >= limit:
+                _write_json_state(f, {"inflight": inflight})
+                return (False, f"{len(inflight)}/{limit} worker LLM calls already in flight", "")
+            inflight.append({"token": token, "pid": os.getpid(), "ts": now})
+            _write_json_state(f, {"inflight": inflight})
+        return (True, f"{len(inflight)}/{limit} worker LLM calls in flight", token)
+    except Exception as e:
+        return (False, f"concurrency state error: {type(e).__name__}: {e}", "")
+
+
+def _subagent_llm_concurrency_release(label, token):
+    if not token or fcntl is None:
+        return
+    path = _concurrency_state_path(label)
+    try:
+        with open(path, "a+", encoding="utf-8") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            data = _read_json_state(f)
+            inflight = [e for e in data.get("inflight", []) if e.get("token") != token]
+            _write_json_state(f, {"inflight": inflight})
+    except Exception:
+        pass
+
+
 def _subagent_llm_rate_limit_acquire(label):
     """Atomically reserve one worker LLM call for the current minute.
 
@@ -339,21 +430,12 @@ def _subagent_llm_rate_limit_acquire(label):
     try:
         with open(path, "a+", encoding="utf-8") as f:
             fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-            f.seek(0)
-            try:
-                data = json.load(f)
-            except Exception:
-                data = {}
+            data = _read_json_state(f)
             calls = [float(ts) for ts in data.get("calls", []) if float(ts) >= window_start]
             if len(calls) >= limit:
                 return (False, f"{len(calls)}/{limit} calls already used in the last 60s")
             calls.append(now)
-            f.seek(0)
-            f.truncate()
-            json.dump({"calls": calls}, f, ensure_ascii=False, sort_keys=True)
-            f.write("\n")
-            f.flush()
-            os.fsync(f.fileno())
+            _write_json_state(f, {"calls": calls})
         return (True, f"{len(calls)}/{limit} calls used in the last 60s")
     except Exception as e:
         return (False, f"rate-limit state error: {type(e).__name__}: {e}")
@@ -688,17 +770,23 @@ def _call_with_retries(call_once, label):
     attempts = max(1, _SUBAGENT_LLM_RETRIES + 1)
     last_exc = None
     for attempt in range(1, attempts + 1):
-        allowed, reason = _subagent_llm_rate_limit_acquire(label)
-        if not allowed:
-            return f"(subagent LLM call rate-limited via {label}: {reason})"
+        in_flight, concurrency_reason, concurrency_token = _subagent_llm_concurrency_acquire(label)
+        if not in_flight:
+            return f"(subagent LLM call concurrency-limited via {label}: {concurrency_reason})"
         try:
-            return call_once()
-        except Exception as e:
-            last_exc = e
-            if attempt < attempts:
-                delay = max(0.0, _SUBAGENT_LLM_BACKOFF_S) * (2 ** (attempt - 1))
-                if delay:
-                    time.sleep(delay)
+            allowed, reason = _subagent_llm_rate_limit_acquire(label)
+            if not allowed:
+                return f"(subagent LLM call rate-limited via {label}: {reason})"
+            try:
+                return call_once()
+            except Exception as e:
+                last_exc = e
+                if attempt < attempts:
+                    delay = max(0.0, _SUBAGENT_LLM_BACKOFF_S) * (2 ** (attempt - 1))
+                    if delay:
+                        time.sleep(delay)
+        finally:
+            _subagent_llm_concurrency_release(label, concurrency_token)
     return (
         f"(subagent LLM call failed after {attempts} attempt(s) "
         f"via {label}: {type(last_exc).__name__}: {last_exc})"
@@ -1368,9 +1456,15 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
         turn_record = {"turn": turn + 1, "prompt": prompt, "raw_response": raw, "tool_calls": []}
         # If the call failed catastrophically, _call_subagent_llm
         # already returned a (subagent ...) string; surface as digest.
-        if raw.startswith("(subagent LLM call failed") or raw.startswith("(subagent LLM call rate-limited"):
+        if (
+            raw.startswith("(subagent LLM call failed")
+            or raw.startswith("(subagent LLM call rate-limited")
+            or raw.startswith("(subagent LLM call concurrency-limited")
+        ):
             run_record.setdefault("turns", []).append(turn_record)
             failed_status = "rate_limited" if "rate-limited" in raw else "llm_failed"
+            if "concurrency-limited" in raw:
+                failed_status = "concurrency_limited"
             _finish_run_record(run_record, failed_status, raw)
             return _structured_return(
                 raw, run_record, status="error", uncertainty="high",
