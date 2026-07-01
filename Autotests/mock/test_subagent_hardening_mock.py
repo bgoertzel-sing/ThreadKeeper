@@ -1,4 +1,5 @@
 """Unit checks for ThreadKeeper subagent hardening primitives."""
+import hashlib
 import json
 import os
 import sys
@@ -119,6 +120,29 @@ def test_persona_config_requires_explicit_node_role(tmp_path, monkeypatch):
         assert False, "missing node_role should be rejected"
     except ValueError as e:
         assert "node_role" in str(e)
+
+
+def test_persona_key_rejects_path_traversal(monkeypatch, tmp_path):
+    monkeypatch.setattr(subagent, "PERSONA_DIR", str(tmp_path))
+
+    try:
+        subagent.load_persona_config("../secrets")
+        assert False, "path-like persona key should be rejected"
+    except ValueError as e:
+        assert "persona key" in str(e)
+
+
+def test_persona_prompt_sha256_pin_fails_closed(tmp_path):
+    prompt = tmp_path / "unit.txt"
+    prompt.write_text("trusted prompt")
+
+    good_hash = hashlib.sha256(b"trusted prompt").hexdigest()
+    assert subagent.load_persona_prompt(str(prompt), "unit", good_hash) == "trusted prompt"
+    try:
+        subagent.load_persona_prompt(str(prompt), "unit", "0" * 64)
+        assert False, "persona hash mismatch should fail closed"
+    except ValueError as e:
+        assert "sha256" in str(e)
 
 
 def test_endpoint_kind_controls_llm_transport_without_base_url_heuristic(monkeypatch):

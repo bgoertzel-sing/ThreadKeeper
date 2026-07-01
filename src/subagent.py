@@ -400,9 +400,24 @@ def _shell_allowlist():
 # Persona config loading
 # ----------------------------------------------------------------------
 
+def _validate_persona_key(persona_key):
+    """Keep persona lookup on named configs, not paths.
+
+    Persona keys come from model/tool-facing `(delegate ...)` calls. Even though
+    persona files are deployment-controlled, the lookup key itself should be a
+    simple identifier so a child/parent prompt cannot traverse arbitrary JSON
+    files via `../` or absolute paths.
+    """
+    key = str(persona_key or "").strip()
+    if not key or not re.match(r"^[A-Za-z0-9_.-]+$", key) or key in (".", ".."):
+        raise ValueError("persona key must be a simple identifier")
+    return key
+
+
 def load_persona_config(persona_key):
     """Read memory/personas-subagent/<key>.json. Returns dict with the
     fields documented in docs/subagent-design.md §4.4.1."""
+    persona_key = _validate_persona_key(persona_key)
     path = os.path.join(PERSONA_DIR, f"{persona_key}.json")
     if not os.path.isfile(path):
         raise FileNotFoundError(
@@ -439,10 +454,12 @@ def load_persona_config(persona_key):
     return cfg
 
 
-def load_persona_prompt(persona_file, persona_key):
-    """Read the persona text. `persona_file` is the value of the
-    persona_file field; it is resolved relative to PERSONA_DIR
-    unless absolute."""
+def load_persona_prompt(persona_file, persona_key, expected_sha256=""):
+    """Read the persona text and optionally verify its SHA-256.
+
+    Persona JSON may include `persona_sha256` to pin the prompt file. When set,
+    a missing/mismatched prompt hash fails closed before any worker call.
+    """
     if os.path.isabs(persona_file):
         path = persona_file
     else:
@@ -452,8 +469,17 @@ def load_persona_prompt(persona_file, persona_key):
             f"persona prompt '{persona_file}' for key '{persona_key}' "
             f"not found at {path}"
         )
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
+    with open(path, "rb") as f:
+        raw = f.read()
+    expected = str(expected_sha256 or "").strip().lower()
+    if expected:
+        actual = hashlib.sha256(raw).hexdigest()
+        if actual != expected:
+            raise ValueError(
+                f"persona prompt '{persona_file}' for key '{persona_key}' "
+                "failed sha256 integrity check"
+            )
+    return raw.decode("utf-8", errors="replace")
 
 
 # ----------------------------------------------------------------------
@@ -1244,8 +1270,10 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
 
     # 4. Load persona prompt
     try:
-        persona_text = load_persona_prompt(cfg["persona_file"], persona_key)
-    except FileNotFoundError as e:
+        persona_text = load_persona_prompt(
+            cfg["persona_file"], persona_key, cfg.get("persona_sha256")
+        )
+    except (FileNotFoundError, ValueError) as e:
         return error(str(e))
 
     # 5. Resolve provider
