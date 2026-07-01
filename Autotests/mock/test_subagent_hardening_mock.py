@@ -145,6 +145,23 @@ def test_persona_prompt_sha256_pin_fails_closed(tmp_path):
         assert "sha256" in str(e)
 
 
+def test_committed_persona_examples_use_explicit_metadata_and_valid_prompt_pin(monkeypatch):
+    persona_dir = ROOT / "memory" / "personas-subagent"
+    monkeypatch.setattr(subagent, "PERSONA_DIR", str(persona_dir))
+
+    examples = sorted(persona_dir.glob("*.json.example"))
+    assert examples, "expected committed persona examples"
+    for example in examples:
+        key = example.name.removesuffix(".json.example")
+        cfg = json.loads(example.read_text())
+        assert cfg.get("node_role") in (subagent._LOCAL_NODE_ROLES | subagent._CLOUD_NODE_ROLES)
+        assert subagent._endpoint_kind(cfg) in {"ollama_native", "openai_compatible"}
+        assert cfg.get("persona_sha256"), f"{example.name} should pin its example prompt"
+        assert subagent.load_persona_prompt(
+            cfg["persona_file"], key, cfg["persona_sha256"]
+        )
+
+
 def test_endpoint_kind_controls_llm_transport_without_base_url_heuristic(monkeypatch):
     seen = {}
 

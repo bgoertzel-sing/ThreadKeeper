@@ -20,9 +20,12 @@ The directory path is configurable via the
 ```json
 {
   "persona_file":       "prompt-researcher.txt",
+  "persona_sha256":     "1d8dbaf065f3d3df4af08422a23107fce446b80cab5fe9df34dc5a3284d47b60",
   "provider":           "Ollama-local",
   "model":              "qwen2.5-coder:14b",
   "base_url":           "http://localhost:11434/v1",
+  "endpoint_kind":      "ollama_native",
+  "node_role":          "local",
   "api_key_env":        "OLLAMA_API_KEY",
   "max_output_tokens":  1500,
   "default_tool_subset": ["search", "read-file"],
@@ -33,12 +36,16 @@ The directory path is configurable via the
 | Field | Required | Meaning |
 |---|---|---|
 | `persona_file` | yes | Path to the persona prompt text. Relative to this directory unless absolute. |
-| `provider` | yes | Provider name. Any string the deployment recognizes; e.g. `Anthropic`, `OpenAI`, `Ollama-local`, `DeepSeek`, `OpenRouter`. The dispatcher constructs an OpenAI-compatible client per call; provider name is informational + reused for upstream's `_provider_registry` lookup when applicable. |
+| `provider` | yes | Human/deployment provider label; e.g. `Anthropic`, `OpenAI`, `Ollama-local`, `DeepSeek`, `OpenRouter`. It is no longer used to infer local/cloud safety behavior. |
 | `model` | yes | Model identifier passed to the chat completion call. |
-| `base_url` | optional | Endpoint URL override. When present, takes precedence. Lets a deployment point at a specific local Ollama / vLLM / private endpoint without disturbing the parent's provider config. |
+| `base_url` | optional | Endpoint URL override. When present, takes precedence. Lets a deployment point at a specific local Ollama / vLLM / private endpoint without disturbing the parent's provider config. It is no longer used to infer local/cloud safety behavior. |
+| `endpoint_kind` | yes | Explicit transport kind: `ollama_native` for Ollama `/api/chat`, or `openai_compatible` for OpenAI-style chat-completions endpoints. |
+| `node_role` | yes | Explicit safety/budget role. Local/free roles: `local`, `worker`, `worker_loop`, `control_loop`. Cloud/budget-gated roles: `cloud`, `cloud_specialist`, `specialist`, `adjudicator`. |
 | `api_key_env` | yes | Name of the env var that carries the API key. **Never embed key material here** — the dispatcher reads `os.environ[api_key_env]` at dispatch time. |
 | `max_output_tokens` | optional, default 1500 | Per-subagent-call output cap. |
 | `default_tool_subset` | optional | Tool subset to use when the dispatch call omits the tools argument. The dispatch call's explicit tools argument always overrides. |
+| `persona_sha256` | optional, recommended | SHA-256 of the referenced persona prompt file. When set, a prompt mismatch fails closed before any worker LLM call. |
+| `task_contract` | optional | Default task contract fields (`objective`, `allowed_paths`, `forbidden_actions`, `done_criteria`) merged with any JSON contract supplied as the dispatch goal. |
 | `notes` | optional | Free-form human-readable description. Not consumed by the dispatcher. |
 
 ## Security
@@ -48,6 +55,10 @@ The directory path is configurable via the
   the env (via `.env`, systemd unit, docker `--env-file`, etc.).
 - Do not commit persona prompts containing identifying or private
   information unless your deployment policy permits it.
+- Do not rely on provider names, model names, or endpoint URLs for safety
+  classification. Set `node_role` and `endpoint_kind` explicitly.
+- If a persona prompt should be immutable for a deployment, set
+  `persona_sha256` and rotate it deliberately when the prompt changes.
 - The `.gitignore` for this directory should be configured per
   deployment — typically `*.json` and `prompt-*.txt` ignored except
   for example files.
