@@ -253,6 +253,8 @@ _SUBAGENT_MAX_TOOL_CALLS = int(os.environ.get("OMEGACLAW_SUBAGENT_MAX_TOOL_CALLS
 _SUBAGENT_CANCEL_FILE = os.environ.get("OMEGACLAW_SUBAGENT_CANCEL_FILE", "")
 _SUBAGENT_MAX_PATH_ARG_CHARS = int(os.environ.get("OMEGACLAW_SUBAGENT_MAX_PATH_ARG_CHARS", "512"))
 _SUBAGENT_MAX_TOOL_ARG_CHARS = int(os.environ.get("OMEGACLAW_SUBAGENT_MAX_TOOL_ARG_CHARS", "20000"))
+_SUBAGENT_MAX_CONTRACT_ITEMS = int(os.environ.get("OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEMS", "32"))
+_SUBAGENT_MAX_CONTRACT_ITEM_CHARS = int(os.environ.get("OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEM_CHARS", "512"))
 
 # Persistent local run records. Full worker prompts/responses/tool results are
 # kept out of the parent context; the parent receives only a bounded structured
@@ -956,6 +958,32 @@ def _normalize_task_contract(goal, cfg=None):
     return objective, contract
 
 
+def _validate_task_contract(contract):
+    """Fail closed on oversized or unsafe task-contract data.
+
+    Contracts are prompt-visible and persisted in transcripts, so they need the
+    same bounded-shape treatment as tool arguments. `allowed_paths` also gets a
+    dry-run workspace resolution now, rather than waiting until a tool call.
+    """
+    for field in ("allowed_paths", "forbidden_actions", "done_criteria"):
+        values = list((contract or {}).get(field) or [])
+        if len(values) > _SUBAGENT_MAX_CONTRACT_ITEMS:
+            return f"task contract {field} has {len(values)} item(s), max {_SUBAGENT_MAX_CONTRACT_ITEMS}"
+        for value in values:
+            if len(str(value)) > _SUBAGENT_MAX_CONTRACT_ITEM_CHARS:
+                return (
+                    f"task contract {field} item exceeds "
+                    f"{_SUBAGENT_MAX_CONTRACT_ITEM_CHARS} characters"
+                )
+    for prefix in (contract or {}).get("allowed_paths") or []:
+        try:
+            _resolve_workspace_path(prefix)
+        except Exception as e:
+            return f"task contract allowed_paths entry '{prefix}' is outside workspace: {e}"
+    return ""
+
+
+
 def _contract_string_list(value):
     if value is None or value == "":
         return []
@@ -1413,6 +1441,9 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
     except (FileNotFoundError, ValueError) as e:
         return error(str(e))
     objective, task_contract = _normalize_task_contract(goal, cfg)
+    contract_error = _validate_task_contract(task_contract)
+    if contract_error:
+        return error(contract_error)
 
     # 2b. ThreadKeeper escalation gate. A delegation to a CLOUD specialist is
     # the expensive node — consult the budget policy (src/escalation.metta via

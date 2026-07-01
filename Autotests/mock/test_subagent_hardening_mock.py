@@ -392,3 +392,42 @@ def test_task_contract_forbidden_action_blocks_tool(tmp_path, monkeypatch):
     assert not (tmp_path / "workspace" / "out.txt").exists()
     saved = json.loads(Path(payload["transcript_path"]).read_text())
     assert "forbidden by task contract" in saved["turns"][0]["tool_results"]
+
+
+def test_task_contract_rejects_allowed_path_escape_before_llm(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    contract_goal = json.dumps({
+        "objective": "escape attempt",
+        "allowed_paths": ["../outside"],
+    })
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")),
+    )
+
+    result = subagent.dispatch(contract_goal, "write-file", "unit", max_turns=1)
+
+    assert "subagent error" in result
+    assert "allowed_paths" in result
+    assert "outside workspace" in result
+
+
+def test_task_contract_rejects_oversized_contract_before_llm(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_CONTRACT_ITEMS", 1)
+    contract_goal = json.dumps({
+        "objective": "too broad",
+        "done_criteria": ["one", "two"],
+    })
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")),
+    )
+
+    result = subagent.dispatch(contract_goal, "write-file", "unit", max_turns=1)
+
+    assert "subagent error" in result
+    assert "done_criteria" in result
+    assert "max 1" in result
