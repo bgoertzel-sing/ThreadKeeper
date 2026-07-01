@@ -123,6 +123,8 @@ for safety-sensitive paths.
 | `OMEGACLAW_SUBAGENT_MAX_CONCURRENT_LLM_CALLS` | `4` | Per-endpoint cross-process in-flight worker LLM cap; `0` disables locally. |
 | `OMEGACLAW_SUBAGENT_MAX_TOOL_CALLS` | `24` | Per-dispatch tool-call quota. |
 | `OMEGACLAW_SUBAGENT_CANCEL_FILE` | unset | If the file exists, dispatch stops with `status=cancelled`. |
+| `OMEGACLAW_SUBAGENT_MAX_PATH_ARG_CHARS` | `512` | Maximum path argument length for file tools. |
+| `OMEGACLAW_SUBAGENT_MAX_TOOL_ARG_CHARS` | `20000` | Maximum string length for any single tool argument. |
 | `OMEGACLAW_SUBAGENT_WORKSPACE` | current working directory | Sandbox root for subagent file tools. |
 | `OMEGACLAW_ESCALATION_METTA_SHA256` | unset | Optional SHA-256 pin for `escalation.metta`; mismatch denies cloud delegation. |
 
@@ -140,4 +142,5 @@ end-to-end walkthrough.
 | Tool subset includes unknown skill | `(subagent error: unknown skill(s) [...]; registered subagent tools: [...])` |
 | Tool subset includes v1-excluded skill | `(subagent error: skill(s) [...] are not callable by subagents in v1)` |
 | Subagent endpoint times out / errors | `(subagent LLM call failed: <ExceptionType>: <reason>)` |
+| Worker mixes `emit` with other parsed calls or multiple emits | Structured return with `status=error` and `EMIT_PROTOCOL_VIOLATION`. |
 | Loop exceeds `max_turns` without `emit` | `(subagent: max_turns (<N>) reached without emit; last_results: <clip>)` |

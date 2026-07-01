@@ -251,6 +251,8 @@ _SUBAGENT_MAX_CONCURRENT_LLM_CALLS = int(os.environ.get("OMEGACLAW_SUBAGENT_MAX_
 # so supervisors/parents can stop in-flight work without signals or shared state.
 _SUBAGENT_MAX_TOOL_CALLS = int(os.environ.get("OMEGACLAW_SUBAGENT_MAX_TOOL_CALLS", "24"))
 _SUBAGENT_CANCEL_FILE = os.environ.get("OMEGACLAW_SUBAGENT_CANCEL_FILE", "")
+_SUBAGENT_MAX_PATH_ARG_CHARS = int(os.environ.get("OMEGACLAW_SUBAGENT_MAX_PATH_ARG_CHARS", "512"))
+_SUBAGENT_MAX_TOOL_ARG_CHARS = int(os.environ.get("OMEGACLAW_SUBAGENT_MAX_TOOL_ARG_CHARS", "20000"))
 
 # Persistent local run records. Full worker prompts/responses/tool results are
 # kept out of the parent context; the parent receives only a bounded structured
@@ -1245,6 +1247,11 @@ def _validate_tool_args(name, args):
         return "arguments must not be null"
     if name in ("read-file", "write-file", "append-file") and not str(args[0]).strip():
         return "path argument must not be empty"
+    if name in ("read-file", "write-file", "append-file") and len(str(args[0])) > _SUBAGENT_MAX_PATH_ARG_CHARS:
+        return f"path argument exceeds {_SUBAGENT_MAX_PATH_ARG_CHARS} characters"
+    too_long = [i + 1 for i, arg in enumerate(args) if len(str(arg)) > _SUBAGENT_MAX_TOOL_ARG_CHARS]
+    if too_long:
+        return f"argument(s) {too_long} exceed {_SUBAGENT_MAX_TOOL_ARG_CHARS} characters"
     if any("\x00" in str(a) for a in args):
         return "arguments must not contain NUL bytes"
     return None
@@ -1326,12 +1333,26 @@ def _looks_like_test_command(cmd):
     return bool(names & {"pytest", "unittest", "tox", "nox", "make"}) or " test" in f" {cmd} "
 
 
-def _extract_emit(calls):
-    """Find the first (emit "...") call in `calls`; return its arg."""
-    for (name, args) in calls:
-        if name == "emit" and args:
-            return args[0]
-    return None
+def _extract_final_emit(calls):
+    """Return (emit_value, protocol_error) for a final-only emit response.
+
+    Earlier prototypes accepted the first `(emit ...)` anywhere in a worker
+    response. That let a malformed or adversarial response hide later tool calls
+    or conflicting emits from the parent. Harden the contract: a final digest is
+    accepted only when the parsed response contains exactly one call, and that
+    call is a single-argument `emit`.
+    """
+    emit_calls = [(name, args) for (name, args) in calls if name == "emit"]
+    if not emit_calls:
+        return (None, "")
+    if len(calls) != 1 or len(emit_calls) != 1:
+        return (None, "EMIT_PROTOCOL_VIOLATION: emit must be the only parsed call in a final response")
+    _name, args = emit_calls[0]
+    if len(args) != 1 or args[0] is None:
+        return (None, "EMIT_PROTOCOL_VIOLATION: emit requires exactly one non-null argument")
+    if "\x00" in str(args[0]):
+        return (None, "EMIT_PROTOCOL_VIOLATION: emit argument must not contain NUL bytes")
+    return (args[0], "")
 
 
 # ----------------------------------------------------------------------
@@ -1488,7 +1509,16 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
 
         calls = parse_calls(raw)
         turn_record["tool_calls"] = [{"name": n, "args": a} for (n, a) in calls]
-        emit_value = _extract_emit(calls)
+        emit_value, emit_error = _extract_final_emit(calls)
+        if emit_error:
+            turn_record["tool_results"] = emit_error
+            run_record.setdefault("turns", []).append(turn_record)
+            _finish_run_record(run_record, "emit_protocol_violation", emit_error)
+            return _structured_return(
+                emit_error, run_record, status="error", uncertainty="high",
+                next_action="retry with a well-formed final emit or inspect transcript_path",
+                max_chars=bounded_chars,
+            )
         if emit_value is not None:
             run_record.setdefault("turns", []).append(turn_record)
             _finish_run_record(run_record, "ok", emit_value)

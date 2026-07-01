@@ -94,6 +94,21 @@ def test_run_tools_rejects_bad_arg_counts_before_dispatch():
     assert "expected 2 arg" in result
 
 
+def test_run_tools_rejects_oversized_tool_arguments(monkeypatch):
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_PATH_ARG_CHARS", 8)
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_TOOL_ARG_CHARS", 12)
+
+    long_path = "a" * 9
+    long_content = "b" * 13
+    path_result = subagent.run_tools([("write-file", [long_path, "ok"])], ["write-file"])
+    content_result = subagent.run_tools([("write-file", ["ok.txt", long_content])], ["write-file"])
+
+    assert "SKILL_ARG_ERROR: write-file" in path_result
+    assert "path argument exceeds" in path_result
+    assert "SKILL_ARG_ERROR: write-file" in content_result
+    assert "argument(s) [2] exceed" in content_result
+
+
 def test_write_file_uses_atomic_replace_inside_workspace(tmp_path, monkeypatch):
     monkeypatch.setenv("OMEGACLAW_SUBAGENT_WORKSPACE", str(tmp_path))
     target = tmp_path / "nested" / "artifact.txt"
@@ -276,6 +291,23 @@ def test_dispatch_returns_structured_digest_and_persists_transcript(tmp_path, mo
     assert saved["status"] == "ok"
     assert len(saved["turns"]) == 2
     assert (tmp_path / "workspace" / "out.txt").read_text() == "hello"
+
+
+def test_dispatch_rejects_mixed_emit_and_tool_response(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: '(emit "done")\n(write-file "hidden.txt" "nope")',
+    )
+
+    payload = json.loads(subagent.dispatch("try mixed final", "write-file", "unit", max_turns=1))
+
+    assert payload["status"] == "error"
+    assert "EMIT_PROTOCOL_VIOLATION" in payload["summary"]
+    assert not (tmp_path / "workspace" / "hidden.txt").exists()
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["status"] == "emit_protocol_violation"
 
 
 def test_tool_quota_stops_dispatch_with_structured_error(tmp_path, monkeypatch):

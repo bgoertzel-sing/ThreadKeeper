@@ -54,8 +54,11 @@ subagent emits one s-expression per line. The loop:
 1. calls the subagent's LLM (via `lib_llm_ext.AIProvider.chat`);
 2. parses line-leading s-expressions (stripping `<think>` blocks and
    markdown fences);
-3. if `(emit "…")` appears, returns that digest and stops;
-4. otherwise executes the parsed tool calls and feeds the results into
+3. accepts `(emit "…")` only when it is the sole parsed call in the
+   response, then returns that digest and stops;
+4. rejects mixed or conflicting `emit` + tool responses as protocol
+   violations, so a final digest cannot hide later tool actions;
+5. otherwise executes the parsed tool calls and feeds the results into
    the next turn.
 
 If the turn budget is exhausted without `(emit …)`, a fallback digest
