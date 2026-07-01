@@ -44,6 +44,7 @@ import time
 import tempfile
 import uuid
 import hashlib
+import contextlib
 try:
     import fcntl
 except Exception:  # pragma: no cover - non-Unix fallback
@@ -351,6 +352,52 @@ def _write_json_state(f, data):
     f.write("\n")
     f.flush()
     os.fsync(f.fileno())
+
+
+@contextlib.contextmanager
+def _workspace_file_lock(resolved_path):
+    """Serialize updates to one workspace file when fcntl is available.
+
+    Atomic rename protects readers from torn writes, but append-style updates
+    also need a per-target critical section to avoid lost updates when multiple
+    parent/worker processes append to the same artifact concurrently. The lock
+    file lives beside the target and is itself inside the sandbox-resolved
+    parent directory.
+    """
+    parent = os.path.dirname(resolved_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    if fcntl is None:
+        yield
+        return
+    lock_path = os.path.join(parent or ".", f".{os.path.basename(resolved_path)}.lock")
+    with open(lock_path, "a+", encoding="utf-8") as lock_f:
+        fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+
+
+def _atomic_replace_text(resolved_path, content):
+    parent = os.path.dirname(resolved_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(
+        prefix=f".{os.path.basename(resolved_path)}.", suffix=".tmp", dir=parent or None
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, resolved_path)
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except Exception:
+            pass
 
 
 def _subagent_llm_concurrency_acquire(label):
@@ -1125,24 +1172,8 @@ def _tool_read_file(path):
 def _tool_write_file(path, content):
     try:
         resolved = _resolve_workspace_path(path)
-        parent = os.path.dirname(resolved)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(
-            prefix=f".{os.path.basename(resolved)}.", suffix=".tmp", dir=parent or None
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(content)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, resolved)
-        finally:
-            try:
-                if os.path.exists(tmp):
-                    os.unlink(tmp)
-            except Exception:
-                pass
+        with _workspace_file_lock(resolved):
+            _atomic_replace_text(resolved, content)
         return "WRITE-FILE-SUCCESS"
     except Exception as e:
         return f"(write-file error: {e})"
@@ -1151,32 +1182,16 @@ def _tool_write_file(path, content):
 def _tool_append_file(path, content):
     try:
         resolved = _resolve_workspace_path(path)
-        parent = os.path.dirname(resolved)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        existing = ""
-        if os.path.exists(resolved):
-            with open(resolved, "r", encoding="utf-8", errors="replace") as f:
-                existing = f.read()
-        fd, tmp = tempfile.mkstemp(
-            prefix=f".{os.path.basename(resolved)}.", suffix=".tmp", dir=parent or None
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(existing)
-                if existing and not existing.endswith("\n"):
-                    f.write("\n")
-                f.write(content)
-                f.write("\n")
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, resolved)
-        finally:
-            try:
-                if os.path.exists(tmp):
-                    os.unlink(tmp)
-            except Exception:
-                pass
+        with _workspace_file_lock(resolved):
+            existing = ""
+            if os.path.exists(resolved):
+                with open(resolved, "r", encoding="utf-8", errors="replace") as f:
+                    existing = f.read()
+            new_content = existing
+            if new_content and not new_content.endswith("\n"):
+                new_content += "\n"
+            new_content += content + "\n"
+            _atomic_replace_text(resolved, new_content)
         return "APPEND-FILE-SUCCESS"
     except Exception as e:
         return f"(append-file error: {e})"

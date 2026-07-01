@@ -58,13 +58,16 @@ and returns a single-string digest via its own `emit` instruction.
 
 ### Returns
 
-A single-line string of at most `OMEGACLAW_SUBAGENT_MAX_DIGEST_CHARS`
-(default 2,000). Newlines mapped to spaces, length capped at the
-boundary, ellipsis-suffixed if truncated.
+A single-line JSON string of at most `OMEGACLAW_SUBAGENT_MAX_DIGEST_CHARS`
+(default 2,000) with `summary`, `files_changed`, `tests_run`,
+`uncertainty`, `next_action`, `transcript_path`, and `status` fields.
+Full worker prompts/responses/tool results are persisted locally under
+`OMEGACLAW_SUBAGENT_RUN_DIR` (default `memory/subagent-runs`) and only
+the bounded digest is returned to the parent.
 
-On failure, returns a structured error string `"(subagent error:
-<reason>)"`. Errors are never raised into the parent's MeTTa
-interpreter.
+Early setup failures still return a structured error string
+`"(subagent error: <reason>)"`. Errors are never raised into the parent's
+MeTTa interpreter.
 
 ### Examples
 
@@ -88,8 +91,9 @@ interpreter.
   permissions inside the loop.
 - The subagent's loop runs in the parent's Python process; its LLM
   endpoint can live anywhere the deployment configures (local
-  Ollama, remote API, etc.). The subagent's history, working state,
-  and intermediate tool returns are discarded on return.
+  Ollama, remote API, etc.). The parent receives only bounded state;
+  full prompts, responses, tool calls/results, task contracts, and
+  history digests are saved in the local transcript record.
 - The subagent cannot call `send`, `remember`, `pin`, `metta`,
   `query`, `episodes`, or `delegate` in v1 (excluded by design —
   see §4.5.2 of the design doc).
@@ -103,13 +107,24 @@ interpreter.
 
 ### Configuration
 
-Three optional env vars control v1 behavior. All have safe defaults.
+Optional env vars control v1 behavior. Defaults are bounded and fail-closed
+for safety-sensitive paths.
 
 | Env var | Default | Meaning |
 |---|---|---|
 | `OMEGACLAW_SUBAGENT_PERSONA_DIR` | `./memory/personas-subagent` | Directory holding `<key>.json` configs and persona prompt files. |
 | `OMEGACLAW_SUBAGENT_MAX_TURNS` | `8` | Hard cap on iterations per dispatch. |
-| `OMEGACLAW_SUBAGENT_MAX_DIGEST_CHARS` | `2000` | Length cap on the digest returned to the parent. |
+| `OMEGACLAW_SUBAGENT_MAX_DIGEST_CHARS` | `2000` | Length cap on the JSON digest returned to the parent. |
+| `OMEGACLAW_SUBAGENT_RUN_DIR` | `memory/subagent-runs` | Directory for persistent JSON transcript/run records and worker rate/concurrency state. |
+| `OMEGACLAW_SUBAGENT_LLM_TIMEOUT_S` | `180` | Timeout for each worker LLM call. |
+| `OMEGACLAW_SUBAGENT_LLM_RETRIES` | `1` | Retry count after the first worker LLM attempt. |
+| `OMEGACLAW_SUBAGENT_LLM_BACKOFF_S` | `1.0` | Exponential backoff base between worker retries. |
+| `OMEGACLAW_SUBAGENT_LLM_CALLS_PER_MINUTE` | `60` | Per-endpoint worker LLM calls/minute cap; `0` disables locally. |
+| `OMEGACLAW_SUBAGENT_MAX_CONCURRENT_LLM_CALLS` | `4` | Per-endpoint cross-process in-flight worker LLM cap; `0` disables locally. |
+| `OMEGACLAW_SUBAGENT_MAX_TOOL_CALLS` | `24` | Per-dispatch tool-call quota. |
+| `OMEGACLAW_SUBAGENT_CANCEL_FILE` | unset | If the file exists, dispatch stops with `status=cancelled`. |
+| `OMEGACLAW_SUBAGENT_WORKSPACE` | current working directory | Sandbox root for subagent file tools. |
+| `OMEGACLAW_ESCALATION_METTA_SHA256` | unset | Optional SHA-256 pin for `escalation.metta`; mismatch denies cloud delegation. |
 
 See [`tutorial-09-subagents.md`](./tutorial-09-subagents.md) for an
 end-to-end walkthrough.

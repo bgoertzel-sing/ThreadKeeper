@@ -1,6 +1,7 @@
 """Unit checks for ThreadKeeper subagent hardening primitives."""
 import hashlib
 import json
+import multiprocessing
 import os
 import sys
 from pathlib import Path
@@ -11,6 +12,14 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 import subagent  # noqa: E402
+
+
+def _append_many_worker(workspace, worker_id, count):
+    os.environ["OMEGACLAW_SUBAGENT_WORKSPACE"] = str(workspace)
+    for i in range(count):
+        result = subagent._tool_append_file("shared/log.txt", f"{worker_id}-{i}")
+        if result != "APPEND-FILE-SUCCESS":
+            raise RuntimeError(result)
 
 
 def test_llm_retry_backoff_returns_success_after_transient_failure(monkeypatch):
@@ -104,6 +113,27 @@ def test_append_file_uses_atomic_replace_inside_workspace(tmp_path, monkeypatch)
     assert subagent._tool_append_file("nested/artifact.txt", "second") == "APPEND-FILE-SUCCESS"
     assert target.read_text() == "first\nsecond\n"
     assert not list((tmp_path / "nested").glob(".*.tmp"))
+
+
+def test_append_file_lock_prevents_concurrent_lost_updates(tmp_path, monkeypatch):
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_WORKSPACE", str(tmp_path))
+    worker_count = 4
+    per_worker = 12
+    procs = [
+        multiprocessing.Process(target=_append_many_worker, args=(str(tmp_path), w, per_worker))
+        for w in range(worker_count)
+    ]
+
+    for proc in procs:
+        proc.start()
+    for proc in procs:
+        proc.join(10)
+
+    assert all(proc.exitcode == 0 for proc in procs)
+    lines = (tmp_path / "shared" / "log.txt").read_text().splitlines()
+    assert len(lines) == worker_count * per_worker
+    assert set(lines) == {f"{w}-{i}" for w in range(worker_count) for i in range(per_worker)}
+    assert not list((tmp_path / "shared").glob(".*.tmp"))
 
 
 def test_history_is_bounded_and_evicted_turns_are_digested(monkeypatch):
