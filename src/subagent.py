@@ -43,6 +43,7 @@ import sys
 import time
 import tempfile
 import uuid
+import hashlib
 
 # Worker-call usage log — SAME file the parent loop + dashboard read, so
 # delegated work shows up on the ThreadKeeper mesh's Local Worker tile.
@@ -90,6 +91,41 @@ def _persona_is_cloud(cfg):
     return not is_local
 
 
+def _escalation_policy_path():
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.environ.get("OMEGACLAW_ESCALATION_METTA_PATH", ""),
+        os.path.join(here, "escalation.metta"),
+        os.path.join(here, "..", "src", "escalation.metta"),
+    ]
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return os.path.realpath(os.path.abspath(path))
+    return ""
+
+
+def _escalation_policy_integrity():
+    """Return (ok, reason) for optional escalation.metta integrity pin.
+
+    Operators can set OMEGACLAW_ESCALATION_METTA_SHA256 to the trusted policy
+    hash. When set, mismatches fail closed before any cloud delegation.
+    """
+    expected = os.environ.get("OMEGACLAW_ESCALATION_METTA_SHA256", "").strip().lower()
+    if not expected:
+        return (True, "no escalation policy hash configured")
+    path = _escalation_policy_path()
+    if not path:
+        return (False, "escalation.metta not found for integrity check")
+    try:
+        with open(path, "rb") as f:
+            actual = hashlib.sha256(f.read()).hexdigest()
+    except Exception as e:
+        return (False, f"escalation.metta integrity read failed: {type(e).__name__}: {e}")
+    if actual != expected:
+        return (False, f"escalation.metta integrity mismatch at {path}")
+    return (True, f"escalation.metta integrity ok at {path}")
+
+
 def _escalation_gate(cfg, thread_id="default"):
     """Return (allowed: bool, reason: str). Local → always allow.
     Cloud → ThreadKeeper's MeTTa policy decides. Never raises (fail-closed by
@@ -104,6 +140,10 @@ def _escalation_gate(cfg, thread_id="default"):
         if mode in ("allow", "open", "fail-open", "true", "1"):
             return (True, f"{reason} — fail-open allow by explicit fallback")
         return (False, f"{reason} — fail-closed deny")
+
+    integrity_ok, integrity_reason = _escalation_policy_integrity()
+    if not integrity_ok:
+        return (False, integrity_reason)
 
     try:
         # Locate threadkeeper_budget.py: shipped beside this overlay module,
@@ -168,6 +208,12 @@ _SHELL_TIMEOUT_S = 30
 _SUBAGENT_LLM_TIMEOUT_S = int(os.environ.get("OMEGACLAW_SUBAGENT_LLM_TIMEOUT_S", "180"))
 _SUBAGENT_LLM_RETRIES = int(os.environ.get("OMEGACLAW_SUBAGENT_LLM_RETRIES", "1"))
 _SUBAGENT_LLM_BACKOFF_S = float(os.environ.get("OMEGACLAW_SUBAGENT_LLM_BACKOFF_S", "1.0"))
+
+# Per-dispatch safety controls. Tool-call quota bounds work even if a worker
+# loops or emits many calls per turn. Cancellation is intentionally file-based
+# so supervisors/parents can stop in-flight work without signals or shared state.
+_SUBAGENT_MAX_TOOL_CALLS = int(os.environ.get("OMEGACLAW_SUBAGENT_MAX_TOOL_CALLS", "24"))
+_SUBAGENT_CANCEL_FILE = os.environ.get("OMEGACLAW_SUBAGENT_CANCEL_FILE", "")
 
 # Persistent local run records. Full worker prompts/responses/tool results are
 # kept out of the parent context; the parent receives only a bounded structured
@@ -871,14 +917,29 @@ def _validate_tool_args(name, args):
     return None
 
 
-def run_tools(calls, allowed_names, record=None):
+def _cancel_requested():
+    path = (_SUBAGENT_CANCEL_FILE or "").strip()
+    return bool(path and os.path.exists(path))
+
+
+def run_tools(calls, allowed_names, record=None, quota=None):
     """Execute each call against the registry, return aggregated result
     string for the next turn's prompt."""
     if not calls:
         return "(no parseable tool calls in last response)"
     reg = _tool_registry()
     out_parts = []
+    remaining = None if quota is None else max(0, int(quota))
     for (name, args) in calls:
+        if _cancel_requested():
+            out_parts.append("(CANCELLED: subagent cancellation token present)")
+            break
+        if name != "emit":
+            if remaining is not None and remaining <= 0:
+                out_parts.append("(QUOTA_EXCEEDED: subagent tool-call quota exhausted)")
+                break
+            if remaining is not None:
+                remaining -= 1
         if name == "emit":
             # emit is the loop terminator; handled by the caller
             continue
@@ -910,6 +971,8 @@ def run_tools(calls, allowed_names, record=None):
             record.setdefault("tests_run", []).append(str(args[0]))
         out_parts.append(f"(COMMAND_RETURN: ({name} {args[0] if args else ''}) "
                          f"{_clip(str(result), 2000)})")
+    if record is not None and remaining is not None:
+        record["tool_calls_remaining"] = remaining
     return " ".join(out_parts)
 
 
@@ -992,7 +1055,8 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
     # the expensive node — consult the budget policy (src/escalation.metta via
     # PeTTa) before spending. If denied, refuse the dispatch and return the
     # [metta]-tagged reason so the parent loop sees WHY (and can finish on cheap
-    # nodes). Local delegations are free and pass through. Fail-open on errors.
+    # nodes). Local delegations are free and pass through. Gate errors fail
+    # closed by default unless an operator explicitly sets fail-open fallback.
     gate_allowed, gate_reason = _escalation_gate(cfg)
     if not gate_allowed:
         return cap(
@@ -1041,10 +1105,18 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
     history = []
     history_digest = []
     last_results = ""
+    tool_calls_remaining = max(0, _SUBAGENT_MAX_TOOL_CALLS)
     max_out_tok = int(cfg.get("max_output_tokens", SUBAGENT_DEFAULT_OUTPUT_TOKENS))
     run_record = _new_run_record(persona_key, goal)
 
     for turn in range(bounded_turns):
+        if _cancel_requested():
+            _finish_run_record(run_record, "cancelled", "subagent cancellation token present before LLM call")
+            return _structured_return(
+                "subagent cancellation token present before LLM call", run_record,
+                status="cancelled", uncertainty="low", next_action="return to parent",
+                max_chars=bounded_chars,
+            )
         prompt = build_subagent_prompt(
             persona_text, catalog, last_results, history, goal,
             turn + 1, bounded_turns, history_digest,
@@ -1069,7 +1141,25 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
             _finish_run_record(run_record, "ok", emit_value)
             return _structured_return(emit_value, run_record, max_chars=bounded_chars)
 
-        last_results = run_tools(calls, tool_names, run_record)
+        last_results = run_tools(calls, tool_names, run_record, quota=tool_calls_remaining)
+        tool_calls_remaining = run_record.get("tool_calls_remaining", tool_calls_remaining)
+        if "QUOTA_EXCEEDED" in last_results:
+            turn_record["tool_results"] = last_results
+            run_record.setdefault("turns", []).append(turn_record)
+            _finish_run_record(run_record, "quota_exceeded", last_results)
+            return _structured_return(
+                last_results, run_record, status="error", uncertainty="medium",
+                next_action="dispatch with a narrower task or higher explicit quota",
+                max_chars=bounded_chars,
+            )
+        if "CANCELLED:" in last_results:
+            turn_record["tool_results"] = last_results
+            run_record.setdefault("turns", []).append(turn_record)
+            _finish_run_record(run_record, "cancelled", last_results)
+            return _structured_return(
+                last_results, run_record, status="cancelled", uncertainty="low",
+                next_action="return to parent", max_chars=bounded_chars,
+            )
         turn_record["tool_results"] = last_results
         run_record.setdefault("turns", []).append(turn_record)
         _append_bounded_history(history, (turn + 1, raw, last_results), history_digest)

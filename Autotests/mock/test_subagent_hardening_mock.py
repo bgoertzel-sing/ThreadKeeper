@@ -70,7 +70,7 @@ def test_history_is_bounded_and_evicted_turns_are_digested(monkeypatch):
     assert digest[1].startswith("turn 2:")
 
 
-def test_dispatch_returns_structured_digest_and_persists_transcript(tmp_path, monkeypatch):
+def _write_unit_persona(tmp_path, monkeypatch, node_role="local"):
     persona_dir = tmp_path / "personas"
     persona_dir.mkdir()
     (persona_dir / "unit.txt").write_text("You are a unit-test subagent.")
@@ -79,14 +79,19 @@ def test_dispatch_returns_structured_digest_and_persists_transcript(tmp_path, mo
         "provider": "ollama",
         "model": "unit-model",
         "api_key_env": "UNIT_API_KEY",
-        "base_url": "http://localhost:11434",
-        "node_role": "local",
+        "base_url": "http://localhost:11434" if node_role == "local" else "https://example.invalid/v1",
+        "node_role": node_role,
         "default_tool_subset": ["write-file"],
     }))
     monkeypatch.setattr(subagent, "PERSONA_DIR", str(persona_dir))
     monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
     monkeypatch.setenv("UNIT_API_KEY", "dummy")
     monkeypatch.setenv("OMEGACLAW_SUBAGENT_WORKSPACE", str(tmp_path / "workspace"))
+    return persona_dir
+
+
+def test_dispatch_returns_structured_digest_and_persists_transcript(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
 
     responses = iter(['(write-file "out.txt" "hello")', '(emit "done")'])
     monkeypatch.setattr(subagent, "_call_subagent_llm", lambda *_args: next(responses))
@@ -103,3 +108,44 @@ def test_dispatch_returns_structured_digest_and_persists_transcript(tmp_path, mo
     assert saved["status"] == "ok"
     assert len(saved["turns"]) == 2
     assert (tmp_path / "workspace" / "out.txt").read_text() == "hello"
+
+
+def test_tool_quota_stops_dispatch_with_structured_error(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_TOOL_CALLS", 1)
+    monkeypatch.setattr(subagent, "_call_subagent_llm", lambda *_args: '(write-file "a.txt" "a")\n(write-file "b.txt" "b")')
+
+    payload = json.loads(subagent.dispatch("write too much", "write-file", "unit", max_turns=2))
+
+    assert payload["status"] == "error"
+    assert "QUOTA_EXCEEDED" in payload["summary"]
+    assert payload["files_changed"] == ["a.txt"]
+    assert (tmp_path / "workspace" / "a.txt").read_text() == "a"
+    assert not (tmp_path / "workspace" / "b.txt").exists()
+
+
+def test_cancel_file_stops_dispatch_before_llm(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    cancel = tmp_path / "cancel.token"
+    cancel.write_text("stop")
+    monkeypatch.setattr(subagent, "_SUBAGENT_CANCEL_FILE", str(cancel))
+    monkeypatch.setattr(subagent, "_call_subagent_llm", lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")))
+
+    payload = json.loads(subagent.dispatch("cancel me", "write-file", "unit", max_turns=2))
+
+    assert payload["status"] == "cancelled"
+    assert "cancellation token" in payload["summary"]
+
+
+def test_escalation_policy_hash_mismatch_denies_cloud_dispatch(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch, node_role="cloud")
+    policy = tmp_path / "escalation.metta"
+    policy.write_text("trusted policy")
+    monkeypatch.setenv("OMEGACLAW_ESCALATION_METTA_PATH", str(policy))
+    monkeypatch.setenv("OMEGACLAW_ESCALATION_METTA_SHA256", "0" * 64)
+    monkeypatch.setattr(subagent, "_call_subagent_llm", lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")))
+
+    result = subagent.dispatch("cloud task", "write-file", "unit", max_turns=1)
+
+    assert "escalation denied" in result
+    assert "integrity mismatch" in result
