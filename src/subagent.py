@@ -42,6 +42,7 @@ import subprocess
 import sys
 import time
 import tempfile
+import uuid
 
 # Worker-call usage log — SAME file the parent loop + dashboard read, so
 # delegated work shows up on the ThreadKeeper mesh's Local Worker tile.
@@ -154,6 +155,7 @@ SUBAGENT_DEFAULT_OUTPUT_TOKENS = 1500
 # conversation.
 _SUBAGENT_HISTORY_CAP = 4000
 _SUBAGENT_RESULTS_CAP = 4000
+_SUBAGENT_HISTORY_MAX_TURNS = int(os.environ.get("OMEGACLAW_SUBAGENT_HISTORY_MAX_TURNS", "6"))
 
 # Shell tool restrictions. Subagent's shell is more restricted than
 # parent's — disabled by default, optional executable allowlist, no shell=True,
@@ -166,6 +168,15 @@ _SHELL_TIMEOUT_S = 30
 _SUBAGENT_LLM_TIMEOUT_S = int(os.environ.get("OMEGACLAW_SUBAGENT_LLM_TIMEOUT_S", "180"))
 _SUBAGENT_LLM_RETRIES = int(os.environ.get("OMEGACLAW_SUBAGENT_LLM_RETRIES", "1"))
 _SUBAGENT_LLM_BACKOFF_S = float(os.environ.get("OMEGACLAW_SUBAGENT_LLM_BACKOFF_S", "1.0"))
+
+# Persistent local run records. Full worker prompts/responses/tool results are
+# kept out of the parent context; the parent receives only a bounded structured
+# digest plus the local transcript path for audit/debug.
+_DEFAULT_SUBAGENT_RUN_DIR = os.path.join(
+    os.environ.get("MEMORY_DIR", os.path.join(os.getcwd(), "memory")),
+    "subagent-runs",
+)
+SUBAGENT_RUN_DIR = os.environ.get("OMEGACLAW_SUBAGENT_RUN_DIR", _DEFAULT_SUBAGENT_RUN_DIR)
 
 
 def _subagent_workspace_root():
@@ -192,6 +203,109 @@ def _resolve_workspace_path(path):
             f"path escapes subagent workspace ({root}): {path}"
         )
     return resolved
+
+
+def _safe_slug(text, max_len=48):
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(text or "").strip()).strip("-._")
+    return (slug or "run")[:max_len]
+
+
+def _json_atomic_write(path, data):
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(
+        prefix=f".{os.path.basename(path)}.", suffix=".tmp", dir=parent or None
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2, sort_keys=True)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except Exception:
+            pass
+
+
+def _new_run_record(persona_key, goal):
+    run_id = f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{uuid.uuid4().hex[:10]}"
+    path = os.path.join(SUBAGENT_RUN_DIR, f"{run_id}-{_safe_slug(persona_key)}.json")
+    return {
+        "run_id": run_id,
+        "persona_key": persona_key,
+        "goal": str(goal or ""),
+        "started_at": time.time(),
+        "finished_at": None,
+        "status": "running",
+        "history_digest": [],
+        "turns": [],
+        "files_changed": [],
+        "tests_run": [],
+        "transcript_path": path,
+    }
+
+
+def _finish_run_record(record, status, summary=None):
+    if not record:
+        return ""
+    record["status"] = status
+    record["summary"] = summary or ""
+    record["finished_at"] = time.time()
+    try:
+        _json_atomic_write(record["transcript_path"], record)
+    except Exception as e:
+        record["record_write_error"] = f"{type(e).__name__}: {e}"
+    return record.get("transcript_path", "")
+
+
+def _structured_return(summary, record=None, status="ok", uncertainty="low",
+                       next_action="return to parent", max_chars=None):
+    limit = max_chars or SUBAGENT_MAX_DIGEST_CHARS
+    payload = {
+        "summary": cap(summary, max(100, limit // 2)),
+        "files_changed": list(dict.fromkeys((record or {}).get("files_changed", []))),
+        "tests_run": list(dict.fromkeys((record or {}).get("tests_run", []))),
+        "uncertainty": uncertainty,
+        "next_action": next_action,
+        "transcript_path": (record or {}).get("transcript_path", ""),
+        "status": status,
+    }
+    text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    if len(text) <= limit:
+        return text
+    # Preserve valid JSON by shrinking variable-length fields instead of
+    # truncating the serialized object mid-token.
+    payload["summary"] = cap(summary, 200)
+    payload["files_changed"] = payload["files_changed"][:20]
+    payload["tests_run"] = payload["tests_run"][:10]
+    text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    if len(text) <= limit:
+        return text
+    payload["summary"] = cap(summary, 80)
+    payload["files_changed"] = []
+    payload["tests_run"] = []
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+def _digest_history_entry(entry):
+    t, raw, res = entry
+    return f"turn {t}: response={_clip(cap(raw, 500), 240)}; results={_clip(cap(res, 500), 240)}"
+
+
+def _append_bounded_history(history, entry, history_digest):
+    history.append(entry)
+    max_turns = max(1, _SUBAGENT_HISTORY_MAX_TURNS)
+    while len(history) > max_turns:
+        evicted = history.pop(0)
+        history_digest.append(_digest_history_entry(evicted))
+    # Keep the digest bounded too; this is for prompt context, not audit.
+    if len(history_digest) > max_turns:
+        del history_digest[:-max_turns]
 
 
 def _shell_enabled():
@@ -521,7 +635,7 @@ def tools_catalog(tool_names):
 
 
 def build_subagent_prompt(persona, catalog, last_results, history, goal,
-                          iteration, max_iterations):
+                          iteration, max_iterations, history_digest=None):
     """Build the subagent's per-turn prompt. Shape mirrors the parent's
     getContext but with smaller per-component caps appropriate to a
     short-lived helper."""
@@ -546,6 +660,8 @@ def build_subagent_prompt(persona, catalog, last_results, history, goal,
     ]
     if last_results:
         parts.append(f"LAST_RESULTS:\n{last_results[-_SUBAGENT_RESULTS_CAP:]}")
+    if history_digest:
+        parts.append(f"HISTORY_DIGEST:\n{_clip(' | '.join(history_digest), _SUBAGENT_HISTORY_CAP)}")
     if history_snippet:
         parts.append(f"HISTORY:\n{history_snippet}")
     return "\n\n".join(parts)
@@ -750,12 +866,12 @@ def _validate_tool_args(name, args):
         return "arguments must not be null"
     if name in ("read-file", "write-file", "append-file") and not str(args[0]).strip():
         return "path argument must not be empty"
-    if name != "append-file" and any("\x00" in str(a) for a in args):
+    if any("\x00" in str(a) for a in args):
         return "arguments must not contain NUL bytes"
     return None
 
 
-def run_tools(calls, allowed_names):
+def run_tools(calls, allowed_names, record=None):
     """Execute each call against the registry, return aggregated result
     string for the next turn's prompt."""
     if not calls:
@@ -788,9 +904,22 @@ def run_tools(calls, allowed_names):
         except Exception as e:
             out_parts.append(f"(SKILL_RUNTIME_ERROR: {name}: {e})")
             continue
+        if record is not None and name in ("write-file", "append-file") and str(result).endswith("SUCCESS"):
+            record.setdefault("files_changed", []).append(str(args[0]))
+        if record is not None and name == "shell" and args and _looks_like_test_command(str(args[0])):
+            record.setdefault("tests_run", []).append(str(args[0]))
         out_parts.append(f"(COMMAND_RETURN: ({name} {args[0] if args else ''}) "
                          f"{_clip(str(result), 2000)})")
     return " ".join(out_parts)
+
+
+def _looks_like_test_command(cmd):
+    try:
+        argv = shlex.split(cmd) if cmd else []
+    except ValueError:
+        return False
+    names = {os.path.basename(a) for a in argv[:3]}
+    return bool(names & {"pytest", "unittest", "tox", "nox", "make"}) or " test" in f" {cmd} "
 
 
 def _extract_emit(calls):
@@ -910,31 +1039,49 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
     # 6. Run the mini-loop
     catalog = tools_catalog(tool_names)
     history = []
+    history_digest = []
     last_results = ""
     max_out_tok = int(cfg.get("max_output_tokens", SUBAGENT_DEFAULT_OUTPUT_TOKENS))
+    run_record = _new_run_record(persona_key, goal)
 
     for turn in range(bounded_turns):
         prompt = build_subagent_prompt(
             persona_text, catalog, last_results, history, goal,
-            turn + 1, bounded_turns,
+            turn + 1, bounded_turns, history_digest,
         )
         raw = _call_subagent_llm(provider_handle, prompt, max_out_tok)
+        turn_record = {"turn": turn + 1, "prompt": prompt, "raw_response": raw, "tool_calls": []}
         # If the call failed catastrophically, _call_subagent_llm
         # already returned a (subagent ...) string; surface as digest.
         if raw.startswith("(subagent LLM call failed"):
-            return cap(raw, bounded_chars)
+            run_record.setdefault("turns", []).append(turn_record)
+            _finish_run_record(run_record, "llm_failed", raw)
+            return _structured_return(
+                raw, run_record, status="error", uncertainty="high",
+                next_action="inspect transcript_path or retry later", max_chars=bounded_chars,
+            )
 
         calls = parse_calls(raw)
+        turn_record["tool_calls"] = [{"name": n, "args": a} for (n, a) in calls]
         emit_value = _extract_emit(calls)
         if emit_value is not None:
-            return cap(emit_value, bounded_chars)
+            run_record.setdefault("turns", []).append(turn_record)
+            _finish_run_record(run_record, "ok", emit_value)
+            return _structured_return(emit_value, run_record, max_chars=bounded_chars)
 
-        last_results = run_tools(calls, tool_names)
-        history.append((turn + 1, raw, last_results))
+        last_results = run_tools(calls, tool_names, run_record)
+        turn_record["tool_results"] = last_results
+        run_record.setdefault("turns", []).append(turn_record)
+        _append_bounded_history(history, (turn + 1, raw, last_results), history_digest)
+        run_record["history_digest"] = list(history_digest)
 
     # Loop exhausted without (emit ...)
     fallback = (
         f"(subagent: max_turns ({bounded_turns}) reached without emit; "
         f"last_results: {_clip(last_results, 500)})"
     )
-    return cap(fallback, bounded_chars)
+    _finish_run_record(run_record, "max_turns", fallback)
+    return _structured_return(
+        fallback, run_record, status="incomplete", uncertainty="medium",
+        next_action="review transcript_path or dispatch a narrower follow-up", max_chars=bounded_chars,
+    )
