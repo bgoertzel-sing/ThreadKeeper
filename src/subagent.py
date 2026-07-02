@@ -868,42 +868,39 @@ def validate_endpoint_compat(tool_names, cfg):
 # ----------------------------------------------------------------------
 
 def resolve_or_instantiate_provider(provider_name, model_name, base_url, var_name, endpoint_kind=None):
-    """Build an AIProvider scoped to this dispatch. Stays inside
-    lib_llm_ext's existing class abstraction; does not mutate
-    _provider_registry.
+    """Build a provider handle scoped to this dispatch.
 
-    A fresh AIProvider instance per dispatch ensures each persona's
-    (provider, model, base_url, api_key_env) binding is honored
-    exactly — no shared mutable state across dispatches with
-    different bindings. AIProvider's _ensure_client lazy-inits the
-    underlying openai client on first .chat() call, so this is
-    cheap at construction (no network).
-
-    Returns a dict with keys: provider (AIProvider), model, provider_name."""
+    A fresh handle per dispatch ensures each persona's endpoint binding is
+    honored exactly. OpenAI-compatible endpoints must have an importable client
+    before the worker loop starts; otherwise dispatch fails as a structured
+    provider setup error instead of burning turns on repeated ``no cloud client``
+    pseudo-responses. Native Ollama endpoints deliberately do not need the
+    OpenAI SDK because _call_subagent_llm uses urllib against /api/chat.
+    """
     api_key = os.environ.get(var_name)
     if not api_key:
         raise RuntimeError(
             f"env var '{var_name}' is unset; cannot reach endpoint for "
             f"provider '{provider_name}'"
         )
-    # Build a plain OpenAI-compatible client for the CLOUD worker path
-    # (e.g. GLM 5.2 specialist). The LOCAL Ollama path in
-    # _call_subagent_llm uses native urllib and ignores this client, so a
-    # client failure here doesn't break local delegation. Import deferred
-    # so the module stays lint-importable without openai installed.
+    kind = endpoint_kind or _endpoint_kind({"provider": provider_name})
     client = None
-    try:
-        import openai
-        client = openai.OpenAI(api_key=api_key, base_url=(base_url or None))
-    except Exception:
-        client = None  # local path doesn't need it
+    if kind == "openai_compatible":
+        try:
+            import openai
+            client = openai.OpenAI(api_key=api_key, base_url=(base_url or None))
+        except Exception as e:
+            raise RuntimeError(
+                f"OpenAI-compatible provider '{provider_name}' cannot be initialized: "
+                f"{type(e).__name__}: {e}"
+            )
     return {
         "provider": client,
         "model": model_name,
         "provider_name": provider_name,
         "base_url": base_url or "",
         "var_name": var_name,
-        "endpoint_kind": endpoint_kind or _endpoint_kind({"provider": provider_name}),
+        "endpoint_kind": kind,
     }
 
 

@@ -109,11 +109,13 @@ denial reason. Errors are never raised into the parent's MeTTa interpreter.
   see §4.5.2 of the design doc).
 - The subagent persona config must reference an API key via an
   env-var name; key material is never read from the config file
-  itself.
+  itself. OpenAI-compatible endpoints also require the local OpenAI
+  SDK/client to initialize before the worker loop starts; native
+  Ollama endpoints do not.
 - If the endpoint is unreachable, the API key env var is unset, the
-  persona config is missing or malformed, or any tool name is
-  unknown / v1-excluded, the dispatcher returns a structured error
-  digest naming the cause.
+  provider client cannot initialize, the persona config is missing or
+  malformed, or any tool name is unknown / v1-excluded, the dispatcher
+  returns a structured error digest naming the cause.
 
 ### Configuration
 
@@ -152,6 +154,7 @@ end-to-end walkthrough.
 | Config JSON malformed | Structured JSON `status=error`; `summary` contains `(subagent error: persona config '<key>.json' is malformed JSON: <reason>)`; transcript status `setup_error`. |
 | Persona prompt file missing/hash mismatch/path escape | Structured JSON `status=error`; `summary` contains `(subagent error: persona prompt <reason>)`; transcript status `persona_prompt_invalid`. |
 | `api_key_env` env var unset | Structured JSON `status=error`; `summary` contains `(subagent error: env var '<NAME>' is unset; cannot reach endpoint for provider '<P>')`; transcript status `provider_invalid`. |
+| OpenAI-compatible provider client cannot initialize | Structured JSON `status=error`; `summary` names the provider initialization failure; transcript status `provider_invalid`; no worker LLM call is attempted. |
 | Tool subset includes unknown skill | Structured JSON `status=error`; `summary` contains `(subagent error: unknown skill(s) [...]; registered subagent tools: [...])`; transcript status `tool_subset_invalid`. |
 | Tool subset includes v1-excluded skill | Structured JSON `status=error`; `summary` contains `(subagent error: skill(s) [...] are not callable by subagents in v1)`; transcript status `tool_subset_invalid`. |
 | Task contract is oversized, path-escaping, uses unsafe action identifiers, or has invalid `max_tool_calls` | Structured JSON `status=error`; `summary` contains `(subagent error: task contract <reason>)`; transcript status `contract_invalid`. |

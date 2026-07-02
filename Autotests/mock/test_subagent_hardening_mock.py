@@ -1,4 +1,5 @@
 """Unit checks for ThreadKeeper subagent hardening primitives."""
+import builtins
 import hashlib
 import json
 import multiprocessing
@@ -263,6 +264,34 @@ def test_committed_persona_examples_use_explicit_metadata_and_valid_prompt_pin(m
         assert subagent.load_persona_prompt(
             cfg["persona_file"], key, cfg["persona_sha256"]
         )
+
+
+def test_openai_compatible_provider_init_fails_closed_without_client(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch, node_role="cloud")
+    monkeypatch.setattr(subagent, "_escalation_gate", lambda _cfg: (True, "unit budget ok"))
+
+    real_import = builtins.__import__
+
+    def blocked_import(name, *args, **kwargs):
+        if name == "openai":
+            raise ImportError("openai sdk unavailable")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", blocked_import)
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")),
+    )
+
+    payload = json.loads(subagent.dispatch("cloud setup", "write-file", "unit", max_turns=1))
+
+    assert payload["status"] == "error"
+    assert "OpenAI-compatible provider" in payload["summary"]
+    assert "openai sdk unavailable" in payload["summary"]
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["status"] == "provider_invalid"
+    assert saved["turns"] == []
 
 
 def test_endpoint_kind_controls_llm_transport_without_base_url_heuristic(monkeypatch):
