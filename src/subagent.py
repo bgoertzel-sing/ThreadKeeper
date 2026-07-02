@@ -1510,9 +1510,12 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
     if not subset_csv:
         default_subset = cfg.get("default_tool_subset", [])
         if not default_subset:
-            return error(
+            return _structured_setup_error(
                 f"no tool subset given and persona '{persona_key}' has no "
-                "default_tool_subset"
+                "default_tool_subset",
+                persona_key, objective, bounded_chars,
+                record_status="tool_subset_invalid", task_contract=task_contract,
+                next_action="provide an explicit tool subset or persona default_tool_subset",
             )
         subset_csv = ",".join(default_subset)
     try:

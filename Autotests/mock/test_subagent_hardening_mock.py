@@ -478,3 +478,36 @@ def test_task_contract_rejects_oversized_objective_before_llm(tmp_path, monkeypa
 
     assert "subagent error" in result
     assert "objective exceeds 8 characters" in result
+
+
+def test_dispatch_without_tool_subset_or_default_persists_structured_error(tmp_path, monkeypatch):
+    persona_dir = tmp_path / "personas"
+    persona_dir.mkdir()
+    (persona_dir / "unit.txt").write_text("You are a unit-test subagent.")
+    (persona_dir / "unit.json").write_text(json.dumps({
+        "persona_file": "unit.txt",
+        "provider": "ollama",
+        "model": "unit-model",
+        "api_key_env": "UNIT_API_KEY",
+        "base_url": "http://localhost:11434",
+        "node_role": "local",
+        "endpoint_kind": "ollama_native",
+    }))
+    monkeypatch.setattr(subagent, "PERSONA_DIR", str(persona_dir))
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+    monkeypatch.setenv("UNIT_API_KEY", "dummy")
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")),
+    )
+
+    payload = json.loads(subagent.dispatch("needs tools", "", "unit", max_turns=1))
+
+    assert payload["status"] == "error"
+    assert "no tool subset" in payload["summary"]
+    transcript = Path(payload["transcript_path"])
+    assert transcript.exists()
+    saved = json.loads(transcript.read_text())
+    assert saved["status"] == "tool_subset_invalid"
+    assert saved["turns"] == []
