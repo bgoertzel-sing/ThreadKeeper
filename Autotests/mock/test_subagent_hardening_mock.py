@@ -422,6 +422,55 @@ def test_task_contract_forbidden_action_blocks_tool(tmp_path, monkeypatch):
     assert "forbidden by task contract" in saved["turns"][0]["tool_results"]
 
 
+def test_task_contract_max_tool_calls_narrows_global_quota(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_TOOL_CALLS", 8)
+    contract_goal = json.dumps({
+        "objective": "write one file only",
+        "max_tool_calls": 1,
+    })
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: '(write-file "a.txt" "a")\n(write-file "b.txt" "b")',
+    )
+
+    payload = json.loads(subagent.dispatch(contract_goal, "write-file", "unit", max_turns=2))
+
+    assert payload["status"] == "error"
+    assert "QUOTA_EXCEEDED" in payload["summary"]
+    assert payload["files_changed"] == ["a.txt"]
+    assert (tmp_path / "workspace" / "a.txt").read_text() == "a"
+    assert not (tmp_path / "workspace" / "b.txt").exists()
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["task_contract"]["max_tool_calls"] == 1
+
+
+def test_task_contract_rejects_bad_max_tool_calls_before_llm(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")),
+    )
+
+    negative = subagent.dispatch(json.dumps({
+        "objective": "bad quota",
+        "max_tool_calls": -1,
+    }), "write-file", "unit", max_turns=1)
+    fractional = subagent.dispatch(json.dumps({
+        "objective": "bad quota",
+        "max_tool_calls": 1.5,
+    }), "write-file", "unit", max_turns=1)
+
+    assert "subagent error" in negative
+    assert "max_tool_calls" in negative
+    assert "non-negative" in negative
+    assert "subagent error" in fractional
+    assert "max_tool_calls" in fractional
+    assert "not an integer" in fractional
+
+
 def test_task_contract_rejects_allowed_path_escape_before_llm(tmp_path, monkeypatch):
     _write_unit_persona(tmp_path, monkeypatch)
     contract_goal = json.dumps({

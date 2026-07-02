@@ -992,7 +992,8 @@ def _normalize_task_contract(goal, cfg=None):
 
     Contracts are intentionally data-only and may be supplied either in the
     persona JSON as `task_contract` or inline as a JSON goal object containing
-    `objective`, `allowed_paths`, `forbidden_actions`, and/or `done_criteria`.
+    `objective`, `allowed_paths`, `forbidden_actions`, `done_criteria`,
+    and/or `max_tool_calls`.
     This keeps the existing `(delegate goal tools persona max_turns)` API while
     giving parent agents a concrete way to narrow a child task.
     """
@@ -1005,7 +1006,7 @@ def _normalize_task_contract(goal, cfg=None):
     if isinstance(parsed, dict):
         inline = parsed.get("task_contract") if isinstance(parsed.get("task_contract"), dict) else parsed
         if isinstance(inline, dict):
-            for key in ("allowed_paths", "forbidden_actions", "done_criteria"):
+            for key in ("allowed_paths", "forbidden_actions", "done_criteria", "max_tool_calls"):
                 if key in inline:
                     contract[key] = inline[key]
             objective = str(inline.get("objective") or parsed.get("objective") or objective)
@@ -1040,6 +1041,19 @@ def _validate_task_contract(contract):
                     f"task contract {field} item exceeds "
                     f"{_SUBAGENT_MAX_CONTRACT_ITEM_CHARS} characters"
                 )
+    if "max_tool_calls" in (contract or {}):
+        raw_quota = (contract or {}).get("max_tool_calls")
+        if isinstance(raw_quota, bool):
+            return f"task contract max_tool_calls entry '{raw_quota}' is not an integer"
+        if isinstance(raw_quota, int):
+            quota = raw_quota
+        elif isinstance(raw_quota, str) and re.match(r"^\d+$", raw_quota.strip()):
+            quota = int(raw_quota.strip())
+        else:
+            return f"task contract max_tool_calls entry '{raw_quota}' is not an integer"
+        if quota < 0:
+            return "task contract max_tool_calls must be non-negative"
+        contract["max_tool_calls"] = quota
     for action in (contract or {}).get("forbidden_actions") or []:
         if not re.match(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$", str(action)):
             return f"task contract forbidden_actions entry '{action}' is not a safe action identifier"
@@ -1144,7 +1158,8 @@ def build_subagent_prompt(persona, catalog, last_results, history, goal,
             f"objective: {task_contract.get('objective') or goal}\n"
             f"allowed_paths: {task_contract.get('allowed_paths') or []}\n"
             f"forbidden_actions: {task_contract.get('forbidden_actions') or []}\n"
-            f"done_criteria: {task_contract.get('done_criteria') or []}"
+            f"done_criteria: {task_contract.get('done_criteria') or []}\n"
+            f"max_tool_calls: {task_contract.get('max_tool_calls', 'global-default')}"
         )
     if last_results:
         parts.append(f"LAST_RESULTS:\n{last_results[-_SUBAGENT_RESULTS_CAP:]}")
@@ -1617,6 +1632,8 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
     history_digest = []
     last_results = ""
     tool_calls_remaining = max(0, _SUBAGENT_MAX_TOOL_CALLS)
+    if "max_tool_calls" in task_contract:
+        tool_calls_remaining = min(tool_calls_remaining, max(0, int(task_contract["max_tool_calls"])))
     max_out_tok = int(cfg.get("max_output_tokens", SUBAGENT_DEFAULT_OUTPUT_TOKENS))
     run_record = _new_run_record(persona_key, objective)
     run_record["task_contract"] = dict(task_contract)

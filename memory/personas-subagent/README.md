@@ -45,7 +45,7 @@ The directory path is configurable via the
 | `max_output_tokens` | optional, default 1500 | Per-subagent-call output cap. |
 | `default_tool_subset` | optional | Tool subset to use when the dispatch call omits the tools argument. The dispatch call's explicit tools argument always overrides. |
 | `persona_sha256` | optional, recommended | SHA-256 of the referenced persona prompt file. When set, a prompt mismatch fails closed before any worker LLM call. |
-| `task_contract` | optional | Default task contract fields (`objective`, `allowed_paths`, `forbidden_actions`, `done_criteria`) merged with any JSON contract supplied as the dispatch goal. Contract text is bounded; `allowed_paths` must resolve inside the subagent workspace; `forbidden_actions` must be simple action identifiers. |
+| `task_contract` | optional | Default task contract fields (`objective`, `allowed_paths`, `forbidden_actions`, `done_criteria`, optional `max_tool_calls`) merged with any JSON contract supplied as the dispatch goal. Contract text is bounded; `allowed_paths` must resolve inside the subagent workspace; `forbidden_actions` must be simple action identifiers; `max_tool_calls` must be non-negative and can only narrow the global quota. |
 | `notes` | optional | Free-form human-readable description. Not consumed by the dispatcher. |
 
 ## Security
