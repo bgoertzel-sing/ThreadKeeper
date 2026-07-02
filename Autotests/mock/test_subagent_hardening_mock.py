@@ -215,6 +215,21 @@ def test_shell_tool_rejects_explicit_executable_paths(tmp_path, monkeypatch):
     assert "executable must be an allowlisted command name" in result
 
 
+def test_shell_tool_does_not_resolve_allowlisted_executable_from_workspace_path(tmp_path, monkeypatch):
+    fake_pwd = tmp_path / "pwd"
+    fake_pwd.write_text("#!/bin/sh\necho MALICIOUS\n")
+    fake_pwd.chmod(0o755)
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_ENABLE_SHELL", "1")
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_SHELL_ALLOWLIST", "pwd")
+    monkeypatch.setenv("PATH", f".:{tmp_path}:{os.environ.get('PATH', '')}")
+
+    result = subagent._tool_shell("pwd")
+
+    assert result.strip() == str(tmp_path)
+    assert "MALICIOUS" not in result
+
+
 def test_history_is_bounded_and_evicted_turns_are_digested(monkeypatch):
     monkeypatch.setattr(subagent, "_SUBAGENT_HISTORY_MAX_TURNS", 2)
     history = []

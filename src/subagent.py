@@ -1370,6 +1370,30 @@ def _tool_append_file(path, content):
         return f"(append-file error: {e})"
 
 
+def _shell_safe_path_env(workspace):
+    """Return a PATH that cannot resolve executables from the workspace/cwd.
+
+    The shell tool already requires command-name-only executable tokens and an
+    explicit allowlist. Because commands run with cwd fixed to the workspace,
+    inherited PATH entries such as '.', '', or the workspace itself could still
+    make an allowlisted basename resolve to a workspace-controlled executable.
+    Drop those entries before launching the argv-list subprocess.
+    """
+    root = os.path.realpath(os.path.abspath(workspace))
+    safe_parts = []
+    for part in os.environ.get("PATH", os.defpath).split(os.pathsep):
+        if not part or part == ".":
+            continue
+        resolved = os.path.realpath(os.path.abspath(part))
+        try:
+            if os.path.commonpath([root, resolved]) == root:
+                continue
+        except Exception:
+            continue
+        safe_parts.append(part)
+    return os.pathsep.join(safe_parts) or os.defpath
+
+
 def _tool_shell(cmd):
     """Restricted command runner: disabled unless explicitly enabled and
     executable-allowlisted. Uses shell=False so metacharacters are arguments,
@@ -1392,11 +1416,14 @@ def _tool_shell(cmd):
     workspace = _subagent_workspace_root()
     if not os.path.isdir(workspace):
         return f"(shell error: subagent workspace does not exist: {workspace})"
+    env = os.environ.copy()
+    env["PATH"] = _shell_safe_path_env(workspace)
     try:
         out = subprocess.run(
             argv,
             shell=False,
             cwd=workspace,
+            env=env,
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=_SHELL_TIMEOUT_S,

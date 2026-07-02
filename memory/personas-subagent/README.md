@@ -89,7 +89,8 @@ registered tools:
 - `search` — web search via DuckDuckGo (`channels/websearch.py`)
 - `read-file`, `write-file`, `append-file` — file I/O
 - `shell` — restricted argv-list subprocess (disabled by default,
-  executable allowlisted, 30s timeout, output capped at 4 KB)
+  executable allowlisted, command-name-only, sanitized PATH, 30s timeout,
+  output capped at 4 KB)
 - `tavily-search` — Tavily via Agentverse (if `uagents` installed)
 - `technical-analysis` — technical-analysis agent via Agentverse
 
