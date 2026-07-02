@@ -68,9 +68,10 @@ Full worker prompts/responses/tool results are persisted locally under
 `OMEGACLAW_SUBAGENT_RUN_DIR` (default `memory/subagent-runs`) and only
 the bounded digest is returned to the parent.
 
-Early setup failures still return a structured error string
-`"(subagent error: <reason>)"`. Errors are never raised into the parent's
-MeTTa interpreter.
+Early setup, contract, provider, tool-subset, and escalation failures also
+return the same structured JSON shape and persist a minimal local transcript;
+the JSON `summary` includes `"(subagent error: <reason>)"` or the escalation
+denial reason. Errors are never raised into the parent's MeTTa interpreter.
 
 ### Examples
 
@@ -141,13 +142,14 @@ end-to-end walkthrough.
 
 | Failure | Returned digest |
 |---|---|
-| `persona_key` config missing | `(subagent error: persona config '<key>.json' not found at <path>)` |
-| Config JSON malformed | `(subagent error: persona config '<key>.json' is malformed JSON: <reason>)` |
-| Persona prompt file missing | `(subagent error: persona prompt '<file>' for key '<key>' not found at <path>)` |
-| `api_key_env` env var unset | `(subagent error: env var '<NAME>' is unset; cannot reach endpoint for provider '<P>')` |
-| Tool subset includes unknown skill | `(subagent error: unknown skill(s) [...]; registered subagent tools: [...])` |
-| Tool subset includes v1-excluded skill | `(subagent error: skill(s) [...] are not callable by subagents in v1)` |
-| Task contract is oversized, path-escaping, or uses unsafe action identifiers | `(subagent error: task contract <reason>)` |
-| Subagent endpoint times out / errors | `(subagent LLM call failed: <ExceptionType>: <reason>)` |
-| Worker mixes `emit` with other parsed calls or multiple emits | Structured return with `status=error` and `EMIT_PROTOCOL_VIOLATION`. |
-| Loop exceeds `max_turns` without `emit` | `(subagent: max_turns (<N>) reached without emit; last_results: <clip>)` |
+| `persona_key` config missing | Structured JSON `status=error`; `summary` contains `(subagent error: persona config '<key>.json' not found at <path>)`; transcript status `setup_error`. |
+| Config JSON malformed | Structured JSON `status=error`; `summary` contains `(subagent error: persona config '<key>.json' is malformed JSON: <reason>)`; transcript status `setup_error`. |
+| Persona prompt file missing/hash mismatch | Structured JSON `status=error`; `summary` contains `(subagent error: persona prompt <reason>)`; transcript status `persona_prompt_invalid`. |
+| `api_key_env` env var unset | Structured JSON `status=error`; `summary` contains `(subagent error: env var '<NAME>' is unset; cannot reach endpoint for provider '<P>')`; transcript status `provider_invalid`. |
+| Tool subset includes unknown skill | Structured JSON `status=error`; `summary` contains `(subagent error: unknown skill(s) [...]; registered subagent tools: [...])`; transcript status `tool_subset_invalid`. |
+| Tool subset includes v1-excluded skill | Structured JSON `status=error`; `summary` contains `(subagent error: skill(s) [...] are not callable by subagents in v1)`; transcript status `tool_subset_invalid`. |
+| Task contract is oversized, path-escaping, or uses unsafe action identifiers | Structured JSON `status=error`; `summary` contains `(subagent error: task contract <reason>)`; transcript status `contract_invalid`. |
+| Escalation policy denies cloud delegation | Structured JSON `status=error`; `summary` contains `(escalation denied) ...`; transcript status `escalation_denied`. |
+| Subagent endpoint times out / errors | Structured JSON `status=error`; `summary` contains `(subagent LLM call failed: <ExceptionType>: <reason>)`; transcript status `llm_failed`. |
+| Worker mixes `emit` with other parsed calls or multiple emits | Structured JSON `status=error` and `EMIT_PROTOCOL_VIOLATION`; transcript status `emit_protocol_violation`. |
+| Loop exceeds `max_turns` without `emit` | Structured JSON `status=incomplete`; `summary` contains `(subagent: max_turns (<N>) reached without emit; last_results: <clip>)`; transcript status `max_turns`. |

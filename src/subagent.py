@@ -1410,10 +1410,33 @@ def cap(text, max_chars):
 
 
 def error(msg):
-    """Wrap an error into the structured digest string the parent
-    sees. Always returns; never raises into the parent's MeTTa
-    interpreter."""
+    """Wrap an error into the legacy setup-error string.
+
+    Dispatch uses _structured_setup_error where possible so failures also get
+    transcript records; keep this helper for direct callers and exceptional
+    pre-dispatch paths.
+    """
     return f"(subagent error: {msg})"
+
+
+def _structured_setup_error(msg, persona_key, goal, max_chars,
+                            record_status="setup_error", task_contract=None,
+                            next_action="fix setup/config before retry"):
+    """Return a structured error digest and persist a minimal run record.
+
+    Early failures used to return only `(subagent error: ...)`, which made them
+    invisible to transcript/audit tooling. Persist enough local context for the
+    parent/operator to debug without making any worker LLM call.
+    """
+    record = _new_run_record(persona_key or "unknown", goal)
+    if task_contract is not None:
+        record["task_contract"] = dict(task_contract)
+    summary = error(msg)
+    _finish_run_record(record, record_status, summary)
+    return _structured_return(
+        summary, record, status="error", uncertainty="high",
+        next_action=next_action, max_chars=max_chars,
+    )
 
 
 # ----------------------------------------------------------------------
@@ -1451,11 +1474,15 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
     try:
         cfg = load_persona_config(persona_key)
     except (FileNotFoundError, ValueError) as e:
-        return error(str(e))
+        return _structured_setup_error(str(e), persona_key, goal, bounded_chars)
     objective, task_contract = _normalize_task_contract(goal, cfg)
     contract_error = _validate_task_contract(task_contract)
     if contract_error:
-        return error(contract_error)
+        return _structured_setup_error(
+            contract_error, persona_key, objective, bounded_chars,
+            record_status="contract_invalid", task_contract=task_contract,
+            next_action="fix task contract before retry",
+        )
 
     # 2b. ThreadKeeper escalation gate. A delegation to a CLOUD specialist is
     # the expensive node — consult the budget policy (src/escalation.metta via
@@ -1465,11 +1492,17 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
     # closed by default unless an operator explicitly sets fail-open fallback.
     gate_allowed, gate_reason = _escalation_gate(cfg)
     if not gate_allowed:
-        return cap(
+        denial = (
             f"(escalation denied) {gate_reason} — "
             f"cloud delegation to persona '{persona_key}' refused by the "
-            f"ThreadKeeper budget policy; finish on local/cheap nodes or stop.",
-            bounded_chars,
+            f"ThreadKeeper budget policy; finish on local/cheap nodes or stop."
+        )
+        record = _new_run_record(persona_key, objective)
+        record["task_contract"] = dict(task_contract)
+        _finish_run_record(record, "escalation_denied", denial)
+        return _structured_return(
+            denial, record, status="error", uncertainty="high",
+            next_action="finish on local/cheap nodes or stop", max_chars=bounded_chars,
         )
 
     # 3. Resolve tool subset
@@ -1485,7 +1518,11 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
     try:
         tool_names = parse_subset(subset_csv)
     except ValueError as e:
-        return error(str(e))
+        return _structured_setup_error(
+            str(e), persona_key, objective, bounded_chars,
+            record_status="tool_subset_invalid", task_contract=task_contract,
+            next_action="fix delegate tool subset before retry",
+        )
 
     validate_endpoint_compat(tool_names, cfg)  # always passes in v1
 
@@ -1495,7 +1532,10 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
             cfg["persona_file"], persona_key, cfg.get("persona_sha256")
         )
     except (FileNotFoundError, ValueError) as e:
-        return error(str(e))
+        return _structured_setup_error(
+            str(e), persona_key, objective, bounded_chars,
+            record_status="persona_prompt_invalid", task_contract=task_contract,
+        )
 
     # 5. Resolve provider
     try:
@@ -1507,7 +1547,10 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
             endpoint_kind=cfg.get("_endpoint_kind"),
         )
     except RuntimeError as e:
-        return error(str(e))
+        return _structured_setup_error(
+            str(e), persona_key, objective, bounded_chars,
+            record_status="provider_invalid", task_contract=task_contract,
+        )
 
     # 6. Run the mini-loop
     catalog = tools_catalog(tool_names)

@@ -346,9 +346,13 @@ def test_escalation_policy_hash_mismatch_denies_cloud_dispatch(tmp_path, monkeyp
     monkeypatch.setattr(subagent, "_call_subagent_llm", lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")))
 
     result = subagent.dispatch("cloud task", "write-file", "unit", max_turns=1)
+    payload = json.loads(result)
 
-    assert "escalation denied" in result
-    assert "integrity mismatch" in result
+    assert payload["status"] == "error"
+    assert "escalation denied" in payload["summary"]
+    assert "integrity mismatch" in payload["summary"]
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["status"] == "escalation_denied"
 
 
 def test_task_contract_limits_file_paths_and_persists_contract(tmp_path, monkeypatch):
@@ -408,10 +412,15 @@ def test_task_contract_rejects_allowed_path_escape_before_llm(tmp_path, monkeypa
     )
 
     result = subagent.dispatch(contract_goal, "write-file", "unit", max_turns=1)
+    payload = json.loads(result)
 
-    assert "subagent error" in result
-    assert "allowed_paths" in result
-    assert "outside workspace" in result
+    assert payload["status"] == "error"
+    assert "subagent error" in payload["summary"]
+    assert "allowed_paths" in payload["summary"]
+    assert "outside workspace" in payload["summary"]
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["status"] == "contract_invalid"
+    assert saved["task_contract"]["allowed_paths"] == ["../outside"]
 
 
 def test_task_contract_rejects_oversized_contract_before_llm(tmp_path, monkeypatch):
