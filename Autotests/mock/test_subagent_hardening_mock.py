@@ -372,6 +372,7 @@ def test_task_contract_limits_file_paths_and_persists_contract(tmp_path, monkeyp
     assert (tmp_path / "workspace" / "safe" / "out.txt").read_text() == "ok"
     saved = json.loads(Path(payload["transcript_path"]).read_text())
     assert saved["goal"] == "write only inside safe output"
+    assert saved["task_contract"]["objective"] == "write only inside safe output"
     assert saved["task_contract"]["allowed_paths"] == ["safe"]
     assert saved["task_contract"]["done_criteria"] == ["safe/out.txt exists"]
     assert "CONTRACT_VIOLATION" in saved["turns"][0]["tool_results"]
@@ -431,3 +432,40 @@ def test_task_contract_rejects_oversized_contract_before_llm(tmp_path, monkeypat
     assert "subagent error" in result
     assert "done_criteria" in result
     assert "max 1" in result
+
+
+def test_task_contract_rejects_unsafe_forbidden_action_before_llm(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    contract_goal = json.dumps({
+        "objective": "unsafe action name",
+        "forbidden_actions": ["../write-file"],
+    })
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")),
+    )
+
+    result = subagent.dispatch(contract_goal, "write-file", "unit", max_turns=1)
+
+    assert "subagent error" in result
+    assert "forbidden_actions" in result
+    assert "safe action identifier" in result
+
+
+def test_task_contract_rejects_oversized_objective_before_llm(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS", 8)
+    contract_goal = json.dumps({
+        "objective": "x" * 9,
+    })
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")),
+    )
+
+    result = subagent.dispatch(contract_goal, "write-file", "unit", max_turns=1)
+
+    assert "subagent error" in result
+    assert "objective exceeds 8 characters" in result

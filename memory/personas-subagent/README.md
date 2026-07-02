@@ -45,7 +45,7 @@ The directory path is configurable via the
 | `max_output_tokens` | optional, default 1500 | Per-subagent-call output cap. |
 | `default_tool_subset` | optional | Tool subset to use when the dispatch call omits the tools argument. The dispatch call's explicit tools argument always overrides. |
 | `persona_sha256` | optional, recommended | SHA-256 of the referenced persona prompt file. When set, a prompt mismatch fails closed before any worker LLM call. |
-| `task_contract` | optional | Default task contract fields (`objective`, `allowed_paths`, `forbidden_actions`, `done_criteria`) merged with any JSON contract supplied as the dispatch goal. |
+| `task_contract` | optional | Default task contract fields (`objective`, `allowed_paths`, `forbidden_actions`, `done_criteria`) merged with any JSON contract supplied as the dispatch goal. Contract text is bounded; `allowed_paths` must resolve inside the subagent workspace; `forbidden_actions` must be simple action identifiers. |
 | `notes` | optional | Free-form human-readable description. Not consumed by the dispatcher. |
 
 ## Security
@@ -88,8 +88,8 @@ registered tools:
 
 - `search` — web search via DuckDuckGo (`channels/websearch.py`)
 - `read-file`, `write-file`, `append-file` — file I/O
-- `shell` — restricted subprocess (no apostrophes, 30s timeout,
-  output capped at 4 KB)
+- `shell` — restricted argv-list subprocess (disabled by default,
+  executable allowlisted, 30s timeout, output capped at 4 KB)
 - `tavily-search` — Tavily via Agentverse (if `uagents` installed)
 - `technical-analysis` — technical-analysis agent via Agentverse
 

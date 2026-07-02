@@ -255,6 +255,7 @@ _SUBAGENT_MAX_PATH_ARG_CHARS = int(os.environ.get("OMEGACLAW_SUBAGENT_MAX_PATH_A
 _SUBAGENT_MAX_TOOL_ARG_CHARS = int(os.environ.get("OMEGACLAW_SUBAGENT_MAX_TOOL_ARG_CHARS", "20000"))
 _SUBAGENT_MAX_CONTRACT_ITEMS = int(os.environ.get("OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEMS", "32"))
 _SUBAGENT_MAX_CONTRACT_ITEM_CHARS = int(os.environ.get("OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEM_CHARS", "512"))
+_SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS = int(os.environ.get("OMEGACLAW_SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS", "4000"))
 
 # Persistent local run records. Full worker prompts/responses/tool results are
 # kept out of the parent context; the parent receives only a bounded structured
@@ -952,6 +953,8 @@ def _normalize_task_contract(goal, cfg=None):
                 if key in inline:
                     contract[key] = inline[key]
             objective = str(inline.get("objective") or parsed.get("objective") or objective)
+    objective = str(objective or "").strip()
+    contract["objective"] = objective
     contract["allowed_paths"] = _contract_string_list(contract.get("allowed_paths"))
     contract["forbidden_actions"] = _contract_string_list(contract.get("forbidden_actions"))
     contract["done_criteria"] = _contract_string_list(contract.get("done_criteria"))
@@ -965,6 +968,12 @@ def _validate_task_contract(contract):
     same bounded-shape treatment as tool arguments. `allowed_paths` also gets a
     dry-run workspace resolution now, rather than waiting until a tool call.
     """
+    objective = str((contract or {}).get("objective") or "")
+    if len(objective) > _SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS:
+        return (
+            "task contract objective exceeds "
+            f"{_SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS} characters"
+        )
     for field in ("allowed_paths", "forbidden_actions", "done_criteria"):
         values = list((contract or {}).get(field) or [])
         if len(values) > _SUBAGENT_MAX_CONTRACT_ITEMS:
@@ -975,6 +984,9 @@ def _validate_task_contract(contract):
                     f"task contract {field} item exceeds "
                     f"{_SUBAGENT_MAX_CONTRACT_ITEM_CHARS} characters"
                 )
+    for action in (contract or {}).get("forbidden_actions") or []:
+        if not re.match(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$", str(action)):
+            return f"task contract forbidden_actions entry '{action}' is not a safe action identifier"
     for prefix in (contract or {}).get("allowed_paths") or []:
         try:
             _resolve_workspace_path(prefix)
@@ -1073,7 +1085,7 @@ def build_subagent_prompt(persona, catalog, last_results, history, goal,
     if task_contract:
         parts.append(
             "TASK_CONTRACT:\n"
-            f"objective: {goal}\n"
+            f"objective: {task_contract.get('objective') or goal}\n"
             f"allowed_paths: {task_contract.get('allowed_paths') or []}\n"
             f"forbidden_actions: {task_contract.get('forbidden_actions') or []}\n"
             f"done_criteria: {task_contract.get('done_criteria') or []}"
