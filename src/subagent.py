@@ -1373,7 +1373,7 @@ def _tool_append_file(path, content):
 def _tool_shell(cmd):
     """Restricted command runner: disabled unless explicitly enabled and
     executable-allowlisted. Uses shell=False so metacharacters are arguments,
-    not command separators."""
+    not command separators, and runs from the subagent workspace root."""
     if not _shell_enabled():
         return "(shell error: disabled by default; set OMEGACLAW_SUBAGENT_ENABLE_SHELL=1 and OMEGACLAW_SUBAGENT_SHELL_ALLOWLIST)"
     try:
@@ -1386,9 +1386,17 @@ def _tool_shell(cmd):
     exe = os.path.basename(argv[0])
     if not allow or exe not in allow:
         return f"(shell error: executable '{exe}' is not allowlisted)"
+    workspace = _subagent_workspace_root()
+    if not os.path.isdir(workspace):
+        return f"(shell error: subagent workspace does not exist: {workspace})"
     try:
         out = subprocess.run(
-            argv, shell=False, capture_output=True, timeout=_SHELL_TIMEOUT_S,
+            argv,
+            shell=False,
+            cwd=workspace,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=_SHELL_TIMEOUT_S,
         )
         text = (out.stdout or b"").decode("utf-8", errors="replace")
         text += (out.stderr or b"").decode("utf-8", errors="replace")

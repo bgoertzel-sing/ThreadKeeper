@@ -106,7 +106,10 @@ denial reason. Errors are never raised into the parent's MeTTa interpreter.
   parent digest returns the same transcript hash for audit checks.
 - The subagent cannot call `send`, `remember`, `pin`, `metta`,
   `query`, `episodes`, or `delegate` in v1 (excluded by design —
-  see §4.5.2 of the design doc).
+  see §4.5.2 of the design doc). If `shell` is explicitly enabled,
+  it still uses argv-list execution (`shell=False`), an executable
+  allowlist, no stdin, bounded output/timeout, and `cwd` fixed to
+  `OMEGACLAW_SUBAGENT_WORKSPACE`.
 - The subagent persona config must reference an API key via an
   env-var name; key material is never read from the config file
   itself. OpenAI-compatible endpoints also require the local OpenAI
