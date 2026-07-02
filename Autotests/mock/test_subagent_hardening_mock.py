@@ -304,8 +304,12 @@ def test_dispatch_returns_structured_digest_and_persists_transcript(tmp_path, mo
     assert payload["summary"] == "done"
     assert payload["files_changed"] == ["out.txt"]
     assert payload["status"] == "ok"
+    assert len(payload["transcript_sha256"]) == 64
     transcript = Path(payload["transcript_path"])
     assert transcript.exists()
+    digest = hashlib.sha256(transcript.read_bytes()).hexdigest()
+    assert payload["transcript_sha256"] == digest
+    assert transcript.with_suffix(transcript.suffix + ".sha256").read_text().startswith(digest)
     saved = json.loads(transcript.read_text())
     assert saved["status"] == "ok"
     assert len(saved["turns"]) == 2

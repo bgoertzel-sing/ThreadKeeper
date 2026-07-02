@@ -63,10 +63,13 @@ and returns a single-string digest via its own `emit` instruction.
 
 A single-line JSON string of at most `OMEGACLAW_SUBAGENT_MAX_DIGEST_CHARS`
 (default 2,000) with `summary`, `files_changed`, `tests_run`,
-`uncertainty`, `next_action`, `transcript_path`, and `status` fields.
-Full worker prompts/responses/tool results are persisted locally under
-`OMEGACLAW_SUBAGENT_RUN_DIR` (default `memory/subagent-runs`) and only
-the bounded digest is returned to the parent.
+`uncertainty`, `next_action`, `transcript_path`, `transcript_sha256`,
+and `status` fields. Full worker prompts/responses/tool results are
+persisted locally under `OMEGACLAW_SUBAGENT_RUN_DIR` (default
+`memory/subagent-runs`) and only the bounded digest is returned to the
+parent. Each finished transcript also gets a local `<transcript>.sha256`
+sidecar so supervisors can cheaply detect accidental corruption or later
+mutation during audit.
 
 Early setup, contract, provider, tool-subset, and escalation failures also
 return the same structured JSON shape and persist a minimal local transcript;
@@ -97,7 +100,9 @@ denial reason. Errors are never raised into the parent's MeTTa interpreter.
   endpoint can live anywhere the deployment configures (local
   Ollama, remote API, etc.). The parent receives only bounded state;
   full prompts, responses, tool calls/results, task contracts, and
-  history digests are saved in the local transcript record.
+  history digests are saved in the local transcript record. Finished
+  records have a SHA-256 sidecar and the parent digest returns the same
+  transcript hash for audit checks.
 - The subagent cannot call `send`, `remember`, `pin`, `metta`,
   `query`, `episodes`, or `delegate` in v1 (excluded by design —
   see §4.5.2 of the design doc).

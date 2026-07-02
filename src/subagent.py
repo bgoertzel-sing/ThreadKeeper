@@ -298,20 +298,51 @@ def _safe_slug(text, max_len=48):
     return (slug or "run")[:max_len]
 
 
+def _json_bytes(data):
+    return (json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
 def _json_atomic_write(path, data):
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
+    payload = _json_bytes(data)
     fd, tmp = tempfile.mkstemp(
         prefix=f".{os.path.basename(path)}.", suffix=".tmp", dir=parent or None
     )
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2, sort_keys=True)
-            f.write("\n")
+        with os.fdopen(fd, "wb") as f:
+            f.write(payload)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
+        return hashlib.sha256(payload).hexdigest()
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except Exception:
+            pass
+
+
+def _write_transcript_integrity_sidecar(path, digest):
+    """Write a small checksum sidecar for local transcript audit checks."""
+    if not path or not digest:
+        return ""
+    sidecar = f"{path}.sha256"
+    parent = os.path.dirname(sidecar)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(
+        prefix=f".{os.path.basename(sidecar)}.", suffix=".tmp", dir=parent or None
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(f"{digest}  {os.path.basename(path)}\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, sidecar)
+        return sidecar
     finally:
         try:
             if os.path.exists(tmp):
@@ -519,7 +550,10 @@ def _finish_run_record(record, status, summary=None):
     record["summary"] = summary or ""
     record["finished_at"] = time.time()
     try:
-        _json_atomic_write(record["transcript_path"], record)
+        digest = _json_atomic_write(record["transcript_path"], record)
+        sidecar = _write_transcript_integrity_sidecar(record["transcript_path"], digest)
+        record["transcript_sha256"] = digest
+        record["transcript_sha256_path"] = sidecar
     except Exception as e:
         record["record_write_error"] = f"{type(e).__name__}: {e}"
     return record.get("transcript_path", "")
@@ -535,6 +569,7 @@ def _structured_return(summary, record=None, status="ok", uncertainty="low",
         "uncertainty": uncertainty,
         "next_action": next_action,
         "transcript_path": (record or {}).get("transcript_path", ""),
+        "transcript_sha256": (record or {}).get("transcript_sha256", ""),
         "status": status,
     }
     text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
