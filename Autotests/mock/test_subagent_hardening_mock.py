@@ -194,15 +194,25 @@ def test_append_file_lock_prevents_concurrent_lost_updates(tmp_path, monkeypatch
 
 
 def test_shell_tool_runs_from_subagent_workspace(tmp_path, monkeypatch):
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_ENABLE_SHELL", "1")
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_SHELL_ALLOWLIST", "pwd")
+
+    result = subagent._tool_shell("pwd")
+
+    assert result.strip() == str(tmp_path)
+
+
+def test_shell_tool_rejects_explicit_executable_paths(tmp_path, monkeypatch):
     python_exe = sys.executable
     python_name = Path(python_exe).name
     monkeypatch.setenv("OMEGACLAW_SUBAGENT_WORKSPACE", str(tmp_path))
     monkeypatch.setenv("OMEGACLAW_SUBAGENT_ENABLE_SHELL", "1")
     monkeypatch.setenv("OMEGACLAW_SUBAGENT_SHELL_ALLOWLIST", python_name)
 
-    result = subagent._tool_shell(f'{python_exe} -c "import os; print(os.getcwd())"')
+    result = subagent._tool_shell(f'{python_exe} -c "print(1)"')
 
-    assert result.strip() == str(tmp_path)
+    assert "executable must be an allowlisted command name" in result
 
 
 def test_history_is_bounded_and_evicted_turns_are_digested(monkeypatch):

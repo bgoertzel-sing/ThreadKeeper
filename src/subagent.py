@@ -1383,7 +1383,10 @@ def _tool_shell(cmd):
     if not argv:
         return "(shell error: empty command)"
     allow = _shell_allowlist()
-    exe = os.path.basename(argv[0])
+    exe_token = argv[0]
+    exe = os.path.basename(exe_token)
+    if exe_token != exe:
+        return "(shell error: executable must be an allowlisted command name, not a path)"
     if not allow or exe not in allow:
         return f"(shell error: executable '{exe}' is not allowlisted)"
     workspace = _subagent_workspace_root()
