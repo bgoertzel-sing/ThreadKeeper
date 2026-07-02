@@ -144,7 +144,7 @@ end-to-end walkthrough.
 |---|---|
 | `persona_key` config missing | Structured JSON `status=error`; `summary` contains `(subagent error: persona config '<key>.json' not found at <path>)`; transcript status `setup_error`. |
 | Config JSON malformed | Structured JSON `status=error`; `summary` contains `(subagent error: persona config '<key>.json' is malformed JSON: <reason>)`; transcript status `setup_error`. |
-| Persona prompt file missing/hash mismatch | Structured JSON `status=error`; `summary` contains `(subagent error: persona prompt <reason>)`; transcript status `persona_prompt_invalid`. |
+| Persona prompt file missing/hash mismatch/path escape | Structured JSON `status=error`; `summary` contains `(subagent error: persona prompt <reason>)`; transcript status `persona_prompt_invalid`. |
 | `api_key_env` env var unset | Structured JSON `status=error`; `summary` contains `(subagent error: env var '<NAME>' is unset; cannot reach endpoint for provider '<P>')`; transcript status `provider_invalid`. |
 | Tool subset includes unknown skill | Structured JSON `status=error`; `summary` contains `(subagent error: unknown skill(s) [...]; registered subagent tools: [...])`; transcript status `tool_subset_invalid`. |
 | Tool subset includes v1-excluded skill | Structured JSON `status=error`; `summary` contains `(subagent error: skill(s) [...] are not callable by subagents in v1)`; transcript status `tool_subset_invalid`. |

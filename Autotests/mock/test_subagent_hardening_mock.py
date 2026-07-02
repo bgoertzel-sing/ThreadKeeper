@@ -216,17 +216,36 @@ def test_persona_key_rejects_path_traversal(monkeypatch, tmp_path):
         assert "persona key" in str(e)
 
 
-def test_persona_prompt_sha256_pin_fails_closed(tmp_path):
-    prompt = tmp_path / "unit.txt"
+def test_persona_prompt_sha256_pin_fails_closed(tmp_path, monkeypatch):
+    persona_dir = tmp_path / "personas"
+    persona_dir.mkdir()
+    prompt = persona_dir / "unit.txt"
     prompt.write_text("trusted prompt")
+    monkeypatch.setattr(subagent, "PERSONA_DIR", str(persona_dir))
 
     good_hash = hashlib.sha256(b"trusted prompt").hexdigest()
+    assert subagent.load_persona_prompt("unit.txt", "unit", good_hash) == "trusted prompt"
     assert subagent.load_persona_prompt(str(prompt), "unit", good_hash) == "trusted prompt"
     try:
-        subagent.load_persona_prompt(str(prompt), "unit", "0" * 64)
+        subagent.load_persona_prompt("unit.txt", "unit", "0" * 64)
         assert False, "persona hash mismatch should fail closed"
     except ValueError as e:
         assert "sha256" in str(e)
+
+
+def test_persona_prompt_rejects_path_escape(tmp_path, monkeypatch):
+    persona_dir = tmp_path / "personas"
+    persona_dir.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret")
+    monkeypatch.setattr(subagent, "PERSONA_DIR", str(persona_dir))
+
+    for path in ("../outside.txt", str(outside)):
+        try:
+            subagent.load_persona_prompt(path, "unit")
+            assert False, f"persona prompt escape should be rejected: {path}"
+        except ValueError as e:
+            assert "escapes persona directory" in str(e)
 
 
 def test_committed_persona_examples_use_explicit_metadata_and_valid_prompt_pin(monkeypatch):

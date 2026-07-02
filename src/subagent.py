@@ -639,16 +639,37 @@ def load_persona_config(persona_key):
     return cfg
 
 
+def _resolve_persona_prompt_path(persona_file, persona_key):
+    """Resolve a persona prompt path inside PERSONA_DIR.
+
+    Persona configs are deployment-controlled, but the config file is still part
+    of the subagent trust boundary. Do not let a malformed/malicious config read
+    arbitrary absolute paths or escape the persona directory via `..` segments.
+    """
+    rel = str(persona_file or "").strip()
+    if not rel:
+        raise ValueError(f"persona prompt for key '{persona_key}' is empty")
+    base = os.path.realpath(PERSONA_DIR)
+    candidate = rel if os.path.isabs(rel) else os.path.join(base, rel)
+    path = os.path.realpath(candidate)
+    try:
+        common = os.path.commonpath([base, path])
+    except ValueError:
+        common = ""
+    if common != base:
+        raise ValueError(
+            f"persona prompt '{persona_file}' for key '{persona_key}' escapes persona directory"
+        )
+    return path
+
+
 def load_persona_prompt(persona_file, persona_key, expected_sha256=""):
     """Read the persona text and optionally verify its SHA-256.
 
     Persona JSON may include `persona_sha256` to pin the prompt file. When set,
     a missing/mismatched prompt hash fails closed before any worker call.
     """
-    if os.path.isabs(persona_file):
-        path = persona_file
-    else:
-        path = os.path.join(PERSONA_DIR, persona_file)
+    path = _resolve_persona_prompt_path(persona_file, persona_key)
     if not os.path.isfile(path):
         raise FileNotFoundError(
             f"persona prompt '{persona_file}' for key '{persona_key}' "
