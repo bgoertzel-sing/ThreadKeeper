@@ -311,6 +311,13 @@ def test_dispatch_returns_structured_digest_and_persists_transcript(tmp_path, mo
     assert payload["transcript_sha256"] == digest
     assert transcript.with_suffix(transcript.suffix + ".sha256").read_text().startswith(digest)
     saved = json.loads(transcript.read_text())
+    index_path = transcript.parent / "index.jsonl"
+    assert index_path.exists()
+    index_entries = [json.loads(line) for line in index_path.read_text().splitlines()]
+    assert index_entries[-1]["run_id"] == saved["run_id"]
+    assert index_entries[-1]["status"] == "ok"
+    assert index_entries[-1]["transcript_path"] == str(transcript)
+    assert index_entries[-1]["transcript_sha256"] == digest
     assert saved["status"] == "ok"
     assert len(saved["turns"]) == 2
     assert (tmp_path / "workspace" / "out.txt").read_text() == "hello"

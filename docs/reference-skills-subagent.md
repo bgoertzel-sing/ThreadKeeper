@@ -68,7 +68,8 @@ and `status` fields. Full worker prompts/responses/tool results are
 persisted locally under `OMEGACLAW_SUBAGENT_RUN_DIR` (default
 `memory/subagent-runs`) and only the bounded digest is returned to the
 parent. Each finished transcript also gets a local `<transcript>.sha256`
-sidecar so supervisors can cheaply detect accidental corruption or later
+sidecar and a compact append-only `index.jsonl` entry under the run directory,
+so supervisors can list runs and cheaply detect accidental corruption or later
 mutation during audit.
 
 Early setup, contract, provider, tool-subset, and escalation failures also
@@ -101,8 +102,8 @@ denial reason. Errors are never raised into the parent's MeTTa interpreter.
   Ollama, remote API, etc.). The parent receives only bounded state;
   full prompts, responses, tool calls/results, task contracts, and
   history digests are saved in the local transcript record. Finished
-  records have a SHA-256 sidecar and the parent digest returns the same
-  transcript hash for audit checks.
+  records have a SHA-256 sidecar plus an `index.jsonl` audit entry, and the
+  parent digest returns the same transcript hash for audit checks.
 - The subagent cannot call `send`, `remember`, `pin`, `metta`,
   `query`, `episodes`, or `delegate` in v1 (excluded by design —
   see §4.5.2 of the design doc).
@@ -124,7 +125,7 @@ for safety-sensitive paths.
 | `OMEGACLAW_SUBAGENT_PERSONA_DIR` | `./memory/personas-subagent` | Directory holding `<key>.json` configs and persona prompt files. |
 | `OMEGACLAW_SUBAGENT_MAX_TURNS` | `8` | Hard cap on iterations per dispatch. |
 | `OMEGACLAW_SUBAGENT_MAX_DIGEST_CHARS` | `2000` | Length cap on the JSON digest returned to the parent. |
-| `OMEGACLAW_SUBAGENT_RUN_DIR` | `memory/subagent-runs` | Directory for persistent JSON transcript/run records and worker rate/concurrency state. |
+| `OMEGACLAW_SUBAGENT_RUN_DIR` | `memory/subagent-runs` | Directory for persistent JSON transcript/run records, `index.jsonl`, checksum sidecars, and worker rate/concurrency state. |
 | `OMEGACLAW_SUBAGENT_LLM_TIMEOUT_S` | `180` | Timeout for each worker LLM call. |
 | `OMEGACLAW_SUBAGENT_LLM_RETRIES` | `1` | Retry count after the first worker LLM attempt. |
 | `OMEGACLAW_SUBAGENT_LLM_BACKOFF_S` | `1.0` | Exponential backoff base between worker retries. |

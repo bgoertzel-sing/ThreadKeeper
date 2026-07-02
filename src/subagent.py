@@ -351,6 +351,43 @@ def _write_transcript_integrity_sidecar(path, digest):
             pass
 
 
+def _append_run_index(record):
+    """Append a compact audit index entry for a finished subagent run.
+
+    Full transcripts stay in per-run JSON files so parent context remains
+    bounded. This append-only JSONL index gives operators a cheap local run list
+    with transcript checksum/provenance, guarded by a sidecar lock for
+    cross-process writers when fcntl is available.
+    """
+    if not record:
+        return ""
+    os.makedirs(SUBAGENT_RUN_DIR, exist_ok=True)
+    index_path = os.path.join(SUBAGENT_RUN_DIR, "index.jsonl")
+    entry = {
+        "run_id": record.get("run_id", ""),
+        "persona_key": record.get("persona_key", ""),
+        "status": record.get("status", ""),
+        "started_at": record.get("started_at"),
+        "finished_at": record.get("finished_at"),
+        "transcript_path": record.get("transcript_path", ""),
+        "transcript_sha256": record.get("transcript_sha256", ""),
+    }
+    line = json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n"
+    lock_path = f"{index_path}.lock"
+    with open(lock_path, "a+", encoding="utf-8") as lock:
+        if fcntl is not None:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            with open(index_path, "a", encoding="utf-8") as f:
+                f.write(line)
+                f.flush()
+                os.fsync(f.fileno())
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    return index_path
+
+
 def _rate_limit_state_path(label):
     safe = _safe_slug(label or "worker", max_len=32)
     return os.path.join(SUBAGENT_RUN_DIR, f".llm-rate-{safe}.json")
@@ -554,6 +591,7 @@ def _finish_run_record(record, status, summary=None):
         sidecar = _write_transcript_integrity_sidecar(record["transcript_path"], digest)
         record["transcript_sha256"] = digest
         record["transcript_sha256_path"] = sidecar
+        record["run_index_path"] = _append_run_index(record)
     except Exception as e:
         record["record_write_error"] = f"{type(e).__name__}: {e}"
     return record.get("transcript_path", "")
