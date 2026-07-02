@@ -1,6 +1,7 @@
 """Unit checks for ThreadKeeper subagent hardening primitives."""
 import builtins
 import hashlib
+import importlib
 import json
 import multiprocessing
 import os
@@ -13,6 +14,46 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 import subagent  # noqa: E402
+
+
+def test_env_numeric_knobs_fallback_and_clamp_on_reload(monkeypatch):
+    bad_values = {
+        "OMEGACLAW_SUBAGENT_MAX_TURNS": "not-int",
+        "OMEGACLAW_SUBAGENT_MAX_DIGEST_CHARS": "1",
+        "OMEGACLAW_SUBAGENT_HISTORY_MAX_TURNS": "0",
+        "OMEGACLAW_SUBAGENT_LLM_TIMEOUT_S": "-5",
+        "OMEGACLAW_SUBAGENT_LLM_RETRIES": "-1",
+        "OMEGACLAW_SUBAGENT_LLM_BACKOFF_S": "bad-float",
+        "OMEGACLAW_SUBAGENT_LLM_CALLS_PER_MINUTE": "-7",
+        "OMEGACLAW_SUBAGENT_MAX_CONCURRENT_LLM_CALLS": "-8",
+        "OMEGACLAW_SUBAGENT_MAX_TOOL_CALLS": "-9",
+        "OMEGACLAW_SUBAGENT_MAX_PATH_ARG_CHARS": "0",
+        "OMEGACLAW_SUBAGENT_MAX_TOOL_ARG_CHARS": "0",
+        "OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEMS": "-2",
+        "OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEM_CHARS": "0",
+        "OMEGACLAW_SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS": "0",
+    }
+    for name, value in bad_values.items():
+        monkeypatch.setenv(name, value)
+
+    reloaded = importlib.reload(subagent)
+    assert reloaded.SUBAGENT_MAX_TURNS_HARD_CAP == 8
+    assert reloaded.SUBAGENT_MAX_DIGEST_CHARS == 100
+    assert reloaded._SUBAGENT_HISTORY_MAX_TURNS == 1
+    assert reloaded._SUBAGENT_LLM_TIMEOUT_S == 1
+    assert reloaded._SUBAGENT_LLM_RETRIES == 0
+    assert reloaded._SUBAGENT_LLM_BACKOFF_S == 1.0
+    assert reloaded._SUBAGENT_LLM_CALLS_PER_MINUTE == 0
+    assert reloaded._SUBAGENT_MAX_CONCURRENT_LLM_CALLS == 0
+    assert reloaded._SUBAGENT_MAX_TOOL_CALLS == 0
+    assert reloaded._SUBAGENT_MAX_PATH_ARG_CHARS == 1
+    assert reloaded._SUBAGENT_MAX_TOOL_ARG_CHARS == 1
+    assert reloaded._SUBAGENT_MAX_CONTRACT_ITEMS == 0
+    assert reloaded._SUBAGENT_MAX_CONTRACT_ITEM_CHARS == 1
+    assert reloaded._SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS == 1
+
+    monkeypatch.undo()
+    importlib.reload(subagent)
 
 
 def _append_many_worker(workspace, worker_id, count):

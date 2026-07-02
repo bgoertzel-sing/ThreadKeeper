@@ -214,14 +214,39 @@ _DEFAULT_PERSONA_DIR = os.path.join(
 )
 PERSONA_DIR = os.environ.get("OMEGACLAW_SUBAGENT_PERSONA_DIR", _DEFAULT_PERSONA_DIR)
 
+def _env_int(name, default, minimum=1):
+    """Read a bounded integer env knob without making import crash.
+
+    ThreadKeeper hardening relies on env-configured caps for retries, quotas,
+    transcript digest size, and validation bounds. A malformed value should not
+    crash module import or accidentally disable a guard; use the safe default
+    and clamp below-minimum values instead.
+    """
+    raw = os.environ.get(name, str(default))
+    try:
+        value = int(str(raw).strip())
+    except Exception:
+        return default
+    if minimum is not None and value < minimum:
+        return minimum
+    return value
+
+
+def _env_float(name, default, minimum=0.0):
+    raw = os.environ.get(name, str(default))
+    try:
+        value = float(str(raw).strip())
+    except Exception:
+        return default
+    if minimum is not None and value < minimum:
+        return minimum
+    return value
+
+
 # Hard caps. Per-call max_turns is clamped by the lower of dispatch
 # arg, persona-config default, and this hard cap. Same for digest.
-SUBAGENT_MAX_TURNS_HARD_CAP = int(
-    os.environ.get("OMEGACLAW_SUBAGENT_MAX_TURNS", "8")
-)
-SUBAGENT_MAX_DIGEST_CHARS = int(
-    os.environ.get("OMEGACLAW_SUBAGENT_MAX_DIGEST_CHARS", "2000")
-)
+SUBAGENT_MAX_TURNS_HARD_CAP = _env_int("OMEGACLAW_SUBAGENT_MAX_TURNS", 8, minimum=1)
+SUBAGENT_MAX_DIGEST_CHARS = _env_int("OMEGACLAW_SUBAGENT_MAX_DIGEST_CHARS", 2000, minimum=100)
 SUBAGENT_DEFAULT_OUTPUT_TOKENS = 1500
 
 # Per-subagent-iteration history cap. The subagent's internal history
@@ -230,7 +255,7 @@ SUBAGENT_DEFAULT_OUTPUT_TOKENS = 1500
 # conversation.
 _SUBAGENT_HISTORY_CAP = 4000
 _SUBAGENT_RESULTS_CAP = 4000
-_SUBAGENT_HISTORY_MAX_TURNS = int(os.environ.get("OMEGACLAW_SUBAGENT_HISTORY_MAX_TURNS", "6"))
+_SUBAGENT_HISTORY_MAX_TURNS = _env_int("OMEGACLAW_SUBAGENT_HISTORY_MAX_TURNS", 6, minimum=1)
 
 # Shell tool restrictions. Subagent's shell is more restricted than
 # parent's — disabled by default, optional executable allowlist, no shell=True,
@@ -240,22 +265,22 @@ _SHELL_TIMEOUT_S = 30
 
 # Subagent LLM call reliability controls. Keep defaults bounded so a stuck
 # worker endpoint cannot hang the parent loop indefinitely.
-_SUBAGENT_LLM_TIMEOUT_S = int(os.environ.get("OMEGACLAW_SUBAGENT_LLM_TIMEOUT_S", "180"))
-_SUBAGENT_LLM_RETRIES = int(os.environ.get("OMEGACLAW_SUBAGENT_LLM_RETRIES", "1"))
-_SUBAGENT_LLM_BACKOFF_S = float(os.environ.get("OMEGACLAW_SUBAGENT_LLM_BACKOFF_S", "1.0"))
-_SUBAGENT_LLM_CALLS_PER_MINUTE = int(os.environ.get("OMEGACLAW_SUBAGENT_LLM_CALLS_PER_MINUTE", "60"))
-_SUBAGENT_MAX_CONCURRENT_LLM_CALLS = int(os.environ.get("OMEGACLAW_SUBAGENT_MAX_CONCURRENT_LLM_CALLS", "4"))
+_SUBAGENT_LLM_TIMEOUT_S = _env_int("OMEGACLAW_SUBAGENT_LLM_TIMEOUT_S", 180, minimum=1)
+_SUBAGENT_LLM_RETRIES = _env_int("OMEGACLAW_SUBAGENT_LLM_RETRIES", 1, minimum=0)
+_SUBAGENT_LLM_BACKOFF_S = _env_float("OMEGACLAW_SUBAGENT_LLM_BACKOFF_S", 1.0, minimum=0.0)
+_SUBAGENT_LLM_CALLS_PER_MINUTE = _env_int("OMEGACLAW_SUBAGENT_LLM_CALLS_PER_MINUTE", 60, minimum=0)
+_SUBAGENT_MAX_CONCURRENT_LLM_CALLS = _env_int("OMEGACLAW_SUBAGENT_MAX_CONCURRENT_LLM_CALLS", 4, minimum=0)
 
 # Per-dispatch safety controls. Tool-call quota bounds work even if a worker
 # loops or emits many calls per turn. Cancellation is intentionally file-based
 # so supervisors/parents can stop in-flight work without signals or shared state.
-_SUBAGENT_MAX_TOOL_CALLS = int(os.environ.get("OMEGACLAW_SUBAGENT_MAX_TOOL_CALLS", "24"))
+_SUBAGENT_MAX_TOOL_CALLS = _env_int("OMEGACLAW_SUBAGENT_MAX_TOOL_CALLS", 24, minimum=0)
 _SUBAGENT_CANCEL_FILE = os.environ.get("OMEGACLAW_SUBAGENT_CANCEL_FILE", "")
-_SUBAGENT_MAX_PATH_ARG_CHARS = int(os.environ.get("OMEGACLAW_SUBAGENT_MAX_PATH_ARG_CHARS", "512"))
-_SUBAGENT_MAX_TOOL_ARG_CHARS = int(os.environ.get("OMEGACLAW_SUBAGENT_MAX_TOOL_ARG_CHARS", "20000"))
-_SUBAGENT_MAX_CONTRACT_ITEMS = int(os.environ.get("OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEMS", "32"))
-_SUBAGENT_MAX_CONTRACT_ITEM_CHARS = int(os.environ.get("OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEM_CHARS", "512"))
-_SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS = int(os.environ.get("OMEGACLAW_SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS", "4000"))
+_SUBAGENT_MAX_PATH_ARG_CHARS = _env_int("OMEGACLAW_SUBAGENT_MAX_PATH_ARG_CHARS", 512, minimum=1)
+_SUBAGENT_MAX_TOOL_ARG_CHARS = _env_int("OMEGACLAW_SUBAGENT_MAX_TOOL_ARG_CHARS", 20000, minimum=1)
+_SUBAGENT_MAX_CONTRACT_ITEMS = _env_int("OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEMS", 32, minimum=0)
+_SUBAGENT_MAX_CONTRACT_ITEM_CHARS = _env_int("OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEM_CHARS", 512, minimum=1)
+_SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS = _env_int("OMEGACLAW_SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS", 4000, minimum=1)
 
 # Persistent local run records. Full worker prompts/responses/tool results are
 # kept out of the parent context; the parent receives only a bounded structured

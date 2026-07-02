@@ -120,7 +120,9 @@ denial reason. Errors are never raised into the parent's MeTTa interpreter.
 ### Configuration
 
 Optional env vars control v1 behavior. Defaults are bounded and fail-closed
-for safety-sensitive paths.
+for safety-sensitive paths. Numeric knobs are parsed defensively: malformed
+values fall back to the documented default, and below-minimum values are
+clamped instead of crashing the module or disabling guards accidentally.
 
 | Env var | Default | Meaning |
 |---|---|---|
