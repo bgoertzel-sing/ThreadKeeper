@@ -1,4 +1,9 @@
-import os, time
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
 import openai
 from typing import Optional
 
@@ -141,7 +146,7 @@ class AsiOneProvider(AIProvider):
                 max_tokens=max_tokens,
                 extra_body={
                     "enable_thinking": True,
-                    "thinking_budget": 6000 
+                    "thinking_budget": 6000
                 },
                 **kwargs
             )
@@ -186,6 +191,146 @@ class OpenAIProvider(AIProvider):
         except Exception as e:
             print(f"[lib_llm_ext.OpenAIProvider.chat] Exception while communicating with LLM: {e}")
             return ""
+
+
+class OpenClawProvider(AIProvider):
+    """OpenClaw Gateway provider using the local OpenAI-compatible chat endpoint."""
+
+    def __init__(self, name: str = "OpenClaw"):
+        super().__init__(
+            name=name,
+            var_name="OPENCLAW_GATEWAY_TOKEN",
+            model_name=os.environ.get("OPENCLAW_MODEL", "openclaw/default"),
+            base_url=os.environ.get("OPENCLAW_GATEWAY_BASE_URL", "http://127.0.0.1:18789/v1"),
+        )
+
+    def _create_client(self) -> Optional[openai.OpenAI]:
+        token = os.environ.get(self._var_name)
+        if not token:
+            return None
+        print(f"[lib_llm_ext.OpenClawProvider._create_client] Connecting to OpenClaw Gateway: {self._base_url}")
+        return openai.OpenAI(api_key=token, base_url=self._base_url)
+
+    @property
+    def is_available(self) -> bool:
+        return bool(os.environ.get(self._var_name))
+
+    def _failure_response(self, summary: str, detail: str = "") -> str:
+        """Return a user-visible MeTTa send action for backend failures."""
+        detail = (detail or "").strip().replace(os.environ.get("OPENCLAW_GATEWAY_TOKEN", "<unset>"), "<redacted>")
+        if len(detail) > 900:
+            detail = detail[:900] + "..."
+        text = "ProtomegaTron backend stalled technically, rather than completing the reasoning call. " + summary
+        if detail:
+            text += "\nDiagnostic: " + detail
+        text += "\nZeroBot/OpenClaw should inspect logs or retry with a longer/health-checked backend call."
+        return f"(send {json.dumps(text)})"
+
+    def _chat_subprocess(self, messages, max_tokens: int) -> str:
+        """Call OpenClaw from a child Python process.
+
+        SWI-Prolog/Janus has repeatedly segfaulted around the embedded Python
+        OpenAI SDK call path.  Keeping the HTTP client in a short-lived child
+        process leaves Janus with only subprocess I/O and a plain string result.
+        """
+        session_user = os.environ.get("OPENCLAW_SESSION_USER", "omegaclaw-local")
+        if os.environ.get("OPENCLAW_SESSION_PER_CALL", "0").lower() in {"1", "true", "yes", "on"}:
+            # OmegaClaw already supplies its own prompt/history. Reusing one
+            # Gateway `user` session caused OpenClaw context to balloon far
+            # beyond the model window, making later calls slow or empty.
+            session_user = f"{session_user}-{int(time.time() * 1000)}"
+        payload = {
+            "model": os.environ.get("OPENCLAW_MODEL", self._model_name),
+            "user": session_user,
+            "messages": messages,
+            "max_tokens": max_tokens,
+        }
+        child_code = r'''
+import json, os, sys, urllib.request
+base = os.environ.get("OPENCLAW_GATEWAY_BASE_URL", "http://127.0.0.1:18789/v1").rstrip("/")
+token = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")
+payload = json.loads(sys.stdin.read())
+req = urllib.request.Request(
+    base + "/chat/completions",
+    data=json.dumps(payload).encode("utf-8"),
+    headers={
+        "Authorization": "Bearer " + token,
+        "Content-Type": "application/json",
+    },
+    method="POST",
+)
+timeout = int(os.environ.get("OPENCLAW_HTTP_TIMEOUT", "180"))
+with urllib.request.urlopen(req, timeout=timeout) as response:
+    data = json.loads(response.read().decode("utf-8", errors="replace"))
+content = (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
+sys.stdout.write(content)
+'''
+        python_exe = os.environ.get("OPENCLAW_SUBPROCESS_PYTHON") or shutil.which("python3") or sys.executable
+        timeout = int(os.environ.get("OPENCLAW_SUBPROCESS_TIMEOUT", "240"))
+        print(
+            f"[lib_llm_ext.OpenClawProvider._chat_subprocess] start python={python_exe} "
+            f"messages={len(messages)} chars={sum(len(str(m.get('content', ''))) for m in messages)} "
+            f"max_tokens={max_tokens} timeout={timeout}",
+            flush=True,
+        )
+        try:
+            completed = subprocess.run(
+                [python_exe, "-c", child_code],
+                input=json.dumps(payload),
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            print(f"[lib_llm_ext.OpenClawProvider._chat_subprocess] child timed out after {timeout}s", flush=True)
+            return self._failure_response(f"The OpenClaw child process exceeded its {timeout}s timeout.")
+        except Exception as e:
+            print(f"[lib_llm_ext.OpenClawProvider._chat_subprocess] child launch failed: {e}", flush=True)
+            return self._failure_response("The OpenClaw child process could not be launched.", str(e))
+        if completed.returncode != 0:
+            stderr = (completed.stderr or "").strip()
+            print(f"[lib_llm_ext.OpenClawProvider._chat_subprocess] child failed rc={completed.returncode}: {stderr[:1200]}", flush=True)
+            return self._failure_response(f"The OpenClaw HTTP child exited with rc={completed.returncode}.", stderr)
+        print(f"[lib_llm_ext.OpenClawProvider._chat_subprocess] child ok chars={len(completed.stdout or '')}", flush=True)
+        if not (completed.stdout or "").strip():
+            return self._failure_response("The OpenClaw gateway returned an empty assistant message.")
+        return completed.stdout or ""
+
+    def chat(self, content: str, max_tokens: int = 6000, reasoning: str = "medium", **kwargs) -> str:
+        if ":-:-:-:" in content:
+            sysmsg, usermsg = content.split(":-:-:-:", 1)
+            messages = [{"role": "system", "content": sysmsg}, {"role": "user", "content": usermsg}]
+        else:
+            messages = [{"role": "user", "content": content}]
+
+        if os.environ.get("OPENCLAW_SUBPROCESS", "0").lower() in {"1", "true", "yes", "on"}:
+            raw = self._chat_subprocess(messages, max_tokens)
+            _log_raw(self._name, os.environ.get("OPENCLAW_MODEL", self._model_name), raw)
+            return self._clean_text(raw)
+
+        self._ensure_client()
+
+        if self._client is None:
+            raise RuntimeError(f"{self.name} not configured (set {self._var_name})")
+
+        try:
+            session_user = os.environ.get("OPENCLAW_SESSION_USER", "omegaclaw-local")
+            if os.environ.get("OPENCLAW_SESSION_PER_CALL", "0").lower() in {"1", "true", "yes", "on"}:
+                session_user = f"{session_user}-{int(time.time() * 1000)}"
+            response = self._client.chat.completions.create(
+                model=os.environ.get("OPENCLAW_MODEL", self._model_name),
+                user=session_user,
+                messages=messages,
+                max_tokens=max_tokens,
+                **kwargs
+            )
+            raw = response.choices[0].message.content or ""
+            _log_raw(self._name, os.environ.get("OPENCLAW_MODEL", self._model_name), raw)
+            return self._clean_text(raw)
+        except Exception as e:
+            print(f"[lib_llm_ext.OpenClawProvider.chat] Exception while communicating with OpenClaw Gateway: {e}")
+            return self._failure_response("The native OpenClaw SDK call raised an exception.", str(e))
 
 
 class TestProvider(AbstractAIProvider):
@@ -235,6 +380,7 @@ _register_provider_instance(OpenRouterProvider(name="OpenRouter", var_name="OPEN
 _register_provider_instance(OpenRouterProvider(name="MiniMaxM3", var_name="OPENROUTER_API_KEY", model_name="minimax/minimax-m3", base_url="https://openrouter.ai/api/v1"))
 _register_provider_instance(TestProvider())
 _register_provider_instance(OpenAIProvider(name="OpenAI", var_name="OPENAI_API_KEY", model_name="gpt-5.4", base_url="https://api.openai.com/v1"))
+_register_provider_instance(OpenClawProvider())
 
 
 def callProvider(provider_name: str, content: str, max_tokens: int = 6000, reasoning: str = "medium") -> str:
@@ -265,5 +411,3 @@ def useLocalEmbedding(atom):
         atom,
         normalize_embeddings=True
     ).tolist()
-
-

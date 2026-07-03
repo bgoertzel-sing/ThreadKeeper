@@ -6,6 +6,7 @@ from datetime import datetime
 TS_RE = re.compile(r'^\("(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})"')
 LLM_COMMANDS = {
     "append-file",
+    "continue-thinking",
     "episodes",
     "metta",
     "pin",
@@ -132,8 +133,45 @@ def _merge_send_continuations(lines):
     return merged
 
 
+NOOP_LLM_RESPONSES = {
+    "no response from openclaw",
+    "no response from openclaw.",
+}
+
+
+def _truthy(value):
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalized_response_text(value):
+    text = str(value).replace("_quote_", '"').replace("_newline_", "\n")
+    return re.sub(r"\s+", " ", text.strip()).strip('"').lower()
+
+
+def _is_suppressed_noop_response(value):
+    return _normalized_response_text(value) in NOOP_LLM_RESPONSES
+
+
+def _looks_like_known_command_response(s):
+    lines = [line.strip() for line in s.splitlines() if line.strip()]
+    if not lines:
+        return False
+    return any(_is_known_command(line) for line in lines)
+
+
+def balance_parentheses_for_message(s, is_new_message=False):
+    s = str(s).replace("_quote_", '"').replace("_newline_", "\n")
+    if _is_suppressed_noop_response(s):
+        return "()"
+    if _truthy(is_new_message) and not _looks_like_known_command_response(s):
+        text = s.strip()
+        if text:
+            return f'((send {json.dumps(text, ensure_ascii=False)}))'
+    return balance_parentheses(s)
+
+
 def balance_parentheses(s):
-    s = s.replace("_quote_", '"').replace("_newline_", "\n")
+    s = str(s).replace("_quote_", '"').replace("_newline_", "\n")
     sexprs = []
     special_two_arg_cmds = {"write-file", "append-file"}
     lines = [line.strip() for line in s.splitlines() if line.strip()]
@@ -150,6 +188,10 @@ def balance_parentheses(s):
             continue
         cmd = parts[0]
         rest = parts[1].strip() if len(parts) > 1 else ""
+        if cmd == "send":
+            decoded_rest = _decode_quoted_arg(rest) if rest.startswith('"') else None
+            if _is_suppressed_noop_response(decoded_rest if decoded_rest is not None else rest):
+                continue
         if cmd in special_two_arg_cmds:
             if not rest:
                 sexprs.append(f"({cmd})")
@@ -229,6 +271,11 @@ def test_balance_parenthesis():
     assert balance_parentheses('') == '()'
     assert balance_parentheses('   ') == '()'
     assert balance_parentheses('()\nsend hello') == '((send "hello"))'
+    assert balance_parentheses_for_message('No response from OpenClaw.', True) == '()'
+    assert balance_parentheses_for_message(' no   response from openclaw ', True) == '()'
+    assert balance_parentheses_for_message('(send "No response from OpenClaw.")', True) == '()'
+    assert balance_parentheses('send No response from OpenClaw.') == '()'
+    assert balance_parentheses('(send "No response from OpenClaw.")') == '()'
 
 
 if __name__ == "__main__":
