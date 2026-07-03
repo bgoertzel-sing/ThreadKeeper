@@ -90,6 +90,11 @@ worker LLM. This is the first async/backpressure primitive: the parent receives
 separate local supervisor can later claim the queued task. If the queue already
 has `OMEGACLAW_SUBAGENT_MAX_QUEUED_DISPATCHES` pending JSON tasks, dispatch
 fails closed with transcript status `queue_backpressure` before any worker call.
+The Python helper `subagent.run_queued_dispatch(queue_path)` is the current
+single-task worker primitive: it atomically claims one queued task, revalidates
+the task shape, runs normal synchronous dispatch with queue-only mode
+suppressed, writes a compact `*.result.json`, and leaves the task as `*.done`
+for audit instead of silently re-running it.
 
 When a JSON task contract sets `"patch_proposal_only": true`, `write-file` and
 `append-file` calls do not mutate workspace files. Instead they append full
@@ -137,6 +142,9 @@ denial reason. Errors are never raised into the parent's MeTTa interpreter.
   history digests are saved in the local transcript record. Finished
   records have a SHA-256 sidecar plus a hash-chained `index.jsonl` audit entry,
   and the parent digest returns the same transcript hash for audit checks.
+  Queued tasks can be consumed one at a time by `run_queued_dispatch`, which
+  uses atomic claim/finish filenames and reuses the same dispatcher validation
+  path rather than trusting queue-record contents.
   Task contracts may also request patch-proposal-only mode, which records child
   file-change proposals without applying them.
 - The subagent cannot call `send`, `remember`, `pin`, `metta`,
@@ -212,6 +220,7 @@ end-to-end walkthrough.
 | Task contract enables `requires_adjudication` and worker emits a final answer | Structured JSON `status=needs_adjudication`; digest includes bounded `adjudication` metadata (`required`, `status`, `candidate_summary`); transcript status `adjudication_required`. |
 | Queue-only mode accepts a dispatch | Structured JSON `status=queued`; digest includes `queue_path`/`queue_sha256`; transcript status `queued`; no worker LLM call is attempted. |
 | Queue-only mode is at capacity | Structured JSON `status=error`; `summary` contains `queue backpressure`; transcript status `queue_backpressure`; no worker LLM call is attempted. |
+| Queued worker sees a malformed/escaping task path or bad queued JSON | `run_queued_dispatch(...)` returns JSON `status=queue_worker_error`; no worker LLM call is attempted. |
 | Escalation policy denies cloud delegation | Structured JSON `status=error`; `summary` contains `(escalation denied) ...`; transcript status `escalation_denied`. |
 | Subagent endpoint times out / errors | Structured JSON `status=error`; `summary` contains `(subagent LLM call failed: <ExceptionType>: <reason>)`; transcript status `llm_failed`. |
 | Worker mixes `emit` with other parsed calls or multiple emits | Structured JSON `status=error` and `EMIT_PROTOCOL_VIOLATION`; transcript status `emit_protocol_violation`. |

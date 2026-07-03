@@ -751,6 +751,45 @@ def test_queue_only_dispatch_persists_task_without_worker_llm(tmp_path, monkeypa
     assert len(payload["queue_sha256"]) == 64
 
 
+def test_run_queued_dispatch_claims_task_and_runs_once(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_QUEUE_ONLY", "1")
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_QUEUED_DISPATCHES", 4)
+
+    payload = json.loads(subagent.dispatch("queue and consume", "write-file", "unit", max_turns=2))
+    queue_path = Path(payload["queue_path"])
+    calls = {"n": 0}
+
+    def worker_response(*_args):
+        calls["n"] += 1
+        return ('(emit "worker done")', 3, 2)
+
+    monkeypatch.setattr(subagent, "_call_subagent_llm", worker_response)
+
+    result = json.loads(subagent.run_queued_dispatch(str(queue_path)))
+
+    assert calls["n"] == 1
+    assert result["status"] == "ok"
+    assert result["task_sha256"] == payload["queue_sha256"]
+    assert result["result"]["summary"] == "worker done"
+    assert result["result"]["worker_token_usage"]["total_tokens"] == 5
+    assert not queue_path.exists()
+    assert Path(result["task_done_path"]).exists()
+    assert Path(result["task_done_path"] + ".result.json").exists()
+    assert os.environ.get("OMEGACLAW_SUBAGENT_QUEUE_ONLY") == "1"
+
+
+def test_run_queued_dispatch_rejects_path_escape(tmp_path, monkeypatch):
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}")
+
+    result = json.loads(subagent.run_queued_dispatch(str(outside)))
+
+    assert result["status"] == "queue_worker_error"
+    assert "escapes queue dir" in result["summary"]
+
+
 def test_queue_only_dispatch_backpressure_fails_before_worker_llm(tmp_path, monkeypatch):
     _write_unit_persona(tmp_path, monkeypatch)
     queue_dir = tmp_path / "runs" / "queue"

@@ -532,6 +532,115 @@ def _enqueue_dispatch_record(record, tool_names, max_turns, max_chars):
     )
 
 
+def _read_json_file(path, max_bytes=262144):
+    with open(path, "rb") as f:
+        payload = f.read(max_bytes + 1)
+    if len(payload) > max_bytes:
+        raise ValueError(f"JSON file exceeds {max_bytes} byte limit: {path}")
+    return json.loads(payload.decode("utf-8")), hashlib.sha256(payload).hexdigest()
+
+
+def _resolve_queue_task_path(queue_path):
+    if not queue_path or "\x00" in str(queue_path):
+        raise ValueError("invalid queued dispatch path")
+    queue_dir = os.path.realpath(os.path.abspath(_dispatch_queue_dir()))
+    candidate = os.path.realpath(os.path.abspath(str(queue_path)))
+    if os.path.commonpath([queue_dir, candidate]) != queue_dir:
+        raise ValueError(f"queued dispatch path escapes queue dir ({queue_dir}): {queue_path}")
+    if not candidate.endswith(".json"):
+        raise ValueError("queued dispatch path must be a .json task record")
+    return candidate
+
+
+def _validate_queued_dispatch_task(task):
+    if not isinstance(task, dict):
+        raise ValueError("queued dispatch task must be a JSON object")
+    if task.get("status") != "queued":
+        raise ValueError("queued dispatch task status must be 'queued'")
+    goal = task.get("goal")
+    persona_key = task.get("persona_key")
+    tool_subset = task.get("tool_subset")
+    if not isinstance(goal, str) or not goal.strip():
+        raise ValueError("queued dispatch task goal must be a non-empty string")
+    if len(goal) > _SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS:
+        raise ValueError(
+            f"queued dispatch task goal exceeds {_SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS} characters"
+        )
+    if not isinstance(persona_key, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", persona_key):
+        raise ValueError("queued dispatch task persona_key must be a safe persona identifier")
+    if not isinstance(tool_subset, list) or not tool_subset:
+        raise ValueError("queued dispatch task tool_subset must be a non-empty list")
+    if len(tool_subset) > _SUBAGENT_MAX_CONTRACT_ITEMS:
+        raise ValueError(f"queued dispatch task tool_subset exceeds {_SUBAGENT_MAX_CONTRACT_ITEMS} items")
+    for tool_name in tool_subset:
+        if not isinstance(tool_name, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", tool_name):
+            raise ValueError("queued dispatch task tool names must be safe identifiers")
+    try:
+        max_turns = int(task.get("max_turns", SUBAGENT_MAX_TURNS_HARD_CAP))
+    except (TypeError, ValueError):
+        raise ValueError("queued dispatch task max_turns must be an integer")
+    try:
+        max_chars = int(task.get("max_chars", SUBAGENT_MAX_DIGEST_CHARS))
+    except (TypeError, ValueError):
+        raise ValueError("queued dispatch task max_chars must be an integer")
+    max_turns = max(1, min(max_turns, SUBAGENT_MAX_TURNS_HARD_CAP))
+    max_chars = max(100, min(max_chars, SUBAGENT_MAX_DIGEST_CHARS))
+    return goal, ",".join(tool_subset), persona_key, max_turns, max_chars
+
+
+def run_queued_dispatch(queue_path):
+    """Claim and run one queued subagent dispatch task.
+
+    Queue-only dispatch intentionally writes durable task records but does not
+    start a worker. This helper is the corresponding small worker primitive for
+    an external supervisor: atomically rename one ``queue/*.json`` task to a
+    claimed path, revalidate the task shape, run normal synchronous dispatch
+    with queue-only mode suppressed, and write a compact ``*.result.json``
+    record. The original task is left as ``*.done`` for audit so a task is not
+    silently re-run.
+    """
+    try:
+        task_path = _resolve_queue_task_path(queue_path)
+        claimed_path = f"{task_path}.claimed"
+        try:
+            os.replace(task_path, claimed_path)
+        except FileNotFoundError:
+            raise ValueError(f"queued dispatch task not found: {task_path}")
+        task, task_sha256 = _read_json_file(claimed_path)
+        goal, tool_subset_csv, persona_key, max_turns, max_chars = _validate_queued_dispatch_task(task)
+        previous_queue_only = os.environ.pop("OMEGACLAW_SUBAGENT_QUEUE_ONLY", None)
+        try:
+            result_text = dispatch(goal, tool_subset_csv, persona_key, max_turns=max_turns, max_chars=max_chars)
+        finally:
+            if previous_queue_only is not None:
+                os.environ["OMEGACLAW_SUBAGENT_QUEUE_ONLY"] = previous_queue_only
+        try:
+            result_payload = json.loads(result_text)
+            status = result_payload.get("status", "unknown") if isinstance(result_payload, dict) else "unknown"
+        except Exception:
+            result_payload = {"raw_result": result_text}
+            status = "unknown"
+        result_record = {
+            "queue_path": task_path,
+            "claimed_path": claimed_path,
+            "task_sha256": task_sha256,
+            "finished_at": time.time(),
+            "status": status,
+            "result": result_payload,
+        }
+        done_path = f"{task_path}.done"
+        os.replace(claimed_path, done_path)
+        result_record["task_done_path"] = done_path
+        result_sha256 = _json_atomic_write(f"{done_path}.result.json", result_record)
+        result_record["result_sha256"] = result_sha256
+        return json.dumps(result_record, ensure_ascii=False, sort_keys=True)
+    except Exception as e:
+        return json.dumps({
+            "status": "queue_worker_error",
+            "summary": f"queued dispatch worker error: {type(e).__name__}: {e}",
+        }, ensure_ascii=False, sort_keys=True)
+
+
 def _rate_limit_state_path(label):
     safe = _safe_slug(label or "worker", max_len=32)
     return os.path.join(SUBAGENT_RUN_DIR, f".llm-rate-{safe}.json")
