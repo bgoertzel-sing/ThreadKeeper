@@ -8,12 +8,14 @@ import auth
 
 _running = False
 _last_message = ""
+_last_chat_id = ""
 _msg_lock = threading.Lock()
 _state_lock = threading.Lock()
 
 _bot_token = ""
 _api_base = ""
 _chat_id = ""
+_chat_ids = set()
 _poll_timeout = 20
 _offset = None
 _connected = False
@@ -21,13 +23,15 @@ _connected = False
 _authenticated_user_id = None
 
 
-def _set_last(msg):
-    global _last_message
+def _set_last(msg, chat_id=""):
+    global _last_message, _last_chat_id
     with _msg_lock:
         if _last_message == "":
             _last_message = msg
         else:
             _last_message = _last_message + " | " + msg
+        if chat_id:
+            _last_chat_id = chat_id
 
 
 def getLastMessage():
@@ -114,18 +118,31 @@ def _is_auth_command(msg):
     return lower.startswith("auth ") or lower.startswith("/auth ")
 
 
+def _parse_chat_ids(chat_id):
+    text = str(chat_id or "").strip()
+    if not text:
+        return []
+    normalized = text.replace(";", ",").replace(" ", ",")
+    return [part.strip() for part in normalized.split(",") if part.strip()]
+
+
+def _first_chat_id(chat_ids):
+    return chat_ids[0] if chat_ids else ""
+
+
 def _is_allowed_message(chat_id, user_id, msg):
-    global _chat_id, _authenticated_user_id
+    global _chat_id, _chat_ids, _authenticated_user_id
 
     with _state_lock:
-        if _chat_id and chat_id != _chat_id:
+        if _chat_ids and chat_id not in _chat_ids:
             return "ignore"
         if not auth.is_auth_enabled():
-            if not _chat_id:
+            if not _chat_ids:
+                _chat_ids.add(chat_id)
                 _chat_id = chat_id
             return "allow"
         if _authenticated_user_id is not None:
-            if chat_id != _chat_id:
+            if chat_id not in _chat_ids:
                 return "ignore"
             return "allow" if user_id == _authenticated_user_id else "ignore"
         if not _is_auth_command(msg):
@@ -133,7 +150,9 @@ def _is_allowed_message(chat_id, user_id, msg):
         candidate = _parse_auth_candidate(msg)
         if auth.verify_token(candidate):
             _authenticated_user_id = user_id
-            _chat_id = chat_id
+            _chat_ids.add(chat_id)
+            if not _chat_id:
+                _chat_id = chat_id
             return "auth_bound"
         return "ignore"
 
@@ -159,7 +178,12 @@ def _poll_loop():
                         if _offset is None or (update_id + 1) > _offset:
                             _offset = update_id + 1
 
-                message = update.get("message") or update.get("edited_message")
+                message = (
+                    update.get("message")
+                    or update.get("edited_message")
+                    or update.get("channel_post")
+                    or update.get("edited_channel_post")
+                )
                 if not isinstance(message, dict):
                     continue
 
@@ -168,18 +192,18 @@ def _poll_loop():
                     continue
 
                 chat = message.get("chat") or {}
-                user = message.get("from") or {}
+                user = message.get("from") or message.get("sender_chat") or {}
                 chat_id = str(chat.get("id", "")).strip()
                 user_id = str(user.get("id", "")).strip()
-                if not chat_id or not user_id:
+                if not chat_id:
                     continue
 
                 state = _is_allowed_message(chat_id, user_id, text)
                 display_name = _display_name(user, chat)
                 if state == "allow":
-                    _set_last(f"{display_name}: {text}")
+                    _set_last(f"{display_name}: {text}", chat_id=chat_id)
                 elif state == "auth_bound":
-                    send_message(f"Authentication successful for {display_name}.")
+                    send_message(f"Authentication successful for {display_name}.", target_chat=chat_id)
         except Exception as exc:
             _connected = False
             print(f"[TELEGRAM] Poll error: {exc}")
@@ -190,7 +214,7 @@ def _poll_loop():
 
 
 def start_telegram(chat_id="", poll_timeout=20):
-    global _running, _bot_token, _api_base, _chat_id, _poll_timeout, _offset, _connected
+    global _running, _bot_token, _api_base, _chat_id, _chat_ids, _poll_timeout, _offset, _connected
 
     proxy = auth.get_proxy_url()
     if proxy:
@@ -202,7 +226,8 @@ def start_telegram(chat_id="", poll_timeout=20):
             raise ValueError("TG_BOT_TOKEN is required")
         _api_base = f"https://api.telegram.org/bot{_bot_token}"
 
-    _chat_id = str(chat_id).strip()
+    _chat_ids = set(_parse_chat_ids(chat_id))
+    _chat_id = _first_chat_id(_parse_chat_ids(chat_id))
 
     try:
         _poll_timeout = max(1, int(poll_timeout))
@@ -212,7 +237,8 @@ def start_telegram(chat_id="", poll_timeout=20):
     _offset = None
     _running = True
     _connected = False
-    print(f"[TELEGRAM] Starting adapter with chat target: {_chat_id or 'auto-bind'}")
+    target_label = ",".join(_parse_chat_ids(chat_id)) or "auto-bind"
+    print(f"[TELEGRAM] Starting adapter with chat target(s): {target_label}")
     _initialize_offset()
 
     t = threading.Thread(target=_poll_loop, daemon=True)
@@ -225,13 +251,18 @@ def stop_telegram():
     _running = False
 
 
-def send_message(text):
+def send_message(text, target_chat=None):
     text = str(text).replace("\\n", "\n").replace("\r", "")
     if not text:
         return
 
+    if target_chat is None:
+        with _msg_lock:
+            target_chat = _last_chat_id
+
     with _state_lock:
-        target_chat = _chat_id
+        if not target_chat:
+            target_chat = _chat_id or _first_chat_id(list(_chat_ids))
 
     if not _connected or not target_chat:
         return
@@ -249,5 +280,5 @@ def send_message(text):
                 use_post=True,
             )
         except Exception as exc:
-            print(f"[TELEGRAM] Send failed: {exc}")
+            print(f"[TELEGRAM] Send failed to {target_chat}: {exc}")
             return
