@@ -681,6 +681,51 @@ def test_task_contract_patch_proposal_only_must_be_boolean_before_llm(tmp_path, 
     assert saved["status"] == "contract_invalid"
 
 
+def test_task_contract_requires_adjudication_marks_candidate_not_final(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    contract_goal = json.dumps({
+        "objective": "produce high stakes output for review",
+        "requires_adjudication": True,
+    })
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_a: ('(emit "candidate answer")', 12, 5),
+    )
+
+    payload = json.loads(subagent.dispatch(contract_goal, "write-file", "unit", max_turns=1))
+
+    assert payload["status"] == "needs_adjudication"
+    assert payload["adjudication"]["required"] is True
+    assert payload["adjudication"]["status"] == "pending"
+    assert payload["adjudication"]["candidate_summary"] == "candidate answer"
+    assert "requires adjudication" in payload["summary"]
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["status"] == "adjudication_required"
+    assert saved["task_contract"]["requires_adjudication"] is True
+    assert saved["adjudication"]["candidate_summary"] == "candidate answer"
+    assert saved["worker_token_usage"]["total_tokens"] == 17
+
+
+def test_task_contract_requires_adjudication_must_be_boolean_before_llm(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")),
+    )
+
+    payload = json.loads(subagent.dispatch(json.dumps({
+        "objective": "bad adjudicator flag",
+        "requires_adjudication": "yes",
+    }), "write-file", "unit", max_turns=1))
+
+    assert payload["status"] == "error"
+    assert "requires_adjudication" in payload["summary"]
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["status"] == "contract_invalid"
+
+
 def test_queue_only_dispatch_persists_task_without_worker_llm(tmp_path, monkeypatch):
     _write_unit_persona(tmp_path, monkeypatch)
     monkeypatch.setenv("OMEGACLAW_SUBAGENT_QUEUE_ONLY", "1")

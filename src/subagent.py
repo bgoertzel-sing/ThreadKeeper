@@ -764,6 +764,13 @@ def _structured_return(summary, record=None, status="ok", uncertainty="low",
     if (record or {}).get("queue_path"):
         payload["queue_path"] = (record or {}).get("queue_path", "")
         payload["queue_sha256"] = (record or {}).get("queue_sha256", "")
+    adjudication = (record or {}).get("adjudication")
+    if adjudication:
+        payload["adjudication"] = {
+            "required": bool(adjudication.get("required")),
+            "status": adjudication.get("status", ""),
+            "candidate_summary": cap(adjudication.get("candidate_summary", ""), 300),
+        }
     if token_usage:
         payload["worker_token_usage"] = token_usage
     text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
@@ -1197,7 +1204,7 @@ def _normalize_task_contract(goal, cfg=None):
     Contracts are intentionally data-only and may be supplied either in the
     persona JSON as `task_contract` or inline as a JSON goal object containing
     `objective`, `allowed_paths`, `forbidden_actions`, `done_criteria`,
-    `max_tool_calls`, and/or `patch_proposal_only`.
+    `max_tool_calls`, `patch_proposal_only`, and/or `requires_adjudication`.
     This keeps the existing `(delegate goal tools persona max_turns)` API while
     giving parent agents a concrete way to narrow a child task.
     """
@@ -1210,7 +1217,10 @@ def _normalize_task_contract(goal, cfg=None):
     if isinstance(parsed, dict):
         inline = parsed.get("task_contract") if isinstance(parsed.get("task_contract"), dict) else parsed
         if isinstance(inline, dict):
-            for key in ("allowed_paths", "forbidden_actions", "done_criteria", "max_tool_calls", "patch_proposal_only"):
+            for key in (
+                "allowed_paths", "forbidden_actions", "done_criteria",
+                "max_tool_calls", "patch_proposal_only", "requires_adjudication",
+            ):
                 if key in inline:
                     contract[key] = inline[key]
             objective = str(inline.get("objective") or parsed.get("objective") or objective)
@@ -1258,10 +1268,11 @@ def _validate_task_contract(contract):
         if quota < 0:
             return "task contract max_tool_calls must be non-negative"
         contract["max_tool_calls"] = quota
-    if "patch_proposal_only" in (contract or {}):
-        value = (contract or {}).get("patch_proposal_only")
-        if not isinstance(value, bool):
-            return "task contract patch_proposal_only must be a boolean"
+    for bool_field in ("patch_proposal_only", "requires_adjudication"):
+        if bool_field in (contract or {}):
+            value = (contract or {}).get(bool_field)
+            if not isinstance(value, bool):
+                return f"task contract {bool_field} must be a boolean"
     for action in (contract or {}).get("forbidden_actions") or []:
         if not re.match(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$", str(action)):
             return f"task contract forbidden_actions entry '{action}' is not a safe action identifier"
@@ -1324,6 +1335,10 @@ def _contract_patch_proposal_only(contract):
     return bool((contract or {}).get("patch_proposal_only") is True)
 
 
+def _contract_requires_adjudication(contract):
+    return bool((contract or {}).get("requires_adjudication") is True)
+
+
 def tools_catalog(tool_names):
     """Build the subagent's SKILLS block — narrowed to the subset."""
     lines = []
@@ -1372,13 +1387,20 @@ def build_subagent_prompt(persona, catalog, last_results, history, goal,
             f"forbidden_actions: {task_contract.get('forbidden_actions') or []}\n"
             f"done_criteria: {task_contract.get('done_criteria') or []}\n"
             f"max_tool_calls: {task_contract.get('max_tool_calls', 'global-default')}\n"
-            f"patch_proposal_only: {task_contract.get('patch_proposal_only', False)}"
+            f"patch_proposal_only: {task_contract.get('patch_proposal_only', False)}\n"
+            f"requires_adjudication: {task_contract.get('requires_adjudication', False)}"
         )
         if _contract_patch_proposal_only(task_contract):
             parts.append(
                 "PATCH_PROPOSAL_MODE: File mutation tools record proposed changes "
                 "in the transcript but do not write workspace files. Emit a digest "
                 "that tells the parent what to review/test/apply."
+            )
+        if _contract_requires_adjudication(task_contract):
+            parts.append(
+                "ADJUDICATION_REQUIRED: Treat your final emit as a candidate output "
+                "only. It will be persisted for parent/supervisor review and must not "
+                "be considered accepted until an adjudicator clears it."
             )
     if last_results:
         parts.append(f"LAST_RESULTS:\n{last_results[-_SUBAGENT_RESULTS_CAP:]}")
@@ -2042,6 +2064,20 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
         if emit_value is not None:
             run_record.setdefault("turns", []).append(turn_record)
             _stamp_token_usage()
+            if _contract_requires_adjudication(task_contract):
+                run_record["adjudication"] = {
+                    "required": True,
+                    "status": "pending",
+                    "candidate_summary": cap(emit_value, SUBAGENT_MAX_DIGEST_CHARS),
+                    "candidate_turn": turn + 1,
+                }
+                summary = f"subagent candidate output requires adjudication: {cap(emit_value, 600)}"
+                _finish_run_record(run_record, "adjudication_required", summary)
+                return _structured_return(
+                    summary, run_record, status="needs_adjudication", uncertainty="medium",
+                    next_action="route transcript_path/candidate_summary to an adjudicator before accepting",
+                    max_chars=bounded_chars,
+                )
             _finish_run_record(run_record, "ok", emit_value)
             return _structured_return(emit_value, run_record, max_chars=bounded_chars)
 
