@@ -790,6 +790,45 @@ def test_run_queued_dispatch_rejects_path_escape(tmp_path, monkeypatch):
     assert "escapes queue dir" in result["summary"]
 
 
+def test_drain_queued_dispatches_is_bounded_and_preserves_queue_only_env(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_QUEUE_ONLY", "1")
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_QUEUED_DISPATCHES", 4)
+
+    first = json.loads(subagent.dispatch("queue first", "write-file", "unit", max_turns=2))
+    second = json.loads(subagent.dispatch("queue second", "write-file", "unit", max_turns=2))
+    calls = {"n": 0}
+
+    def worker_response(*_args):
+        calls["n"] += 1
+        return (f'(emit "worker done {calls["n"]}")', 1, 1)
+
+    monkeypatch.setattr(subagent, "_call_subagent_llm", worker_response)
+
+    drained = json.loads(subagent.drain_queued_dispatches(max_tasks=1))
+
+    assert drained["status"] == "drained"
+    assert drained["tasks_attempted"] == 1
+    assert drained["tasks_completed"] == 1
+    assert drained["remaining_queue_tasks"] == 1
+    assert calls["n"] == 1
+    assert not Path(first["queue_path"]).exists()
+    assert Path(first["queue_path"] + ".done").exists()
+    assert Path(second["queue_path"]).exists()
+    assert os.environ.get("OMEGACLAW_SUBAGENT_QUEUE_ONLY") == "1"
+
+
+def test_drain_queued_dispatches_reports_empty_queue(tmp_path, monkeypatch):
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+
+    drained = json.loads(subagent.drain_queued_dispatches(max_tasks=3))
+
+    assert drained["status"] == "queue_empty"
+    assert drained["tasks_attempted"] == 0
+    assert drained["remaining_queue_tasks"] == 0
+    assert drained["results"] == []
+
+
 def test_queue_only_dispatch_backpressure_fails_before_worker_llm(tmp_path, monkeypatch):
     _write_unit_persona(tmp_path, monkeypatch)
     queue_dir = tmp_path / "runs" / "queue"

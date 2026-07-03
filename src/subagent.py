@@ -475,6 +475,7 @@ def _pending_dispatch_queue_count():
         return len([
             name for name in os.listdir(queue_dir)
             if name.endswith(".json") and not name.startswith(".")
+            and not name.endswith(".done.result.json")
         ])
     except FileNotFoundError:
         return 0
@@ -550,6 +551,62 @@ def _resolve_queue_task_path(queue_path):
     if not candidate.endswith(".json"):
         raise ValueError("queued dispatch path must be a .json task record")
     return candidate
+
+
+def _pending_queued_dispatch_paths():
+    """Return pending queued dispatch task paths in deterministic oldest-first order.
+
+    This is intentionally only a local listing helper. It ignores hidden,
+    claimed, done, and result files so an operator-supervised worker can drain
+    explicit queue records without broad filesystem scanning.
+    """
+    queue_dir = _dispatch_queue_dir()
+    try:
+        names = [
+            name for name in os.listdir(queue_dir)
+            if name.endswith(".json") and not name.startswith(".")
+            and not name.endswith(".done.result.json")
+        ]
+    except FileNotFoundError:
+        return []
+    paths = [os.path.join(queue_dir, name) for name in names]
+    return sorted(paths, key=lambda path: (os.path.getmtime(path), path))
+
+
+def drain_queued_dispatches(max_tasks=1):
+    """Run up to ``max_tasks`` queued subagent dispatches and return JSON.
+
+    This is the bounded, operator-supervised wrapper around
+    ``run_queued_dispatch``. It does not daemonize, sleep, poll forever, or start
+    itself from dispatch. Supervisors can call it periodically or in a manually
+    approved loop; each invocation drains a small, explicit number of existing
+    ``queue/*.json`` tasks and returns compact result metadata.
+    """
+    try:
+        limit = int(max_tasks)
+    except (TypeError, ValueError):
+        limit = 1
+    limit = max(0, min(limit, _SUBAGENT_MAX_QUEUED_DISPATCHES or 1))
+    results = []
+    attempted = 0
+    for queue_path in _pending_queued_dispatch_paths()[:limit]:
+        attempted += 1
+        try:
+            results.append(json.loads(run_queued_dispatch(queue_path)))
+        except Exception as e:
+            results.append({
+                "status": "queue_worker_error",
+                "summary": f"queued dispatch drain error: {type(e).__name__}: {e}",
+                "queue_path": queue_path,
+            })
+    remaining = len(_pending_queued_dispatch_paths())
+    return json.dumps({
+        "status": "drained" if results else "queue_empty",
+        "tasks_attempted": attempted,
+        "tasks_completed": sum(1 for item in results if item.get("status") not in ("queue_worker_error",)),
+        "remaining_queue_tasks": remaining,
+        "results": results,
+    }, ensure_ascii=False, sort_keys=True)
 
 
 def _validate_queued_dispatch_task(task):

@@ -95,6 +95,11 @@ single-task worker primitive: it atomically claims one queued task, revalidates
 the task shape, runs normal synchronous dispatch with queue-only mode
 suppressed, writes a compact `*.result.json`, and leaves the task as `*.done`
 for audit instead of silently re-running it.
+`subagent.drain_queued_dispatches(max_tasks=1)` is the bounded
+operator-supervised wrapper: each call drains at most `max_tasks` pending queue
+records in oldest-first order and returns compact JSON metadata. It deliberately
+does not daemonize, sleep, poll forever, or auto-start from `dispatch`; any live
+worker loop must be launched and bounded by an external supervisor/operator.
 
 When a JSON task contract sets `"patch_proposal_only": true`, `write-file` and
 `append-file` calls do not mutate workspace files. Instead they append full
@@ -142,9 +147,11 @@ denial reason. Errors are never raised into the parent's MeTTa interpreter.
   history digests are saved in the local transcript record. Finished
   records have a SHA-256 sidecar plus a hash-chained `index.jsonl` audit entry,
   and the parent digest returns the same transcript hash for audit checks.
-  Queued tasks can be consumed one at a time by `run_queued_dispatch`, which
-  uses atomic claim/finish filenames and reuses the same dispatcher validation
-  path rather than trusting queue-record contents.
+  Queued tasks can be consumed one at a time by `run_queued_dispatch`, or in a
+  small bounded batch by `drain_queued_dispatches(max_tasks=...)`; both use
+  atomic claim/finish filenames and reuse the same dispatcher validation path
+  rather than trusting queue-record contents. Neither helper starts a daemon or
+  self-schedules a live async loop.
   Task contracts may also request patch-proposal-only mode, which records child
   file-change proposals without applying them.
 - The subagent cannot call `send`, `remember`, `pin`, `metta`,
