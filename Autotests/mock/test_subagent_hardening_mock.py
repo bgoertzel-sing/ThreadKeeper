@@ -230,6 +230,21 @@ def test_shell_tool_does_not_resolve_allowlisted_executable_from_workspace_path(
     assert "MALICIOUS" not in result
 
 
+def test_shell_tool_does_not_inherit_secret_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_ENABLE_SHELL", "1")
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_SHELL_ALLOWLIST", "env")
+    monkeypatch.setenv("OPENAI_API_KEY", "should-not-leak")
+    monkeypatch.setenv("UNIT_API_KEY", "should-not-leak")
+
+    result = subagent._tool_shell("env")
+
+    assert "OPENAI_API_KEY" not in result
+    assert "UNIT_API_KEY" not in result
+    assert f"HOME={tmp_path}" in result
+    assert "PATH=" in result
+
+
 def test_history_is_bounded_and_evicted_turns_are_digested(monkeypatch):
     monkeypatch.setattr(subagent, "_SUBAGENT_HISTORY_MAX_TURNS", 2)
     history = []

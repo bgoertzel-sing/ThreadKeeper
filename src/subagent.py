@@ -1394,6 +1394,25 @@ def _shell_safe_path_env(workspace):
     return os.pathsep.join(safe_parts) or os.defpath
 
 
+def _shell_safe_env(workspace):
+    """Return a minimal environment for optional subagent shell commands.
+
+    Even when the shell tool is explicitly enabled, the child process should
+    not inherit API keys, tokens, or arbitrary operator/session variables from
+    the parent agent. Keep only locale-ish process settings plus a sanitized
+    PATH, and pin HOME/PWD-style behavior to the subagent workspace.
+    """
+    env = {
+        "PATH": _shell_safe_path_env(workspace),
+        "HOME": workspace,
+    }
+    for name in ("LANG", "LC_ALL", "LC_CTYPE", "TZ"):
+        value = os.environ.get(name)
+        if value:
+            env[name] = value
+    return env
+
+
 def _tool_shell(cmd):
     """Restricted command runner: disabled unless explicitly enabled and
     executable-allowlisted. Uses shell=False so metacharacters are arguments,
@@ -1416,8 +1435,7 @@ def _tool_shell(cmd):
     workspace = _subagent_workspace_root()
     if not os.path.isdir(workspace):
         return f"(shell error: subagent workspace does not exist: {workspace})"
-    env = os.environ.copy()
-    env["PATH"] = _shell_safe_path_env(workspace)
+    env = _shell_safe_env(workspace)
     try:
         out = subprocess.run(
             argv,
