@@ -622,6 +622,91 @@ def drain_queued_dispatches(max_tasks=1):
     }, ensure_ascii=False, sort_keys=True)
 
 
+def _resolve_subagent_transcript_path(transcript_path):
+    if not transcript_path or "\x00" in str(transcript_path):
+        raise ValueError("invalid subagent transcript path")
+    run_dir = os.path.realpath(os.path.abspath(SUBAGENT_RUN_DIR))
+    candidate = os.path.realpath(os.path.abspath(str(transcript_path)))
+    if os.path.commonpath([run_dir, candidate]) != run_dir:
+        raise ValueError(f"subagent transcript path escapes run dir ({run_dir}): {transcript_path}")
+    if not candidate.endswith(".json"):
+        raise ValueError("subagent transcript path must be a .json run record")
+    return candidate
+
+
+def review_subagent_candidate(transcript_path):
+    """Return a non-mutating parent-review summary for a subagent transcript.
+
+    This is a deliberately small parent-side harness for the existing
+    ``patch_proposal_only`` and ``requires_adjudication`` contract modes. It
+    reads one local transcript under ``SUBAGENT_RUN_DIR``, verifies the optional
+    ``.sha256`` sidecar when present, and returns compact JSON that a parent or
+    operator can use to decide whether to apply proposed patches or route a
+    candidate answer to an adjudicator. It never applies patches, accepts final
+    answers, calls an LLM, drains queues, or changes live runtime behavior.
+    """
+    try:
+        path = _resolve_subagent_transcript_path(transcript_path)
+        record, digest = _read_json_file(path)
+        sidecar_path = f"{path}.sha256"
+        sidecar_status = "missing"
+        if os.path.exists(sidecar_path):
+            with open(sidecar_path, "r", encoding="utf-8") as f:
+                sidecar_digest = f.read().strip().split()[0]
+            if sidecar_digest != digest:
+                return json.dumps({
+                    "status": "transcript_tampered",
+                    "summary": "subagent transcript checksum mismatch",
+                    "transcript_path": path,
+                    "transcript_sha256": digest,
+                    "expected_sha256": sidecar_digest,
+                    "next_action": "inspect transcript before trusting child digest",
+                }, ensure_ascii=False, sort_keys=True)
+            sidecar_status = "verified"
+
+        proposals = record.get("patch_proposals") or []
+        adjudication = record.get("adjudication") or {}
+        requires_adjudication = bool(
+            adjudication.get("required") or
+            (record.get("task_contract") or {}).get("requires_adjudication") is True or
+            record.get("status") == "adjudication_required"
+        )
+        proposal_summary = [
+            {"action": p.get("action", ""), "path": p.get("path", "")}
+            for p in proposals[:20]
+            if isinstance(p, dict)
+        ]
+        gates = []
+        if proposal_summary:
+            gates.append("patch_proposal_review")
+        if requires_adjudication:
+            gates.append("adjudication_required")
+        status = "candidate_review_ready" if gates else "review_unneeded"
+        return json.dumps({
+            "status": status,
+            "summary": "subagent candidate transcript reviewed without applying changes",
+            "transcript_path": path,
+            "transcript_sha256": digest,
+            "checksum": sidecar_status,
+            "run_status": record.get("status", ""),
+            "gates": gates,
+            "patch_proposals": proposal_summary,
+            "adjudication": {
+                "required": requires_adjudication,
+                "status": adjudication.get("status", ""),
+                "candidate_summary": cap(adjudication.get("candidate_summary", record.get("summary", "")), 300),
+            },
+            "next_action": "operator/parent should inspect transcript and explicitly apply/adjudicate outside this helper",
+        }, ensure_ascii=False, sort_keys=True)
+    except Exception as e:
+        return json.dumps({
+            "status": "candidate_review_error",
+            "summary": f"subagent candidate review failed: {type(e).__name__}: {e}",
+            "transcript_path": str(transcript_path or ""),
+            "next_action": "fix transcript path/integrity before review",
+        }, ensure_ascii=False, sort_keys=True)
+
+
 def _validate_queued_dispatch_task(task):
     if not isinstance(task, dict):
         raise ValueError("queued dispatch task must be a JSON object")

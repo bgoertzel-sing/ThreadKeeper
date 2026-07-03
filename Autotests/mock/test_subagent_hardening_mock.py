@@ -726,6 +726,53 @@ def test_task_contract_requires_adjudication_must_be_boolean_before_llm(tmp_path
     assert saved["status"] == "contract_invalid"
 
 
+def test_review_subagent_candidate_reports_proposals_and_adjudication(tmp_path, monkeypatch):
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+    transcript = Path(subagent.SUBAGENT_RUN_DIR) / "reviewable.json"
+    record = {
+        "status": "adjudication_required",
+        "summary": "candidate answer",
+        "task_contract": {"requires_adjudication": True, "patch_proposal_only": True},
+        "patch_proposals": [{"action": "write-file", "path": "candidate.txt", "content": "draft"}],
+        "adjudication": {"required": True, "status": "pending", "candidate_summary": "candidate answer"},
+    }
+    digest = subagent._json_atomic_write(str(transcript), record)
+    subagent._write_transcript_integrity_sidecar(str(transcript), digest)
+
+    review = json.loads(subagent.review_subagent_candidate(str(transcript)))
+
+    assert review["status"] == "candidate_review_ready"
+    assert review["checksum"] == "verified"
+    assert review["patch_proposals"] == [{"action": "write-file", "path": "candidate.txt"}]
+    assert review["adjudication"]["required"] is True
+    assert set(review["gates"]) == {"patch_proposal_review", "adjudication_required"}
+    assert not (tmp_path / "candidate.txt").exists()
+
+
+def test_review_subagent_candidate_rejects_path_escape(tmp_path, monkeypatch):
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}")
+
+    review = json.loads(subagent.review_subagent_candidate(str(outside)))
+
+    assert review["status"] == "candidate_review_error"
+    assert "escapes run dir" in review["summary"]
+
+
+def test_review_subagent_candidate_detects_checksum_mismatch(tmp_path, monkeypatch):
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+    transcript = Path(subagent.SUBAGENT_RUN_DIR) / "tampered.json"
+    digest = subagent._json_atomic_write(str(transcript), {"status": "ok"})
+    subagent._write_transcript_integrity_sidecar(str(transcript), digest)
+    transcript.write_text(json.dumps({"status": "changed"}), encoding="utf-8")
+
+    review = json.loads(subagent.review_subagent_candidate(str(transcript)))
+
+    assert review["status"] == "transcript_tampered"
+    assert review["expected_sha256"] == digest
+
+
 def test_queue_only_dispatch_persists_task_without_worker_llm(tmp_path, monkeypatch):
     _write_unit_persona(tmp_path, monkeypatch)
     monkeypatch.setenv("OMEGACLAW_SUBAGENT_QUEUE_ONLY", "1")
