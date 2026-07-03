@@ -639,6 +639,7 @@ def _new_run_record(persona_key, goal):
         "history_digest": [],
         "turns": [],
         "files_changed": [],
+        "patch_proposals": [],
         "tests_run": [],
         "transcript_path": path,
         "task_contract": {},
@@ -666,9 +667,14 @@ def _structured_return(summary, record=None, status="ok", uncertainty="low",
                        next_action="return to parent", max_chars=None):
     limit = max_chars or SUBAGENT_MAX_DIGEST_CHARS
     token_usage = (record or {}).get("worker_token_usage")
+    patch_proposals = (record or {}).get("patch_proposals") or []
     payload = {
         "summary": cap(summary, max(100, limit // 2)),
         "files_changed": list(dict.fromkeys((record or {}).get("files_changed", []))),
+        "patch_proposals": [
+            {"action": p.get("action", ""), "path": p.get("path", "")}
+            for p in patch_proposals[:20]
+        ],
         "tests_run": list(dict.fromkeys((record or {}).get("tests_run", []))),
         "uncertainty": uncertainty,
         "next_action": next_action,
@@ -685,12 +691,14 @@ def _structured_return(summary, record=None, status="ok", uncertainty="low",
     # truncating the serialized object mid-token.
     payload["summary"] = cap(summary, 200)
     payload["files_changed"] = payload["files_changed"][:20]
+    payload["patch_proposals"] = payload["patch_proposals"][:20]
     payload["tests_run"] = payload["tests_run"][:10]
     text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     if len(text) <= limit:
         return text
     payload["summary"] = cap(summary, 80)
     payload["files_changed"] = []
+    payload["patch_proposals"] = []
     payload["tests_run"] = []
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
@@ -1107,7 +1115,7 @@ def _normalize_task_contract(goal, cfg=None):
     Contracts are intentionally data-only and may be supplied either in the
     persona JSON as `task_contract` or inline as a JSON goal object containing
     `objective`, `allowed_paths`, `forbidden_actions`, `done_criteria`,
-    and/or `max_tool_calls`.
+    `max_tool_calls`, and/or `patch_proposal_only`.
     This keeps the existing `(delegate goal tools persona max_turns)` API while
     giving parent agents a concrete way to narrow a child task.
     """
@@ -1120,7 +1128,7 @@ def _normalize_task_contract(goal, cfg=None):
     if isinstance(parsed, dict):
         inline = parsed.get("task_contract") if isinstance(parsed.get("task_contract"), dict) else parsed
         if isinstance(inline, dict):
-            for key in ("allowed_paths", "forbidden_actions", "done_criteria", "max_tool_calls"):
+            for key in ("allowed_paths", "forbidden_actions", "done_criteria", "max_tool_calls", "patch_proposal_only"):
                 if key in inline:
                     contract[key] = inline[key]
             objective = str(inline.get("objective") or parsed.get("objective") or objective)
@@ -1168,6 +1176,10 @@ def _validate_task_contract(contract):
         if quota < 0:
             return "task contract max_tool_calls must be non-negative"
         contract["max_tool_calls"] = quota
+    if "patch_proposal_only" in (contract or {}):
+        value = (contract or {}).get("patch_proposal_only")
+        if not isinstance(value, bool):
+            return "task contract patch_proposal_only must be a boolean"
     for action in (contract or {}).get("forbidden_actions") or []:
         if not re.match(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$", str(action)):
             return f"task contract forbidden_actions entry '{action}' is not a safe action identifier"
@@ -1226,6 +1238,10 @@ def _tool_forbidden_by_contract(name, contract):
     return bool(forbidden & aliases)
 
 
+def _contract_patch_proposal_only(contract):
+    return bool((contract or {}).get("patch_proposal_only") is True)
+
+
 def tools_catalog(tool_names):
     """Build the subagent's SKILLS block — narrowed to the subset."""
     lines = []
@@ -1273,8 +1289,15 @@ def build_subagent_prompt(persona, catalog, last_results, history, goal,
             f"allowed_paths: {task_contract.get('allowed_paths') or []}\n"
             f"forbidden_actions: {task_contract.get('forbidden_actions') or []}\n"
             f"done_criteria: {task_contract.get('done_criteria') or []}\n"
-            f"max_tool_calls: {task_contract.get('max_tool_calls', 'global-default')}"
+            f"max_tool_calls: {task_contract.get('max_tool_calls', 'global-default')}\n"
+            f"patch_proposal_only: {task_contract.get('patch_proposal_only', False)}"
         )
+        if _contract_patch_proposal_only(task_contract):
+            parts.append(
+                "PATCH_PROPOSAL_MODE: File mutation tools record proposed changes "
+                "in the transcript but do not write workspace files. Emit a digest "
+                "that tells the parent what to review/test/apply."
+            )
     if last_results:
         parts.append(f"LAST_RESULTS:\n{last_results[-_SUBAGENT_RESULTS_CAP:]}")
     if history_digest:
@@ -1616,6 +1639,18 @@ def run_tools(calls, allowed_names, record=None, quota=None, task_contract=None)
         if name in ("read-file", "write-file", "append-file") and not _path_within_contract(args[0], task_contract):
             out_parts.append(
                 f"(CONTRACT_VIOLATION: {name} path '{args[0]}' outside allowed_paths)"
+            )
+            continue
+        if name in ("write-file", "append-file") and _contract_patch_proposal_only(task_contract):
+            if record is not None:
+                record.setdefault("patch_proposals", []).append({
+                    "action": name,
+                    "path": str(args[0]),
+                    "content": str(args[1]),
+                })
+            out_parts.append(
+                f"(PATCH_PROPOSAL_RECORDED: {name} path '{args[0]}' not applied; "
+                "parent must review/test/apply)"
             )
             continue
         fn, _category = tool

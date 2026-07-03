@@ -631,6 +631,54 @@ def test_task_contract_max_tool_calls_narrows_global_quota(tmp_path, monkeypatch
     assert saved["task_contract"]["max_tool_calls"] == 1
 
 
+def test_task_contract_patch_proposal_only_records_without_writing(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    contract_goal = json.dumps({
+        "objective": "propose a patch but do not apply it",
+        "patch_proposal_only": True,
+    })
+    responses = iter([
+        '(write-file "proposed.txt" "candidate")',
+        '(emit "patch proposed")',
+    ])
+    monkeypatch.setattr(subagent, "_call_subagent_llm", lambda *_a: (next(responses), 0, 0))
+
+    payload = json.loads(subagent.dispatch(contract_goal, "write-file", "unit", max_turns=3))
+
+    assert payload["status"] == "ok"
+    assert payload["files_changed"] == []
+    assert payload["patch_proposals"] == [{"action": "write-file", "path": "proposed.txt"}]
+    assert not (tmp_path / "workspace" / "proposed.txt").exists()
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["task_contract"]["patch_proposal_only"] is True
+    assert saved["patch_proposals"] == [{
+        "action": "write-file",
+        "path": "proposed.txt",
+        "content": "candidate",
+    }]
+    assert "PATCH_PROPOSAL_RECORDED" in saved["turns"][0]["tool_results"]
+
+
+def test_task_contract_patch_proposal_only_must_be_boolean_before_llm(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")),
+    )
+
+    result = subagent.dispatch(json.dumps({
+        "objective": "bad patch mode",
+        "patch_proposal_only": "yes",
+    }), "write-file", "unit", max_turns=1)
+    payload = json.loads(result)
+
+    assert payload["status"] == "error"
+    assert "patch_proposal_only" in payload["summary"]
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["status"] == "contract_invalid"
+
+
 def test_task_contract_rejects_bad_max_tool_calls_before_llm(tmp_path, monkeypatch):
     _write_unit_persona(tmp_path, monkeypatch)
     monkeypatch.setattr(

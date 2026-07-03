@@ -46,7 +46,8 @@ and returns a single-string digest via its own `emit` instruction.
   be specific enough that a focused specialist model with the
   given tool subset can make progress within the turn budget. May
   also be a JSON task contract with `objective`, `allowed_paths`,
-  `forbidden_actions`, `done_criteria`, and optional `max_tool_calls`;
+  `forbidden_actions`, `done_criteria`, optional `max_tool_calls`, and
+  optional boolean `patch_proposal_only`;
   contract fields are bounded and validated before any worker LLM call.
 - `tools_csv` — comma-separated list of tool names the subagent may
   call. Must be a subset of the v1 registered tools (see
@@ -63,9 +64,9 @@ and returns a single-string digest via its own `emit` instruction.
 
 A single-line JSON string of at most `OMEGACLAW_SUBAGENT_MAX_DIGEST_CHARS`
 (default 2,000) with `summary`, `files_changed`, `tests_run`,
-`uncertainty`, `next_action`, `transcript_path`, `transcript_sha256`,
-`status`, and (when any worker LLM calls were made) `worker_token_usage`
-and `status` fields. Full worker prompts/responses/tool results are
+`patch_proposals`, `uncertainty`, `next_action`, `transcript_path`,
+`transcript_sha256`, `status`, and (when any worker LLM calls were made)
+`worker_token_usage` fields. Full worker prompts/responses/tool results are
 persisted locally under `OMEGACLAW_SUBAGENT_RUN_DIR` (default
 `memory/subagent-runs`) and only the bounded digest is returned to the
 parent. Each finished transcript also gets a local `<transcript>.sha256`
@@ -78,6 +79,12 @@ truncation, reordering, or later mutation during audit.
 `total_tokens` across all worker LLM calls in the dispatch, for cost
 accounting and audit. It is omitted from the structured return when no worker
 LLM calls were made (e.g., setup errors before the loop).
+
+When a JSON task contract sets `"patch_proposal_only": true`, `write-file` and
+`append-file` calls do not mutate workspace files. Instead they append full
+proposed changes to the local transcript's `patch_proposals` list and the parent
+digest receives only bounded `{action, path}` metadata. The parent/supervisor is
+then responsible for review, tests, and application.
 
 Early setup, contract, provider, tool-subset, and escalation failures also
 return the same structured JSON shape and persist a minimal local transcript;
@@ -111,6 +118,8 @@ denial reason. Errors are never raised into the parent's MeTTa interpreter.
   history digests are saved in the local transcript record. Finished
   records have a SHA-256 sidecar plus a hash-chained `index.jsonl` audit entry,
   and the parent digest returns the same transcript hash for audit checks.
+  Task contracts may also request patch-proposal-only mode, which records child
+  file-change proposals without applying them.
 - The subagent cannot call `send`, `remember`, `pin`, `metta`,
   `query`, `episodes`, or `delegate` in v1 (excluded by design —
   see §4.5.2 of the design doc). Tool execution is capped both per dispatch
@@ -177,7 +186,8 @@ end-to-end walkthrough.
 | OpenAI-compatible provider client cannot initialize | Structured JSON `status=error`; `summary` names the provider initialization failure; transcript status `provider_invalid`; no worker LLM call is attempted. |
 | Tool subset includes unknown skill | Structured JSON `status=error`; `summary` contains `(subagent error: unknown skill(s) [...]; registered subagent tools: [...])`; transcript status `tool_subset_invalid`. |
 | Tool subset includes v1-excluded skill | Structured JSON `status=error`; `summary` contains `(subagent error: skill(s) [...] are not callable by subagents in v1)`; transcript status `tool_subset_invalid`. |
-| Task contract is oversized, path-escaping, uses unsafe action identifiers, or has invalid `max_tool_calls` | Structured JSON `status=error`; `summary` contains `(subagent error: task contract <reason>)`; transcript status `contract_invalid`. |
+| Task contract is oversized, path-escaping, uses unsafe action identifiers, or has invalid `max_tool_calls` / `patch_proposal_only` | Structured JSON `status=error`; `summary` contains `(subagent error: task contract <reason>)`; transcript status `contract_invalid`. |
+| Task contract enables `patch_proposal_only` and worker calls `write-file` / `append-file` | Workspace file is not changed; transcript records full `patch_proposals`; parent digest includes bounded proposal metadata. |
 | Escalation policy denies cloud delegation | Structured JSON `status=error`; `summary` contains `(escalation denied) ...`; transcript status `escalation_denied`. |
 | Subagent endpoint times out / errors | Structured JSON `status=error`; `summary` contains `(subagent LLM call failed: <ExceptionType>: <reason>)`; transcript status `llm_failed`. |
 | Worker mixes `emit` with other parsed calls or multiple emits | Structured JSON `status=error` and `EMIT_PROTOCOL_VIOLATION`; transcript status `emit_protocol_violation`. |
