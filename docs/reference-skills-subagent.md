@@ -47,7 +47,8 @@ and returns a single-string digest via its own `emit` instruction.
   given tool subset can make progress within the turn budget. May
   also be a JSON task contract with `objective`, `allowed_paths`,
   `forbidden_actions`, `done_criteria`, optional `max_tool_calls`, and
-  optional boolean `patch_proposal_only`;
+  optional boolean `patch_proposal_only`, and optional boolean
+  `requires_adjudication`;
   contract fields are bounded and validated before any worker LLM call.
 - `tools_csv` — comma-separated list of tool names the subagent may
   call. Must be a subset of the v1 registered tools (see
@@ -95,6 +96,14 @@ When a JSON task contract sets `"patch_proposal_only": true`, `write-file` and
 proposed changes to the local transcript's `patch_proposals` list and the parent
 digest receives only bounded `{action, path}` metadata. The parent/supervisor is
 then responsible for review, tests, and application.
+
+When a JSON task contract sets `"requires_adjudication": true`, the subagent's
+final `emit` is treated as a candidate output rather than an accepted result.
+The transcript records `status=adjudication_required` with `candidate_summary`,
+and the parent digest returns `status=needs_adjudication` with bounded
+`adjudication` metadata (`required`, `status`, `candidate_summary`). The
+parent/supervisor must route the candidate to an adjudicator before accepting
+it. No second LLM call is made inside the dispatch loop.
 
 Early setup, contract, provider, tool-subset, and escalation failures also
 return the same structured JSON shape and persist a minimal local transcript;
@@ -200,6 +209,7 @@ end-to-end walkthrough.
 | Tool subset includes v1-excluded skill | Structured JSON `status=error`; `summary` contains `(subagent error: skill(s) [...] are not callable by subagents in v1)`; transcript status `tool_subset_invalid`. |
 | Task contract is oversized, path-escaping, uses unsafe action identifiers, or has invalid `max_tool_calls` / `patch_proposal_only` | Structured JSON `status=error`; `summary` contains `(subagent error: task contract <reason>)`; transcript status `contract_invalid`. |
 | Task contract enables `patch_proposal_only` and worker calls `write-file` / `append-file` | Workspace file is not changed; transcript records full `patch_proposals`; parent digest includes bounded proposal metadata. |
+| Task contract enables `requires_adjudication` and worker emits a final answer | Structured JSON `status=needs_adjudication`; digest includes bounded `adjudication` metadata (`required`, `status`, `candidate_summary`); transcript status `adjudication_required`. |
 | Queue-only mode accepts a dispatch | Structured JSON `status=queued`; digest includes `queue_path`/`queue_sha256`; transcript status `queued`; no worker LLM call is attempted. |
 | Queue-only mode is at capacity | Structured JSON `status=error`; `summary` contains `queue backpressure`; transcript status `queue_backpressure`; no worker LLM call is attempted. |
 | Escalation policy denies cloud delegation | Structured JSON `status=error`; `summary` contains `(escalation denied) ...`; transcript status `escalation_denied`. |
