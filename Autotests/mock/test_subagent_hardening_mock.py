@@ -6,6 +6,7 @@ import json
 import multiprocessing
 import os
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -426,7 +427,7 @@ def test_endpoint_kind_controls_llm_transport_without_base_url_heuristic(monkeyp
         "base_url": "http://localhost:11434/v1",  # intentionally misleading
         "endpoint_kind": "openai_compatible",
     }
-    assert subagent._call_subagent_llm(handle, "prompt", 12) == '(emit "cloud")'
+    assert subagent._call_subagent_llm(handle, "prompt", 12) == ('(emit "cloud")', 0, 0)
     assert seen["called"]["timeout"] == subagent._SUBAGENT_LLM_TIMEOUT_S
 
 
@@ -434,7 +435,7 @@ def test_dispatch_returns_structured_digest_and_persists_transcript(tmp_path, mo
     _write_unit_persona(tmp_path, monkeypatch)
 
     responses = iter(['(write-file "out.txt" "hello")', '(emit "done")'])
-    monkeypatch.setattr(subagent, "_call_subagent_llm", lambda *_args: next(responses))
+    monkeypatch.setattr(subagent, "_call_subagent_llm", lambda *_a: (next(responses), 10, 5))
 
     result = subagent.dispatch("write a file", "write-file", "unit", max_turns=3)
     payload = json.loads(result)
@@ -466,7 +467,7 @@ def test_dispatch_rejects_mixed_emit_and_tool_response(tmp_path, monkeypatch):
     monkeypatch.setattr(
         subagent,
         "_call_subagent_llm",
-        lambda *_args: '(emit "done")\n(write-file "hidden.txt" "nope")',
+        lambda *_a: ('(emit "done")\n(write-file "hidden.txt" "nope")', 0, 0),
     )
 
     payload = json.loads(subagent.dispatch("try mixed final", "write-file", "unit", max_turns=1))
@@ -481,7 +482,7 @@ def test_dispatch_rejects_mixed_emit_and_tool_response(tmp_path, monkeypatch):
 def test_tool_quota_stops_dispatch_with_structured_error(tmp_path, monkeypatch):
     _write_unit_persona(tmp_path, monkeypatch)
     monkeypatch.setattr(subagent, "_SUBAGENT_MAX_TOOL_CALLS", 1)
-    monkeypatch.setattr(subagent, "_call_subagent_llm", lambda *_args: '(write-file "a.txt" "a")\n(write-file "b.txt" "b")')
+    monkeypatch.setattr(subagent, "_call_subagent_llm", lambda *_a: ('(write-file "a.txt" "a")\n(write-file "b.txt" "b")', 0, 0))
 
     payload = json.loads(subagent.dispatch("write too much", "write-file", "unit", max_turns=2))
 
@@ -499,7 +500,7 @@ def test_per_turn_tool_quota_limits_multi_call_worker_response(tmp_path, monkeyp
     monkeypatch.setattr(
         subagent,
         "_call_subagent_llm",
-        lambda *_args: '(write-file "a.txt" "a")\n(write-file "b.txt" "b")',
+        lambda *_a: ('(write-file "a.txt" "a")\n(write-file "b.txt" "b")', 0, 0),
     )
 
     payload = json.loads(subagent.dispatch("write too much at once", "write-file", "unit", max_turns=2))
@@ -555,7 +556,7 @@ def test_task_contract_limits_file_paths_and_persists_contract(tmp_path, monkeyp
         '(write-file "unsafe.txt" "nope")\n(write-file "safe/out.txt" "ok")',
         '(emit "contract respected")',
     ])
-    monkeypatch.setattr(subagent, "_call_subagent_llm", lambda *_args: next(responses))
+    monkeypatch.setattr(subagent, "_call_subagent_llm", lambda *_a: (next(responses), 0, 0))
 
     payload = json.loads(subagent.dispatch(contract_goal, "write-file", "unit", max_turns=3))
 
@@ -577,7 +578,7 @@ def test_task_contract_forbidden_action_blocks_tool(tmp_path, monkeypatch):
         "objective": "do not modify files",
         "forbidden_actions": ["write-file"],
     })
-    monkeypatch.setattr(subagent, "_call_subagent_llm", lambda *_args: '(write-file "out.txt" "nope")')
+    monkeypatch.setattr(subagent, "_call_subagent_llm", lambda *_a: ('(write-file "out.txt" "nope")', 0, 0))
 
     payload = json.loads(subagent.dispatch(contract_goal, "write-file", "unit", max_turns=1))
 
@@ -598,7 +599,7 @@ def test_task_contract_max_tool_calls_narrows_global_quota(tmp_path, monkeypatch
     monkeypatch.setattr(
         subagent,
         "_call_subagent_llm",
-        lambda *_args: '(write-file "a.txt" "a")\n(write-file "b.txt" "b")',
+        lambda *_a: ('(write-file "a.txt" "a")\n(write-file "b.txt" "b")', 0, 0),
     )
 
     payload = json.loads(subagent.dispatch(contract_goal, "write-file", "unit", max_turns=2))
@@ -749,3 +750,42 @@ def test_dispatch_without_tool_subset_or_default_persists_structured_error(tmp_p
     saved = json.loads(transcript.read_text())
     assert saved["status"] == "tool_subset_invalid"
     assert saved["turns"] == []
+
+
+def test_dispatch_wall_clock_timeout_stops_before_llm(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setattr(subagent, "_SUBAGENT_DISPATCH_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(subagent, "_dispatch_timeout_exceeded", lambda start: True)
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_a: (_ for _ in ()).throw(AssertionError("should not call llm")),
+    )
+
+    payload = json.loads(subagent.dispatch("slow dispatch", "write-file", "unit", max_turns=2))
+
+    assert payload["status"] == "error"
+    assert "dispatch wall-clock timeout" in payload["summary"]
+    assert payload.get("worker_token_usage", {}).get("total_tokens") == 0
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["status"] == "dispatch_timeout"
+
+
+def test_worker_token_usage_aggregated_in_structured_return(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+
+    responses = iter([
+        ('(write-file "out.txt" "hello")', 100, 50),
+        ('(emit "done")', 80, 40),
+    ])
+    monkeypatch.setattr(subagent, "_call_subagent_llm", lambda *_a: next(responses))
+
+    payload = json.loads(subagent.dispatch("write a file", "write-file", "unit", max_turns=3))
+
+    assert payload["status"] == "ok"
+    usage = payload.get("worker_token_usage", {})
+    assert usage["input_tokens"] == 180
+    assert usage["output_tokens"] == 90
+    assert usage["total_tokens"] == 270
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["worker_token_usage"]["total_tokens"] == 270

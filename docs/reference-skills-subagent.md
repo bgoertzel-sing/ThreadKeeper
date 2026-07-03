@@ -64,6 +64,7 @@ and returns a single-string digest via its own `emit` instruction.
 A single-line JSON string of at most `OMEGACLAW_SUBAGENT_MAX_DIGEST_CHARS`
 (default 2,000) with `summary`, `files_changed`, `tests_run`,
 `uncertainty`, `next_action`, `transcript_path`, `transcript_sha256`,
+`status`, and (when any worker LLM calls were made) `worker_token_usage`
 and `status` fields. Full worker prompts/responses/tool results are
 persisted locally under `OMEGACLAW_SUBAGENT_RUN_DIR` (default
 `memory/subagent-runs`) and only the bounded digest is returned to the
@@ -71,6 +72,11 @@ parent. Each finished transcript also gets a local `<transcript>.sha256`
 sidecar and a compact append-only `index.jsonl` entry under the run directory,
 so supervisors can list runs and cheaply detect accidental corruption or later
 mutation during audit.
+
+`worker_token_usage` contains aggregated `input_tokens`, `output_tokens`, and
+`total_tokens` across all worker LLM calls in the dispatch, for cost
+accounting and audit. It is omitted from the structured return when no worker
+LLM calls were made (e.g., setup errors before the loop).
 
 Early setup, contract, provider, tool-subset, and escalation failures also
 return the same structured JSON shape and persist a minimal local transcript;
@@ -152,6 +158,7 @@ clamped instead of crashing the module or disabling guards accidentally.
 | `OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEMS` | `32` | Maximum entries in each task-contract list field. |
 | `OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEM_CHARS` | `512` | Maximum length of each task-contract list item. |
 | `OMEGACLAW_SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS` | `4000` | Maximum task-contract objective length. |
+| `OMEGACLAW_SUBAGENT_DISPATCH_TIMEOUT_S` | `600` | Dispatch-level wall-clock timeout in seconds; checked before each LLM call and tool execution. `0` disables. |
 | `OMEGACLAW_SUBAGENT_WORKSPACE` | current working directory | Sandbox root for subagent file tools. |
 | `OMEGACLAW_ESCALATION_METTA_SHA256` | unset | Optional SHA-256 pin for `escalation.metta`; mismatch denies cloud delegation. |
 
@@ -176,3 +183,4 @@ end-to-end walkthrough.
 | Worker response exceeds the per-turn tool-call cap | Structured JSON `status=error`; `summary` contains `TURN_QUOTA_EXCEEDED`; transcript status `turn_quota_exceeded`. |
 | `read-file` target is larger than `OMEGACLAW_SUBAGENT_MAX_READ_FILE_CHARS` | Tool result is truncated in the worker context with an explicit `(read-file truncated at <N> chars)` marker. |
 | Loop exceeds `max_turns` without `emit` | Structured JSON `status=incomplete`; `summary` contains `(subagent: max_turns (<N>) reached without emit; last_results: <clip>)`; transcript status `max_turns`. |
+| Dispatch exceeds `OMEGACLAW_SUBAGENT_DISPATCH_TIMEOUT_S` wall-clock limit | Structured JSON `status=error`; `summary` contains `(subagent: dispatch wall-clock timeout (<N>s) exceeded at turn <T>)`; transcript status `dispatch_timeout`. |

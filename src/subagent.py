@@ -284,6 +284,12 @@ _SUBAGENT_MAX_CONTRACT_ITEMS = _env_int("OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEMS",
 _SUBAGENT_MAX_CONTRACT_ITEM_CHARS = _env_int("OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEM_CHARS", 512, minimum=1)
 _SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS = _env_int("OMEGACLAW_SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS", 4000, minimum=1)
 
+# Dispatch-level wall-clock timeout. Even if individual LLM calls are bounded,
+# a subagent making many fast calls could run for a very long time. This cap
+# is checked before each LLM call and tool execution in the dispatch loop.
+# Set to 0 to disable.
+_SUBAGENT_DISPATCH_TIMEOUT_S = _env_float("OMEGACLAW_SUBAGENT_DISPATCH_TIMEOUT_S", 600.0, minimum=0.0)
+
 # Persistent local run records. Full worker prompts/responses/tool results are
 # kept out of the parent context; the parent receives only a bounded structured
 # digest plus the local transcript path for audit/debug.
@@ -627,6 +633,7 @@ def _finish_run_record(record, status, summary=None):
 def _structured_return(summary, record=None, status="ok", uncertainty="low",
                        next_action="return to parent", max_chars=None):
     limit = max_chars or SUBAGENT_MAX_DIGEST_CHARS
+    token_usage = (record or {}).get("worker_token_usage")
     payload = {
         "summary": cap(summary, max(100, limit // 2)),
         "files_changed": list(dict.fromkeys((record or {}).get("files_changed", []))),
@@ -637,6 +644,8 @@ def _structured_return(summary, record=None, status="ok", uncertainty="low",
         "transcript_sha256": (record or {}).get("transcript_sha256", ""),
         "status": status,
     }
+    if token_usage:
+        payload["worker_token_usage"] = token_usage
     text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     if len(text) <= limit:
         return text
@@ -964,7 +973,7 @@ def _call_with_retries(call_once, label):
 
 
 def _call_subagent_llm(provider_handle, content, max_tokens):
-    """Call the subagent's worker LLM and return response text.
+    """Call the subagent's worker LLM and return (text, in_tokens, out_tokens).
 
     For LOCAL Ollama endpoints we use the NATIVE /api/chat path with
     {"think": false} — the OpenAI /v1 path on this Ollama build returns
@@ -974,7 +983,7 @@ def _call_subagent_llm(provider_handle, content, max_tokens):
     we fall back to AIProvider.chat (/v1), which is correct there.
 
     Never raises into the MeTTa interpreter — returns a (subagent ...) string
-    on failure.
+    on failure, with zero token counts.
     """
     base_url = (provider_handle.get("base_url") or "").rstrip("/")
     model = provider_handle["model"]
@@ -998,14 +1007,19 @@ def _call_subagent_llm(provider_handle, content, max_tokens):
                 data = _json.loads(r.read().decode("utf-8", errors="replace"))
             _log_worker_usage(model, data.get("prompt_eval_count", 0),
                               data.get("eval_count", 0))
-            return (data.get("message") or {}).get("content", "") or ""
-        return _call_with_retries(call_once, "ollama")
+            in_tok = data.get("prompt_eval_count", 0) or 0
+            out_tok = data.get("eval_count", 0) or 0
+            return ((data.get("message") or {}).get("content", "") or "", in_tok, out_tok)
+        result = _call_with_retries(call_once, "ollama")
+        if isinstance(result, tuple):
+            return result
+        return (result, 0, 0)
 
     # Cloud endpoint — standard OpenAI /v1 chat (GLM/DeepSeek separate
     # reasoning from content correctly here).
     client = provider_handle["provider"]
     if client is None:
-        return "(subagent error: no cloud client available)"
+        return ("(subagent error: no cloud client available)", 0, 0)
     def call_once():
         resp = client.chat.completions.create(
             model=model,
@@ -1017,10 +1031,16 @@ def _call_subagent_llm(provider_handle, content, max_tokens):
             u = resp.usage
             _log_worker_usage(model, getattr(u, "prompt_tokens", 0),
                               getattr(u, "completion_tokens", 0))
+            in_tok = getattr(u, "prompt_tokens", 0) or 0
+            out_tok = getattr(u, "completion_tokens", 0) or 0
         except Exception:
+            in_tok, out_tok = 0, 0
             pass
-        return resp.choices[0].message.content or ""
-    return _call_with_retries(call_once, "openai-compatible")
+        return (resp.choices[0].message.content or "", in_tok, out_tok)
+    result = _call_with_retries(call_once, "openai-compatible")
+    if isinstance(result, tuple):
+        return result
+    return (result, 0, 0)
 
 
 # ----------------------------------------------------------------------
@@ -1495,6 +1515,27 @@ def _cancel_requested():
     return bool(path and os.path.exists(path))
 
 
+def _dispatch_timeout_exceeded(start_time):
+    """Check if the dispatch-level wall-clock timeout has been exceeded.
+
+    Returns True if the timeout is enabled and the elapsed time since
+    start_time exceeds the configured limit.
+    """
+    limit = _SUBAGENT_DISPATCH_TIMEOUT_S
+    if limit <= 0:
+        return False
+    return (time.time() - start_time) >= limit
+
+
+def _dispatch_timeout_remaining(start_time):
+    """Return remaining seconds before dispatch timeout, or None if disabled."""
+    limit = _SUBAGENT_DISPATCH_TIMEOUT_S
+    if limit <= 0:
+        return None
+    remaining = limit - (time.time() - start_time)
+    return max(0.0, remaining)
+
+
 def run_tools(calls, allowed_names, record=None, quota=None, task_contract=None):
     """Execute each call against the registry, return aggregated result
     string for the next turn's prompt."""
@@ -1767,6 +1808,16 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
     max_out_tok = int(cfg.get("max_output_tokens", SUBAGENT_DEFAULT_OUTPUT_TOKENS))
     run_record = _new_run_record(persona_key, objective)
     run_record["task_contract"] = dict(task_contract)
+    dispatch_start = time.time()
+    total_in_tokens = 0
+    total_out_tokens = 0
+
+    def _stamp_token_usage():
+        run_record["worker_token_usage"] = {
+            "input_tokens": total_in_tokens,
+            "output_tokens": total_out_tokens,
+            "total_tokens": total_in_tokens + total_out_tokens,
+        }
 
     for turn in range(bounded_turns):
         if _cancel_requested():
@@ -1776,11 +1827,25 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
                 status="cancelled", uncertainty="low", next_action="return to parent",
                 max_chars=bounded_chars,
             )
+        if _dispatch_timeout_exceeded(dispatch_start):
+            timeout_msg = (
+                f"(subagent: dispatch wall-clock timeout "
+                f"({_SUBAGENT_DISPATCH_TIMEOUT_S:.0f}s) exceeded at turn {turn + 1})"
+            )
+            _stamp_token_usage()
+            _finish_run_record(run_record, "dispatch_timeout", timeout_msg)
+            return _structured_return(
+                timeout_msg, run_record, status="error", uncertainty="high",
+                next_action="dispatch a narrower task or raise OMEGACLAW_SUBAGENT_DISPATCH_TIMEOUT_S",
+                max_chars=bounded_chars,
+            )
         prompt = build_subagent_prompt(
             persona_text, catalog, last_results, history, objective,
             turn + 1, bounded_turns, history_digest, task_contract,
         )
-        raw = _call_subagent_llm(provider_handle, prompt, max_out_tok)
+        raw, in_tok, out_tok = _call_subagent_llm(provider_handle, prompt, max_out_tok)
+        total_in_tokens += in_tok
+        total_out_tokens += out_tok
         turn_record = {"turn": turn + 1, "prompt": prompt, "raw_response": raw, "tool_calls": []}
         # If the call failed catastrophically, _call_subagent_llm
         # already returned a (subagent ...) string; surface as digest.
@@ -1793,6 +1858,7 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
             failed_status = "rate_limited" if "rate-limited" in raw else "llm_failed"
             if "concurrency-limited" in raw:
                 failed_status = "concurrency_limited"
+            _stamp_token_usage()
             _finish_run_record(run_record, failed_status, raw)
             return _structured_return(
                 raw, run_record, status="error", uncertainty="high",
@@ -1805,6 +1871,7 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
         if emit_error:
             turn_record["tool_results"] = emit_error
             run_record.setdefault("turns", []).append(turn_record)
+            _stamp_token_usage()
             _finish_run_record(run_record, "emit_protocol_violation", emit_error)
             return _structured_return(
                 emit_error, run_record, status="error", uncertainty="high",
@@ -1813,6 +1880,7 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
             )
         if emit_value is not None:
             run_record.setdefault("turns", []).append(turn_record)
+            _stamp_token_usage()
             _finish_run_record(run_record, "ok", emit_value)
             return _structured_return(emit_value, run_record, max_chars=bounded_chars)
 
@@ -1825,6 +1893,7 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
             turn_record["tool_results"] = last_results
             run_record.setdefault("turns", []).append(turn_record)
             record_status = "turn_quota_exceeded" if "TURN_QUOTA_EXCEEDED" in last_results else "quota_exceeded"
+            _stamp_token_usage()
             _finish_run_record(run_record, record_status, last_results)
             return _structured_return(
                 last_results, run_record, status="error", uncertainty="medium",
@@ -1834,6 +1903,7 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
         if "CANCELLED:" in last_results:
             turn_record["tool_results"] = last_results
             run_record.setdefault("turns", []).append(turn_record)
+            _stamp_token_usage()
             _finish_run_record(run_record, "cancelled", last_results)
             return _structured_return(
                 last_results, run_record, status="cancelled", uncertainty="low",
@@ -1849,6 +1919,7 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
         f"(subagent: max_turns ({bounded_turns}) reached without emit; "
         f"last_results: {_clip(last_results, 500)})"
     )
+    _stamp_token_usage()
     _finish_run_record(run_record, "max_turns", fallback)
     return _structured_return(
         fallback, run_record, status="incomplete", uncertainty="medium",
