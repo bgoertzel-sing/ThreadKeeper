@@ -457,9 +457,27 @@ def test_dispatch_returns_structured_digest_and_persists_transcript(tmp_path, mo
     assert index_entries[-1]["status"] == "ok"
     assert index_entries[-1]["transcript_path"] == str(transcript)
     assert index_entries[-1]["transcript_sha256"] == digest
+    assert index_entries[-1]["previous_entry_sha256"] == ""
+    assert len(index_entries[-1]["entry_sha256"]) == 64
+    assert index_entries[-1]["entry_sha256"] == subagent._index_entry_hash(index_entries[-1])
     assert saved["status"] == "ok"
     assert len(saved["turns"]) == 2
     assert (tmp_path / "workspace" / "out.txt").read_text() == "hello"
+
+
+def test_run_index_entries_are_hash_chained(tmp_path, monkeypatch):
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+    first = {"run_id": "one", "status": "ok", "transcript_path": "one.json", "transcript_sha256": "a" * 64}
+    second = {"run_id": "two", "status": "error", "transcript_path": "two.json", "transcript_sha256": "b" * 64}
+
+    subagent._append_run_index(first)
+    subagent._append_run_index(second)
+
+    entries = [json.loads(line) for line in (tmp_path / "runs" / "index.jsonl").read_text().splitlines()]
+    assert entries[0]["previous_entry_sha256"] == ""
+    assert entries[0]["entry_sha256"] == subagent._index_entry_hash(entries[0])
+    assert entries[1]["previous_entry_sha256"] == entries[0]["entry_sha256"]
+    assert entries[1]["entry_sha256"] == subagent._index_entry_hash(entries[1])
 
 
 def test_dispatch_rejects_mixed_emit_and_tool_response(tmp_path, monkeypatch):

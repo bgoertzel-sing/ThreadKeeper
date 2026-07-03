@@ -69,9 +69,10 @@ and `status` fields. Full worker prompts/responses/tool results are
 persisted locally under `OMEGACLAW_SUBAGENT_RUN_DIR` (default
 `memory/subagent-runs`) and only the bounded digest is returned to the
 parent. Each finished transcript also gets a local `<transcript>.sha256`
-sidecar and a compact append-only `index.jsonl` entry under the run directory,
-so supervisors can list runs and cheaply detect accidental corruption or later
-mutation during audit.
+sidecar and a compact append-only `index.jsonl` entry under the run directory.
+Index entries include `previous_entry_sha256` and `entry_sha256` hash-chain
+fields so supervisors can list runs and cheaply detect accidental corruption,
+truncation, reordering, or later mutation during audit.
 
 `worker_token_usage` contains aggregated `input_tokens`, `output_tokens`, and
 `total_tokens` across all worker LLM calls in the dispatch, for cost
@@ -108,8 +109,8 @@ denial reason. Errors are never raised into the parent's MeTTa interpreter.
   Ollama, remote API, etc.). The parent receives only bounded state;
   full prompts, responses, tool calls/results, task contracts, and
   history digests are saved in the local transcript record. Finished
-  records have a SHA-256 sidecar plus an `index.jsonl` audit entry, and the
-  parent digest returns the same transcript hash for audit checks.
+  records have a SHA-256 sidecar plus a hash-chained `index.jsonl` audit entry,
+  and the parent digest returns the same transcript hash for audit checks.
 - The subagent cannot call `send`, `remember`, `pin`, `metta`,
   `query`, `episodes`, or `delegate` in v1 (excluded by design —
   see §4.5.2 of the design doc). Tool execution is capped both per dispatch

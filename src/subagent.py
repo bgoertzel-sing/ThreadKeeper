@@ -384,33 +384,65 @@ def _write_transcript_integrity_sidecar(path, digest):
             pass
 
 
+def _index_entry_hash(entry):
+    """Hash an index entry without its self-referential entry hash field."""
+    payload = dict(entry or {})
+    payload.pop("entry_sha256", None)
+    line = json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n"
+    return hashlib.sha256(line.encode("utf-8")).hexdigest()
+
+
+def _last_index_entry_hash(index_path):
+    try:
+        with open(index_path, "rb") as f:
+            lines = [line for line in f.read().splitlines() if line.strip()]
+    except FileNotFoundError:
+        return ""
+    except Exception:
+        return ""
+    if not lines:
+        return ""
+    try:
+        previous = json.loads(lines[-1].decode("utf-8"))
+        prior_hash = str(previous.get("entry_sha256") or "").strip().lower()
+        if re.fullmatch(r"[0-9a-f]{64}", prior_hash):
+            return prior_hash
+        return _index_entry_hash(previous)
+    except Exception:
+        return hashlib.sha256(lines[-1] + b"\n").hexdigest()
+
+
 def _append_run_index(record):
     """Append a compact audit index entry for a finished subagent run.
 
     Full transcripts stay in per-run JSON files so parent context remains
     bounded. This append-only JSONL index gives operators a cheap local run list
     with transcript checksum/provenance, guarded by a sidecar lock for
-    cross-process writers when fcntl is available.
+    cross-process writers when fcntl is available. Each entry also carries a
+    hash-chain link to the prior entry, making local truncation/rewrite drift
+    cheap to detect during audit without expanding parent context.
     """
     if not record:
         return ""
     os.makedirs(SUBAGENT_RUN_DIR, exist_ok=True)
     index_path = os.path.join(SUBAGENT_RUN_DIR, "index.jsonl")
-    entry = {
-        "run_id": record.get("run_id", ""),
-        "persona_key": record.get("persona_key", ""),
-        "status": record.get("status", ""),
-        "started_at": record.get("started_at"),
-        "finished_at": record.get("finished_at"),
-        "transcript_path": record.get("transcript_path", ""),
-        "transcript_sha256": record.get("transcript_sha256", ""),
-    }
-    line = json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n"
     lock_path = f"{index_path}.lock"
     with open(lock_path, "a+", encoding="utf-8") as lock:
         if fcntl is not None:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         try:
+            entry = {
+                "run_id": record.get("run_id", ""),
+                "persona_key": record.get("persona_key", ""),
+                "status": record.get("status", ""),
+                "started_at": record.get("started_at"),
+                "finished_at": record.get("finished_at"),
+                "transcript_path": record.get("transcript_path", ""),
+                "transcript_sha256": record.get("transcript_sha256", ""),
+                "previous_entry_sha256": _last_index_entry_hash(index_path),
+            }
+            entry["entry_sha256"] = _index_entry_hash(entry)
+            line = json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n"
             with open(index_path, "a", encoding="utf-8") as f:
                 f.write(line)
                 f.flush()
