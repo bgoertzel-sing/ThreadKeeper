@@ -469,13 +469,27 @@ def _queued_dispatch_paths(run_id):
     return queue_dir, os.path.join(queue_dir, f"{_safe_slug(run_id, max_len=80)}.json")
 
 
+def _is_pending_queue_task_name(name):
+    """Return True only for live ``queue/*.json`` task records.
+
+    Queue workers retain compact JSON result sidecars such as
+    ``*.done.result.json`` and ``*.failed.result.json`` for audit. Those files
+    live beside pending tasks but must not count as backpressure or be drained
+    as new work.
+    """
+    return (
+        name.endswith(".json")
+        and not name.startswith(".")
+        and not name.endswith(".result.json")
+    )
+
+
 def _pending_dispatch_queue_count():
     try:
         queue_dir = _dispatch_queue_dir()
         return len([
             name for name in os.listdir(queue_dir)
-            if name.endswith(".json") and not name.startswith(".")
-            and not name.endswith(".done.result.json")
+            if _is_pending_queue_task_name(name)
         ])
     except FileNotFoundError:
         return 0
@@ -564,8 +578,7 @@ def _pending_queued_dispatch_paths():
     try:
         names = [
             name for name in os.listdir(queue_dir)
-            if name.endswith(".json") and not name.startswith(".")
-            and not name.endswith(".done.result.json")
+            if _is_pending_queue_task_name(name)
         ]
     except FileNotFoundError:
         return []

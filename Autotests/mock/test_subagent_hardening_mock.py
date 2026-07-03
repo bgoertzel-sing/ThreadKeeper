@@ -816,6 +816,8 @@ def test_run_queued_dispatch_retains_failed_claim_for_audit(tmp_path, monkeypatc
     assert saved_result["status"] == "queue_worker_error"
     assert saved_result["queue_path"] == str(queue_path)
     assert len(result["result_sha256"]) == 64
+    assert subagent._pending_queued_dispatch_paths() == []
+    assert subagent._pending_dispatch_queue_count() == 0
 
 
 def test_drain_queued_dispatches_is_bounded_and_preserves_queue_only_env(tmp_path, monkeypatch):
