@@ -654,8 +654,13 @@ def run_queued_dispatch(queue_path):
     claimed path, revalidate the task shape, run normal synchronous dispatch
     with queue-only mode suppressed, and write a compact ``*.result.json``
     record. The original task is left as ``*.done`` for audit so a task is not
-    silently re-run.
+    silently re-run. If validation or execution fails after a claim, the claimed
+    task is retained as ``*.failed`` with a compact ``*.failed.result.json``
+    sidecar instead of being left in limbo.
     """
+    task_path = None
+    claimed_path = None
+    task_sha256 = None
     try:
         task_path = _resolve_queue_task_path(queue_path)
         claimed_path = f"{task_path}.claimed"
@@ -692,10 +697,26 @@ def run_queued_dispatch(queue_path):
         result_record["result_sha256"] = result_sha256
         return json.dumps(result_record, ensure_ascii=False, sort_keys=True)
     except Exception as e:
-        return json.dumps({
+        error_record = {
             "status": "queue_worker_error",
             "summary": f"queued dispatch worker error: {type(e).__name__}: {e}",
-        }, ensure_ascii=False, sort_keys=True)
+        }
+        if task_path:
+            error_record["queue_path"] = task_path
+        if claimed_path:
+            error_record["claimed_path"] = claimed_path
+        if task_sha256:
+            error_record["task_sha256"] = task_sha256
+        if claimed_path and os.path.exists(claimed_path):
+            failed_path = f"{task_path}.failed"
+            try:
+                os.replace(claimed_path, failed_path)
+                error_record["task_failed_path"] = failed_path
+                result_sha256 = _json_atomic_write(f"{failed_path}.result.json", error_record)
+                error_record["result_sha256"] = result_sha256
+            except Exception as retain_error:
+                error_record["retention_error"] = f"{type(retain_error).__name__}: {retain_error}"
+        return json.dumps(error_record, ensure_ascii=False, sort_keys=True)
 
 
 def _rate_limit_state_path(label):

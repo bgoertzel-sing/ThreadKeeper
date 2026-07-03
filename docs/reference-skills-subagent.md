@@ -94,7 +94,10 @@ The Python helper `subagent.run_queued_dispatch(queue_path)` is the current
 single-task worker primitive: it atomically claims one queued task, revalidates
 the task shape, runs normal synchronous dispatch with queue-only mode
 suppressed, writes a compact `*.result.json`, and leaves the task as `*.done`
-for audit instead of silently re-running it.
+for audit instead of silently re-running it. If validation or execution fails
+after a task has been claimed, the helper retains the claimed task as
+`*.failed` and writes `*.failed.result.json` so malformed queued records do not
+vanish into a limbo state.
 `subagent.drain_queued_dispatches(max_tasks=1)` is the bounded
 operator-supervised wrapper: each call drains at most `max_tasks` pending queue
 records in oldest-first order and returns compact JSON metadata. It deliberately
@@ -227,7 +230,8 @@ end-to-end walkthrough.
 | Task contract enables `requires_adjudication` and worker emits a final answer | Structured JSON `status=needs_adjudication`; digest includes bounded `adjudication` metadata (`required`, `status`, `candidate_summary`); transcript status `adjudication_required`. |
 | Queue-only mode accepts a dispatch | Structured JSON `status=queued`; digest includes `queue_path`/`queue_sha256`; transcript status `queued`; no worker LLM call is attempted. |
 | Queue-only mode is at capacity | Structured JSON `status=error`; `summary` contains `queue backpressure`; transcript status `queue_backpressure`; no worker LLM call is attempted. |
-| Queued worker sees a malformed/escaping task path or bad queued JSON | `run_queued_dispatch(...)` returns JSON `status=queue_worker_error`; no worker LLM call is attempted. |
+| Queued worker sees an escaping task path | `run_queued_dispatch(...)` returns JSON `status=queue_worker_error`; no worker LLM call is attempted. |
+| Queued worker sees bad queued JSON/shape after claiming a task | `run_queued_dispatch(...)` returns JSON `status=queue_worker_error`; claimed task is retained as `*.failed` with `*.failed.result.json`; no worker LLM call is attempted for validation failures. |
 | Escalation policy denies cloud delegation | Structured JSON `status=error`; `summary` contains `(escalation denied) ...`; transcript status `escalation_denied`. |
 | Subagent endpoint times out / errors | Structured JSON `status=error`; `summary` contains `(subagent LLM call failed: <ExceptionType>: <reason>)`; transcript status `llm_failed`. |
 | Worker mixes `emit` with other parsed calls or multiple emits | Structured JSON `status=error` and `EMIT_PROTOCOL_VIOLATION`; transcript status `emit_protocol_violation`. |
