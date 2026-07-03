@@ -30,6 +30,7 @@ def test_env_numeric_knobs_fallback_and_clamp_on_reload(monkeypatch):
         "OMEGACLAW_SUBAGENT_MAX_TOOL_CALLS_PER_TURN": "0",
         "OMEGACLAW_SUBAGENT_MAX_PATH_ARG_CHARS": "0",
         "OMEGACLAW_SUBAGENT_MAX_TOOL_ARG_CHARS": "0",
+        "OMEGACLAW_SUBAGENT_MAX_READ_FILE_CHARS": "0",
         "OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEMS": "-2",
         "OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEM_CHARS": "0",
         "OMEGACLAW_SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS": "0",
@@ -50,6 +51,7 @@ def test_env_numeric_knobs_fallback_and_clamp_on_reload(monkeypatch):
     assert reloaded._SUBAGENT_MAX_TOOL_CALLS_PER_TURN == 1
     assert reloaded._SUBAGENT_MAX_PATH_ARG_CHARS == 1
     assert reloaded._SUBAGENT_MAX_TOOL_ARG_CHARS == 1
+    assert reloaded._SUBAGENT_MAX_READ_FILE_CHARS == 1
     assert reloaded._SUBAGENT_MAX_CONTRACT_ITEMS == 0
     assert reloaded._SUBAGENT_MAX_CONTRACT_ITEM_CHARS == 1
     assert reloaded._SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS == 1
@@ -151,6 +153,18 @@ def test_run_tools_rejects_oversized_tool_arguments(monkeypatch):
     assert "path argument exceeds" in path_result
     assert "SKILL_ARG_ERROR: write-file" in content_result
     assert "argument(s) [2] exceed" in content_result
+
+
+def test_read_file_is_bounded_before_return_to_worker_context(tmp_path, monkeypatch):
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_WORKSPACE", str(tmp_path))
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_READ_FILE_CHARS", 5)
+    target = tmp_path / "large.txt"
+    target.write_text("abcdefghij")
+
+    result = subagent._tool_read_file("large.txt")
+
+    assert result.startswith("abcde\n...(read-file truncated at 5 chars)...")
+    assert "fghij" not in result
 
 
 def test_write_file_uses_atomic_replace_inside_workspace(tmp_path, monkeypatch):

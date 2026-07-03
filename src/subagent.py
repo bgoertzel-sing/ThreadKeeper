@@ -279,6 +279,7 @@ _SUBAGENT_MAX_TOOL_CALLS_PER_TURN = _env_int("OMEGACLAW_SUBAGENT_MAX_TOOL_CALLS_
 _SUBAGENT_CANCEL_FILE = os.environ.get("OMEGACLAW_SUBAGENT_CANCEL_FILE", "")
 _SUBAGENT_MAX_PATH_ARG_CHARS = _env_int("OMEGACLAW_SUBAGENT_MAX_PATH_ARG_CHARS", 512, minimum=1)
 _SUBAGENT_MAX_TOOL_ARG_CHARS = _env_int("OMEGACLAW_SUBAGENT_MAX_TOOL_ARG_CHARS", 20000, minimum=1)
+_SUBAGENT_MAX_READ_FILE_CHARS = _env_int("OMEGACLAW_SUBAGENT_MAX_READ_FILE_CHARS", 20000, minimum=1)
 _SUBAGENT_MAX_CONTRACT_ITEMS = _env_int("OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEMS", 32, minimum=0)
 _SUBAGENT_MAX_CONTRACT_ITEM_CHARS = _env_int("OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEM_CHARS", 512, minimum=1)
 _SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS = _env_int("OMEGACLAW_SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS", 4000, minimum=1)
@@ -1337,8 +1338,12 @@ def _find_close_quote(s, start):
 def _tool_read_file(path):
     try:
         resolved = _resolve_workspace_path(path)
+        limit = max(1, int(_SUBAGENT_MAX_READ_FILE_CHARS))
         with open(resolved, "r", encoding="utf-8", errors="replace") as f:
-            return f.read()
+            text = f.read(limit + 1)
+        if len(text) > limit:
+            return text[:limit] + f"\n...(read-file truncated at {limit} chars)..."
+        return text
     except Exception as e:
         return f"(read-file error: {e})"
 

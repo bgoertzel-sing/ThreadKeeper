@@ -148,6 +148,7 @@ clamped instead of crashing the module or disabling guards accidentally.
 | `OMEGACLAW_SUBAGENT_CANCEL_FILE` | unset | If the file exists, dispatch stops with `status=cancelled`. |
 | `OMEGACLAW_SUBAGENT_MAX_PATH_ARG_CHARS` | `512` | Maximum path argument length for file tools. |
 | `OMEGACLAW_SUBAGENT_MAX_TOOL_ARG_CHARS` | `20000` | Maximum string length for any single tool argument. |
+| `OMEGACLAW_SUBAGENT_MAX_READ_FILE_CHARS` | `20000` | Maximum text returned by one subagent `read-file` call before a truncation marker is appended. |
 | `OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEMS` | `32` | Maximum entries in each task-contract list field. |
 | `OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEM_CHARS` | `512` | Maximum length of each task-contract list item. |
 | `OMEGACLAW_SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS` | `4000` | Maximum task-contract objective length. |
@@ -173,4 +174,5 @@ end-to-end walkthrough.
 | Subagent endpoint times out / errors | Structured JSON `status=error`; `summary` contains `(subagent LLM call failed: <ExceptionType>: <reason>)`; transcript status `llm_failed`. |
 | Worker mixes `emit` with other parsed calls or multiple emits | Structured JSON `status=error` and `EMIT_PROTOCOL_VIOLATION`; transcript status `emit_protocol_violation`. |
 | Worker response exceeds the per-turn tool-call cap | Structured JSON `status=error`; `summary` contains `TURN_QUOTA_EXCEEDED`; transcript status `turn_quota_exceeded`. |
+| `read-file` target is larger than `OMEGACLAW_SUBAGENT_MAX_READ_FILE_CHARS` | Tool result is truncated in the worker context with an explicit `(read-file truncated at <N> chars)` marker. |
 | Loop exceeds `max_turns` without `emit` | Structured JSON `status=incomplete`; `summary` contains `(subagent: max_turns (<N>) reached without emit; last_results: <clip>)`; transcript status `max_turns`. |
