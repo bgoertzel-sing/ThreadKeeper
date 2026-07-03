@@ -65,12 +65,13 @@ and returns a single-string digest via its own `emit` instruction.
 A single-line JSON string of at most `OMEGACLAW_SUBAGENT_MAX_DIGEST_CHARS`
 (default 2,000) with `summary`, `files_changed`, `tests_run`,
 `patch_proposals`, `uncertainty`, `next_action`, `transcript_path`,
-`transcript_sha256`, `status`, and (when any worker LLM calls were made)
-`worker_token_usage` fields. Full worker prompts/responses/tool results are
-persisted locally under `OMEGACLAW_SUBAGENT_RUN_DIR` (default
-`memory/subagent-runs`) and only the bounded digest is returned to the
-parent. Each finished transcript also gets a local `<transcript>.sha256`
-sidecar and a compact append-only `index.jsonl` entry under the run directory.
+`transcript_sha256`, `status`, optional `queue_path`/`queue_sha256`, and (when
+any worker LLM calls were made) `worker_token_usage` fields. Full worker
+prompts/responses/tool results are persisted locally under
+`OMEGACLAW_SUBAGENT_RUN_DIR` (default `memory/subagent-runs`) and only the
+bounded digest is returned to the parent. Each finished transcript also gets a
+local `<transcript>.sha256` sidecar and a compact append-only `index.jsonl`
+entry under the run directory.
 Index entries include `previous_entry_sha256` and `entry_sha256` hash-chain
 fields so supervisors can list runs and cheaply detect accidental corruption,
 truncation, reordering, or later mutation during audit.
@@ -79,6 +80,15 @@ truncation, reordering, or later mutation during audit.
 `total_tokens` across all worker LLM calls in the dispatch, for cost
 accounting and audit. It is omitted from the structured return when no worker
 LLM calls were made (e.g., setup errors before the loop).
+
+When `OMEGACLAW_SUBAGENT_QUEUE_ONLY=1`, dispatch performs setup/contract/tool
+validation and persists a durable task record under
+`OMEGACLAW_SUBAGENT_RUN_DIR/queue/` instead of initializing or calling the
+worker LLM. This is the first async/backpressure primitive: the parent receives
+`status="queued"`, `queue_path`, `queue_sha256`, and a normal transcript; a
+separate local supervisor can later claim the queued task. If the queue already
+has `OMEGACLAW_SUBAGENT_MAX_QUEUED_DISPATCHES` pending JSON tasks, dispatch
+fails closed with transcript status `queue_backpressure` before any worker call.
 
 When a JSON task contract sets `"patch_proposal_only": true`, `write-file` and
 `append-file` calls do not mutate workspace files. Instead they append full
@@ -153,7 +163,9 @@ clamped instead of crashing the module or disabling guards accidentally.
 | `OMEGACLAW_SUBAGENT_PERSONA_DIR` | `./memory/personas-subagent` | Directory holding `<key>.json` configs and persona prompt files. |
 | `OMEGACLAW_SUBAGENT_MAX_TURNS` | `8` | Hard cap on iterations per dispatch. |
 | `OMEGACLAW_SUBAGENT_MAX_DIGEST_CHARS` | `2000` | Length cap on the JSON digest returned to the parent. |
-| `OMEGACLAW_SUBAGENT_RUN_DIR` | `memory/subagent-runs` | Directory for persistent JSON transcript/run records, `index.jsonl`, checksum sidecars, and worker rate/concurrency state. |
+| `OMEGACLAW_SUBAGENT_RUN_DIR` | `memory/subagent-runs` | Directory for persistent JSON transcript/run records, `index.jsonl`, checksum sidecars, worker rate/concurrency state, and optional queued dispatch tasks. |
+| `OMEGACLAW_SUBAGENT_QUEUE_ONLY` | unset/false | If true, validate and enqueue the dispatch under `OMEGACLAW_SUBAGENT_RUN_DIR/queue/` without calling the worker LLM. |
+| `OMEGACLAW_SUBAGENT_MAX_QUEUED_DISPATCHES` | `32` | Maximum pending queued dispatch task records before returning `queue_backpressure`; `0` means no pending queue capacity. |
 | `OMEGACLAW_SUBAGENT_LLM_TIMEOUT_S` | `180` | Timeout for each worker LLM call. |
 | `OMEGACLAW_SUBAGENT_LLM_RETRIES` | `1` | Retry count after the first worker LLM attempt. |
 | `OMEGACLAW_SUBAGENT_LLM_BACKOFF_S` | `1.0` | Exponential backoff base between worker retries. |
@@ -188,6 +200,8 @@ end-to-end walkthrough.
 | Tool subset includes v1-excluded skill | Structured JSON `status=error`; `summary` contains `(subagent error: skill(s) [...] are not callable by subagents in v1)`; transcript status `tool_subset_invalid`. |
 | Task contract is oversized, path-escaping, uses unsafe action identifiers, or has invalid `max_tool_calls` / `patch_proposal_only` | Structured JSON `status=error`; `summary` contains `(subagent error: task contract <reason>)`; transcript status `contract_invalid`. |
 | Task contract enables `patch_proposal_only` and worker calls `write-file` / `append-file` | Workspace file is not changed; transcript records full `patch_proposals`; parent digest includes bounded proposal metadata. |
+| Queue-only mode accepts a dispatch | Structured JSON `status=queued`; digest includes `queue_path`/`queue_sha256`; transcript status `queued`; no worker LLM call is attempted. |
+| Queue-only mode is at capacity | Structured JSON `status=error`; `summary` contains `queue backpressure`; transcript status `queue_backpressure`; no worker LLM call is attempted. |
 | Escalation policy denies cloud delegation | Structured JSON `status=error`; `summary` contains `(escalation denied) ...`; transcript status `escalation_denied`. |
 | Subagent endpoint times out / errors | Structured JSON `status=error`; `summary` contains `(subagent LLM call failed: <ExceptionType>: <reason>)`; transcript status `llm_failed`. |
 | Worker mixes `emit` with other parsed calls or multiple emits | Structured JSON `status=error` and `EMIT_PROTOCOL_VIOLATION`; transcript status `emit_protocol_violation`. |

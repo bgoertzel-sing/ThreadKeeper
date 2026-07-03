@@ -283,6 +283,7 @@ _SUBAGENT_MAX_READ_FILE_CHARS = _env_int("OMEGACLAW_SUBAGENT_MAX_READ_FILE_CHARS
 _SUBAGENT_MAX_CONTRACT_ITEMS = _env_int("OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEMS", 32, minimum=0)
 _SUBAGENT_MAX_CONTRACT_ITEM_CHARS = _env_int("OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEM_CHARS", 512, minimum=1)
 _SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS = _env_int("OMEGACLAW_SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS", 4000, minimum=1)
+_SUBAGENT_MAX_QUEUED_DISPATCHES = _env_int("OMEGACLAW_SUBAGENT_MAX_QUEUED_DISPATCHES", 32, minimum=0)
 
 # Dispatch-level wall-clock timeout. Even if individual LLM calls are bounded,
 # a subagent making many fast calls could run for a very long time. This cap
@@ -298,6 +299,12 @@ _DEFAULT_SUBAGENT_RUN_DIR = os.path.join(
     "subagent-runs",
 )
 SUBAGENT_RUN_DIR = os.environ.get("OMEGACLAW_SUBAGENT_RUN_DIR", _DEFAULT_SUBAGENT_RUN_DIR)
+
+
+def _queue_only_enabled():
+    return os.environ.get("OMEGACLAW_SUBAGENT_QUEUE_ONLY", "").strip().lower() in (
+        "1", "true", "yes", "on"
+    )
 
 
 def _subagent_workspace_root():
@@ -451,6 +458,78 @@ def _append_run_index(record):
             if fcntl is not None:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
     return index_path
+
+
+def _dispatch_queue_dir():
+    return os.path.join(SUBAGENT_RUN_DIR, "queue")
+
+
+def _queued_dispatch_paths(run_id):
+    queue_dir = _dispatch_queue_dir()
+    return queue_dir, os.path.join(queue_dir, f"{_safe_slug(run_id, max_len=80)}.json")
+
+
+def _pending_dispatch_queue_count():
+    try:
+        queue_dir = _dispatch_queue_dir()
+        return len([
+            name for name in os.listdir(queue_dir)
+            if name.endswith(".json") and not name.startswith(".")
+        ])
+    except FileNotFoundError:
+        return 0
+    except Exception:
+        return _SUBAGENT_MAX_QUEUED_DISPATCHES
+
+
+def _enqueue_dispatch_record(record, tool_names, max_turns, max_chars):
+    """Persist a validated dispatch request for an external async worker.
+
+    This is deliberately only an enqueue primitive: it performs the same setup
+    validation as synchronous dispatch, writes a durable local task record, and
+    returns a bounded parent digest without initializing or calling the worker
+    LLM. A separate supervisor/worker can later consume ``queue/*.json`` and
+    run the normal synchronous path under the same contracts and cancellation
+    controls.
+    """
+    os.makedirs(SUBAGENT_RUN_DIR, exist_ok=True)
+    if _pending_dispatch_queue_count() >= _SUBAGENT_MAX_QUEUED_DISPATCHES:
+        summary = (
+            f"subagent dispatch queue backpressure: "
+            f"{_SUBAGENT_MAX_QUEUED_DISPATCHES} queued task(s) already pending"
+        )
+        _finish_run_record(record, "queue_backpressure", summary)
+        return _structured_return(
+            summary, record, status="error", uncertainty="medium",
+            next_action="retry after queued subagent work drains", max_chars=max_chars,
+        )
+
+    queue_dir, queue_path = _queued_dispatch_paths(record.get("run_id"))
+    os.makedirs(queue_dir, exist_ok=True)
+    queued_at = time.time()
+    task = {
+        "run_id": record.get("run_id", ""),
+        "status": "queued",
+        "queued_at": queued_at,
+        "persona_key": record.get("persona_key", ""),
+        "goal": record.get("goal", ""),
+        "tool_subset": list(tool_names or []),
+        "max_turns": max_turns,
+        "max_chars": max_chars,
+        "task_contract": dict(record.get("task_contract") or {}),
+        "cancel_file": _SUBAGENT_CANCEL_FILE,
+    }
+    queue_digest = _json_atomic_write(queue_path, task)
+    record["queue_path"] = queue_path
+    record["queue_sha256"] = queue_digest
+    record["queued_at"] = queued_at
+    summary = f"subagent dispatch queued for async worker: {queue_path}"
+    _finish_run_record(record, "queued", summary)
+    return _structured_return(
+        summary, record, status="queued", uncertainty="medium",
+        next_action="async worker should claim queue_path or parent may cancel via cancel_file",
+        max_chars=max_chars,
+    )
 
 
 def _rate_limit_state_path(label):
@@ -682,6 +761,9 @@ def _structured_return(summary, record=None, status="ok", uncertainty="low",
         "transcript_sha256": (record or {}).get("transcript_sha256", ""),
         "status": status,
     }
+    if (record or {}).get("queue_path"):
+        payload["queue_path"] = (record or {}).get("queue_path", "")
+        payload["queue_sha256"] = (record or {}).get("queue_sha256", "")
     if token_usage:
         payload["worker_token_usage"] = token_usage
     text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
@@ -1848,6 +1930,18 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
             str(e), persona_key, objective, bounded_chars,
             record_status="persona_prompt_invalid", task_contract=task_contract,
         )
+
+    if _queue_only_enabled():
+        queued_record = _new_run_record(persona_key, objective)
+        queued_record["task_contract"] = dict(task_contract)
+        if _cancel_requested():
+            _finish_run_record(queued_record, "cancelled", "subagent cancellation token present before queue")
+            return _structured_return(
+                "subagent cancellation token present before queue", queued_record,
+                status="cancelled", uncertainty="low", next_action="return to parent",
+                max_chars=bounded_chars,
+            )
+        return _enqueue_dispatch_record(queued_record, tool_names, bounded_turns, bounded_chars)
 
     # 5. Resolve provider
     try:

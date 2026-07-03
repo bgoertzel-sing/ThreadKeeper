@@ -35,6 +35,7 @@ def test_env_numeric_knobs_fallback_and_clamp_on_reload(monkeypatch):
         "OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEMS": "-2",
         "OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEM_CHARS": "0",
         "OMEGACLAW_SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS": "0",
+        "OMEGACLAW_SUBAGENT_MAX_QUEUED_DISPATCHES": "-4",
     }
     for name, value in bad_values.items():
         monkeypatch.setenv(name, value)
@@ -56,6 +57,7 @@ def test_env_numeric_knobs_fallback_and_clamp_on_reload(monkeypatch):
     assert reloaded._SUBAGENT_MAX_CONTRACT_ITEMS == 0
     assert reloaded._SUBAGENT_MAX_CONTRACT_ITEM_CHARS == 1
     assert reloaded._SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS == 1
+    assert reloaded._SUBAGENT_MAX_QUEUED_DISPATCHES == 0
 
     monkeypatch.undo()
     importlib.reload(subagent)
@@ -677,6 +679,53 @@ def test_task_contract_patch_proposal_only_must_be_boolean_before_llm(tmp_path, 
     assert "patch_proposal_only" in payload["summary"]
     saved = json.loads(Path(payload["transcript_path"]).read_text())
     assert saved["status"] == "contract_invalid"
+
+
+def test_queue_only_dispatch_persists_task_without_worker_llm(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_QUEUE_ONLY", "1")
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_QUEUED_DISPATCHES", 4)
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")),
+    )
+
+    payload = json.loads(subagent.dispatch("queue this safely", "write-file", "unit", max_turns=2))
+
+    assert payload["status"] == "queued"
+    assert payload["queue_path"].endswith(".json")
+    queued = json.loads(Path(payload["queue_path"]).read_text())
+    assert queued["status"] == "queued"
+    assert queued["goal"] == "queue this safely"
+    assert queued["tool_subset"] == ["write-file"]
+    assert queued["max_turns"] == 2
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["status"] == "queued"
+    assert saved["queue_path"] == payload["queue_path"]
+    assert len(payload["queue_sha256"]) == 64
+
+
+def test_queue_only_dispatch_backpressure_fails_before_worker_llm(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    queue_dir = tmp_path / "runs" / "queue"
+    queue_dir.mkdir(parents=True)
+    (queue_dir / "already.json").write_text("{}")
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_QUEUE_ONLY", "1")
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_QUEUED_DISPATCHES", 1)
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")),
+    )
+
+    payload = json.loads(subagent.dispatch("queue overflow", "write-file", "unit", max_turns=1))
+
+    assert payload["status"] == "error"
+    assert "queue backpressure" in payload["summary"]
+    assert "queue_path" not in payload
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["status"] == "queue_backpressure"
 
 
 def test_task_contract_rejects_bad_max_tool_calls_before_llm(tmp_path, monkeypatch):
