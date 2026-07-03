@@ -27,6 +27,7 @@ def test_env_numeric_knobs_fallback_and_clamp_on_reload(monkeypatch):
         "OMEGACLAW_SUBAGENT_LLM_CALLS_PER_MINUTE": "-7",
         "OMEGACLAW_SUBAGENT_MAX_CONCURRENT_LLM_CALLS": "-8",
         "OMEGACLAW_SUBAGENT_MAX_TOOL_CALLS": "-9",
+        "OMEGACLAW_SUBAGENT_MAX_TOOL_CALLS_PER_TURN": "0",
         "OMEGACLAW_SUBAGENT_MAX_PATH_ARG_CHARS": "0",
         "OMEGACLAW_SUBAGENT_MAX_TOOL_ARG_CHARS": "0",
         "OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEMS": "-2",
@@ -46,6 +47,7 @@ def test_env_numeric_knobs_fallback_and_clamp_on_reload(monkeypatch):
     assert reloaded._SUBAGENT_LLM_CALLS_PER_MINUTE == 0
     assert reloaded._SUBAGENT_MAX_CONCURRENT_LLM_CALLS == 0
     assert reloaded._SUBAGENT_MAX_TOOL_CALLS == 0
+    assert reloaded._SUBAGENT_MAX_TOOL_CALLS_PER_TURN == 1
     assert reloaded._SUBAGENT_MAX_PATH_ARG_CHARS == 1
     assert reloaded._SUBAGENT_MAX_TOOL_ARG_CHARS == 1
     assert reloaded._SUBAGENT_MAX_CONTRACT_ITEMS == 0
@@ -474,6 +476,27 @@ def test_tool_quota_stops_dispatch_with_structured_error(tmp_path, monkeypatch):
     assert payload["files_changed"] == ["a.txt"]
     assert (tmp_path / "workspace" / "a.txt").read_text() == "a"
     assert not (tmp_path / "workspace" / "b.txt").exists()
+
+
+def test_per_turn_tool_quota_limits_multi_call_worker_response(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_TOOL_CALLS", 8)
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_TOOL_CALLS_PER_TURN", 1)
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: '(write-file "a.txt" "a")\n(write-file "b.txt" "b")',
+    )
+
+    payload = json.loads(subagent.dispatch("write too much at once", "write-file", "unit", max_turns=2))
+
+    assert payload["status"] == "error"
+    assert "TURN_QUOTA_EXCEEDED" in payload["summary"]
+    assert payload["files_changed"] == ["a.txt"]
+    assert (tmp_path / "workspace" / "a.txt").read_text() == "a"
+    assert not (tmp_path / "workspace" / "b.txt").exists()
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["status"] == "turn_quota_exceeded"
 
 
 def test_cancel_file_stops_dispatch_before_llm(tmp_path, monkeypatch):

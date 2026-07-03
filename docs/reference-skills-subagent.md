@@ -106,7 +106,9 @@ denial reason. Errors are never raised into the parent's MeTTa interpreter.
   parent digest returns the same transcript hash for audit checks.
 - The subagent cannot call `send`, `remember`, `pin`, `metta`,
   `query`, `episodes`, or `delegate` in v1 (excluded by design —
-  see §4.5.2 of the design doc). If `shell` is explicitly enabled,
+  see §4.5.2 of the design doc). Tool execution is capped both per dispatch
+  and per worker response, so one malformed turn cannot spend the whole quota
+  in a single batch. If `shell` is explicitly enabled,
   it still uses argv-list execution (`shell=False`), an executable
   allowlist, command-name-only executable tokens (no explicit paths), a
   minimal child environment (no inherited API keys/tokens), a sanitized `PATH`
@@ -142,6 +144,7 @@ clamped instead of crashing the module or disabling guards accidentally.
 | `OMEGACLAW_SUBAGENT_LLM_CALLS_PER_MINUTE` | `60` | Per-endpoint worker LLM calls/minute cap; `0` disables locally. |
 | `OMEGACLAW_SUBAGENT_MAX_CONCURRENT_LLM_CALLS` | `4` | Per-endpoint cross-process in-flight worker LLM cap; `0` disables locally. |
 | `OMEGACLAW_SUBAGENT_MAX_TOOL_CALLS` | `24` | Per-dispatch tool-call quota; JSON task contracts may narrow this with non-negative `max_tool_calls`. |
+| `OMEGACLAW_SUBAGENT_MAX_TOOL_CALLS_PER_TURN` | `3` | Per-response tool-call batch cap; extra parsed calls return `TURN_QUOTA_EXCEEDED` before execution. |
 | `OMEGACLAW_SUBAGENT_CANCEL_FILE` | unset | If the file exists, dispatch stops with `status=cancelled`. |
 | `OMEGACLAW_SUBAGENT_MAX_PATH_ARG_CHARS` | `512` | Maximum path argument length for file tools. |
 | `OMEGACLAW_SUBAGENT_MAX_TOOL_ARG_CHARS` | `20000` | Maximum string length for any single tool argument. |
@@ -169,4 +172,5 @@ end-to-end walkthrough.
 | Escalation policy denies cloud delegation | Structured JSON `status=error`; `summary` contains `(escalation denied) ...`; transcript status `escalation_denied`. |
 | Subagent endpoint times out / errors | Structured JSON `status=error`; `summary` contains `(subagent LLM call failed: <ExceptionType>: <reason>)`; transcript status `llm_failed`. |
 | Worker mixes `emit` with other parsed calls or multiple emits | Structured JSON `status=error` and `EMIT_PROTOCOL_VIOLATION`; transcript status `emit_protocol_violation`. |
+| Worker response exceeds the per-turn tool-call cap | Structured JSON `status=error`; `summary` contains `TURN_QUOTA_EXCEEDED`; transcript status `turn_quota_exceeded`. |
 | Loop exceeds `max_turns` without `emit` | Structured JSON `status=incomplete`; `summary` contains `(subagent: max_turns (<N>) reached without emit; last_results: <clip>)`; transcript status `max_turns`. |

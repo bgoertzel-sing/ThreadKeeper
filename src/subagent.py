@@ -275,6 +275,7 @@ _SUBAGENT_MAX_CONCURRENT_LLM_CALLS = _env_int("OMEGACLAW_SUBAGENT_MAX_CONCURRENT
 # loops or emits many calls per turn. Cancellation is intentionally file-based
 # so supervisors/parents can stop in-flight work without signals or shared state.
 _SUBAGENT_MAX_TOOL_CALLS = _env_int("OMEGACLAW_SUBAGENT_MAX_TOOL_CALLS", 24, minimum=0)
+_SUBAGENT_MAX_TOOL_CALLS_PER_TURN = _env_int("OMEGACLAW_SUBAGENT_MAX_TOOL_CALLS_PER_TURN", 3, minimum=1)
 _SUBAGENT_CANCEL_FILE = os.environ.get("OMEGACLAW_SUBAGENT_CANCEL_FILE", "")
 _SUBAGENT_MAX_PATH_ARG_CHARS = _env_int("OMEGACLAW_SUBAGENT_MAX_PATH_ARG_CHARS", 512, minimum=1)
 _SUBAGENT_MAX_TOOL_ARG_CHARS = _env_int("OMEGACLAW_SUBAGENT_MAX_TOOL_ARG_CHARS", 20000, minimum=1)
@@ -1497,11 +1498,19 @@ def run_tools(calls, allowed_names, record=None, quota=None, task_contract=None)
     reg = _tool_registry()
     out_parts = []
     remaining = None if quota is None else max(0, int(quota))
+    turn_calls_seen = 0
+    per_turn_limit = max(1, int(_SUBAGENT_MAX_TOOL_CALLS_PER_TURN))
     for (name, args) in calls:
         if _cancel_requested():
             out_parts.append("(CANCELLED: subagent cancellation token present)")
             break
         if name != "emit":
+            turn_calls_seen += 1
+            if turn_calls_seen > per_turn_limit:
+                out_parts.append(
+                    f"(TURN_QUOTA_EXCEEDED: subagent tool-call per-turn limit {per_turn_limit} exhausted)"
+                )
+                break
             if remaining is not None and remaining <= 0:
                 out_parts.append("(QUOTA_EXCEEDED: subagent tool-call quota exhausted)")
                 break
@@ -1810,7 +1819,8 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
         if "QUOTA_EXCEEDED" in last_results:
             turn_record["tool_results"] = last_results
             run_record.setdefault("turns", []).append(turn_record)
-            _finish_run_record(run_record, "quota_exceeded", last_results)
+            record_status = "turn_quota_exceeded" if "TURN_QUOTA_EXCEEDED" in last_results else "quota_exceeded"
+            _finish_run_record(run_record, record_status, last_results)
             return _structured_return(
                 last_results, run_record, status="error", uncertainty="medium",
                 next_action="dispatch with a narrower task or higher explicit quota",
