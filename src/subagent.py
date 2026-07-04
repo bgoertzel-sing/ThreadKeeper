@@ -366,7 +366,7 @@ def _json_atomic_write(path, data):
 
 
 def _write_transcript_integrity_sidecar(path, digest):
-    """Write a small checksum sidecar for local transcript audit checks."""
+    """Write a small checksum sidecar for local transcript/audit checks."""
     if not path or not digest:
         return ""
     sidecar = f"{path}.sha256"
@@ -389,6 +389,21 @@ def _write_transcript_integrity_sidecar(path, digest):
                 os.unlink(tmp)
         except Exception:
             pass
+
+
+def _read_integrity_sidecar_digest(path):
+    """Read and validate a required ``<path>.sha256`` audit sidecar."""
+    sidecar = f"{path}.sha256"
+    try:
+        with open(sidecar, "r", encoding="utf-8") as f:
+            digest = f.read().strip().split()[0]
+    except FileNotFoundError:
+        raise ValueError(f"missing integrity sidecar: {sidecar}")
+    except IndexError:
+        raise ValueError(f"empty integrity sidecar: {sidecar}")
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError(f"invalid integrity sidecar digest: {sidecar}")
+    return digest
 
 
 def _index_entry_hash(entry):
@@ -618,8 +633,10 @@ def _enqueue_dispatch_record(record, tool_names, max_turns, max_chars):
         "cancel_file": _SUBAGENT_CANCEL_FILE,
     }
     queue_digest = _json_atomic_write(queue_path, task)
+    queue_sidecar = _write_transcript_integrity_sidecar(queue_path, queue_digest)
     record["queue_path"] = queue_path
     record["queue_sha256"] = queue_digest
+    record["queue_sha256_path"] = queue_sidecar
     record["queued_at"] = queued_at
     summary = f"subagent dispatch queued for async worker: {queue_path}"
     _finish_run_record(record, "queued", summary)
@@ -850,6 +867,7 @@ def run_queued_dispatch(queue_path):
     task_path = None
     claimed_path = None
     task_sha256 = None
+    expected_task_sha256 = None
     try:
         task_path = _resolve_queue_task_path(queue_path)
         claimed_path = f"{task_path}.claimed"
@@ -857,7 +875,14 @@ def run_queued_dispatch(queue_path):
             os.replace(task_path, claimed_path)
         except FileNotFoundError:
             raise ValueError(f"queued dispatch task not found: {task_path}")
+        expected_task_sha256 = _read_integrity_sidecar_digest(task_path)
         task, task_sha256 = _read_json_file(claimed_path)
+        if task_sha256 != expected_task_sha256:
+            raise ValueError("queued dispatch task checksum mismatch")
+        try:
+            os.unlink(f"{task_path}.sha256")
+        except FileNotFoundError:
+            pass
         goal, tool_subset_csv, persona_key, max_turns, max_chars, task_contract = _validate_queued_dispatch_task(task)
         dispatch_goal = json.dumps({
             "objective": goal,
@@ -886,6 +911,7 @@ def run_queued_dispatch(queue_path):
         done_path = f"{task_path}.done"
         os.replace(claimed_path, done_path)
         result_record["task_done_path"] = done_path
+        result_record["task_sha256_path"] = _write_transcript_integrity_sidecar(done_path, task_sha256)
         result_sha256 = _json_atomic_write(f"{done_path}.result.json", result_record)
         result_record["result_sha256"] = result_sha256
         return json.dumps(result_record, ensure_ascii=False, sort_keys=True)
@@ -900,11 +926,19 @@ def run_queued_dispatch(queue_path):
             error_record["claimed_path"] = claimed_path
         if task_sha256:
             error_record["task_sha256"] = task_sha256
+        if expected_task_sha256:
+            error_record["expected_task_sha256"] = expected_task_sha256
         if claimed_path and os.path.exists(claimed_path):
             failed_path = f"{task_path}.failed"
             try:
                 os.replace(claimed_path, failed_path)
                 error_record["task_failed_path"] = failed_path
+                if task_sha256:
+                    error_record["task_sha256_path"] = _write_transcript_integrity_sidecar(failed_path, task_sha256)
+                try:
+                    os.unlink(f"{task_path}.sha256")
+                except FileNotFoundError:
+                    pass
                 result_sha256 = _json_atomic_write(f"{failed_path}.result.json", error_record)
                 error_record["result_sha256"] = result_sha256
             except Exception as retain_error:
@@ -1144,6 +1178,8 @@ def _structured_return(summary, record=None, status="ok", uncertainty="low",
     if (record or {}).get("queue_path"):
         payload["queue_path"] = (record or {}).get("queue_path", "")
         payload["queue_sha256"] = (record or {}).get("queue_sha256", "")
+        if (record or {}).get("queue_sha256_path"):
+            payload["queue_sha256_path"] = (record or {}).get("queue_sha256_path", "")
     adjudication = (record or {}).get("adjudication")
     if adjudication:
         payload["adjudication"] = {

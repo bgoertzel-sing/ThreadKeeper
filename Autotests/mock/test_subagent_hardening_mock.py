@@ -841,6 +841,8 @@ def test_queue_only_dispatch_persists_task_without_worker_llm(tmp_path, monkeypa
     assert saved["status"] == "queued"
     assert saved["queue_path"] == payload["queue_path"]
     assert len(payload["queue_sha256"]) == 64
+    assert Path(payload["queue_sha256_path"]).exists()
+    assert Path(payload["queue_sha256_path"]).read_text().startswith(payload["queue_sha256"])
 
 
 def test_run_queued_dispatch_claims_task_and_runs_once(tmp_path, monkeypatch):
@@ -868,6 +870,9 @@ def test_run_queued_dispatch_claims_task_and_runs_once(tmp_path, monkeypatch):
     assert not queue_path.exists()
     assert Path(result["task_done_path"]).exists()
     assert Path(result["task_done_path"] + ".result.json").exists()
+    assert Path(result["task_sha256_path"]).exists()
+    assert Path(result["task_sha256_path"]).read_text().startswith(payload["queue_sha256"])
+    assert not Path(str(queue_path) + ".sha256").exists()
     assert os.environ.get("OMEGACLAW_SUBAGENT_QUEUE_ONLY") == "1"
 
 
@@ -936,7 +941,8 @@ def test_run_queued_dispatch_retains_failed_claim_for_audit(tmp_path, monkeypatc
     queue_path = Path(payload["queue_path"])
     queued = json.loads(queue_path.read_text())
     queued["tool_subset"] = []
-    queue_path.write_text(json.dumps(queued), encoding="utf-8")
+    digest = subagent._json_atomic_write(str(queue_path), queued)
+    subagent._write_transcript_integrity_sidecar(str(queue_path), digest)
     monkeypatch.setattr(
         subagent,
         "_call_subagent_llm",
@@ -956,6 +962,55 @@ def test_run_queued_dispatch_retains_failed_claim_for_audit(tmp_path, monkeypatc
     assert len(result["result_sha256"]) == 64
     assert subagent._pending_queued_dispatch_paths() == []
     assert subagent._pending_dispatch_queue_count() == 0
+
+
+def test_run_queued_dispatch_rejects_checksum_mismatch_before_worker_llm(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_QUEUE_ONLY", "1")
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_QUEUED_DISPATCHES", 4)
+    payload = json.loads(subagent.dispatch("queue then tamper", "write-file", "unit", max_turns=2))
+    queue_path = Path(payload["queue_path"])
+    queued = json.loads(queue_path.read_text())
+    queued["goal"] = "tampered before worker"
+    queue_path.write_text(json.dumps(queued), encoding="utf-8")
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")),
+    )
+
+    result = json.loads(subagent.run_queued_dispatch(str(queue_path)))
+
+    assert result["status"] == "queue_worker_error"
+    assert "checksum mismatch" in result["summary"]
+    assert result["expected_task_sha256"] == payload["queue_sha256"]
+    assert result["task_sha256"] != payload["queue_sha256"]
+    assert not queue_path.exists()
+    failed_path = Path(str(queue_path) + ".failed")
+    assert failed_path.exists()
+    assert Path(str(failed_path) + ".sha256").exists()
+    assert not Path(str(queue_path) + ".sha256").exists()
+
+
+def test_run_queued_dispatch_rejects_missing_checksum_sidecar_before_worker_llm(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_QUEUE_ONLY", "1")
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_QUEUED_DISPATCHES", 4)
+    payload = json.loads(subagent.dispatch("queue missing sidecar", "write-file", "unit", max_turns=2))
+    queue_path = Path(payload["queue_path"])
+    Path(payload["queue_sha256_path"]).unlink()
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")),
+    )
+
+    result = json.loads(subagent.run_queued_dispatch(str(queue_path)))
+
+    assert result["status"] == "queue_worker_error"
+    assert "missing integrity sidecar" in result["summary"]
+    assert not queue_path.exists()
+    assert Path(str(queue_path) + ".failed").exists()
 
 
 def test_drain_queued_dispatches_is_bounded_and_preserves_queue_only_env(tmp_path, monkeypatch):

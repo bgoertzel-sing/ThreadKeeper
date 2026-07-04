@@ -89,19 +89,22 @@ When `OMEGACLAW_SUBAGENT_QUEUE_ONLY=1`, dispatch performs setup/contract/tool
 validation and persists a durable task record under
 `OMEGACLAW_SUBAGENT_RUN_DIR/queue/` instead of initializing or calling the
 worker LLM. This is the first async/backpressure primitive: the parent receives
-`status="queued"`, `queue_path`, `queue_sha256`, and a normal transcript; a
-separate local supervisor can later claim the queued task. If the queue already
-has `OMEGACLAW_SUBAGENT_MAX_QUEUED_DISPATCHES` pending JSON tasks, dispatch
-fails closed with transcript status `queue_backpressure` before any worker call.
+`status="queued"`, `queue_path`, `queue_sha256`, `queue_sha256_path`, and a
+normal transcript; a separate local supervisor can later claim the queued task.
+If the queue already has `OMEGACLAW_SUBAGENT_MAX_QUEUED_DISPATCHES` pending JSON
+tasks, dispatch fails closed with transcript status `queue_backpressure` before
+any worker call.
 The Python helper `subagent.run_queued_dispatch(queue_path)` is the current
-single-task worker primitive: it atomically claims one queued task, revalidates
-the task shape and task contract, re-injects that contract into the synchronous
-dispatch goal while queue-only mode is suppressed, writes a compact
-`*.result.json`, and leaves the task as `*.done` for audit instead of silently
-re-running it. If validation or execution fails after a task has been claimed,
-the helper retains the claimed task as
-`*.failed` and writes `*.failed.result.json` so malformed queued records do not
-vanish into a limbo state.
+single-task worker primitive: it atomically claims one queued task, verifies the
+required queue-task `.sha256` sidecar, revalidates the task shape and task
+contract, re-injects that contract into the synchronous dispatch goal while
+queue-only mode is suppressed, writes a compact `*.result.json`, and leaves the
+task as `*.done` plus a refreshed `.sha256` sidecar for audit instead of
+silently re-running it. If checksum, validation, or execution fails after a task
+has been claimed, the helper retains the claimed task as `*.failed`, writes a
+fresh `.sha256` sidecar for the retained bytes when possible, and writes
+`*.failed.result.json` so malformed or tampered queued records do not vanish
+into a limbo state.
 `subagent.drain_queued_dispatches(max_tasks=1)` is the bounded
 operator-supervised wrapper: each call drains at most `max_tasks` pending queue
 records in oldest-first order and returns compact JSON metadata. It deliberately
@@ -242,9 +245,10 @@ end-to-end walkthrough.
 | Task contract is oversized, path-escaping, uses unsafe action identifiers, or has invalid `max_tool_calls` / `patch_proposal_only` | Structured JSON `status=error`; `summary` contains `(subagent error: task contract <reason>)`; transcript status `contract_invalid`. |
 | Task contract enables `patch_proposal_only` and worker calls `write-file` / `append-file` | Workspace file is not changed; transcript records full `patch_proposals`; parent digest includes bounded proposal metadata. |
 | Task contract enables `requires_adjudication` and worker emits a final answer | Structured JSON `status=needs_adjudication`; digest includes bounded `adjudication` metadata (`required`, `status`, `candidate_summary`); transcript status `adjudication_required`. |
-| Queue-only mode accepts a dispatch | Structured JSON `status=queued`; digest includes `queue_path`/`queue_sha256`; transcript status `queued`; no worker LLM call is attempted. |
+| Queue-only mode accepts a dispatch | Structured JSON `status=queued`; digest includes `queue_path`/`queue_sha256`/`queue_sha256_path`; transcript status `queued`; no worker LLM call is attempted. |
 | Queue-only mode is at capacity | Structured JSON `status=error`; `summary` contains `queue backpressure`; transcript status `queue_backpressure`; no worker LLM call is attempted. |
 | Queued worker sees an escaping task path | `run_queued_dispatch(...)` returns JSON `status=queue_worker_error`; no worker LLM call is attempted. |
+| Queued worker sees a missing/mismatched queue-task checksum sidecar after claiming a task | `run_queued_dispatch(...)` returns JSON `status=queue_worker_error`; claimed task is retained as `*.failed` with a fresh checksum sidecar when possible; no worker LLM call is attempted. |
 | Queued worker sees bad queued JSON/shape after claiming a task | `run_queued_dispatch(...)` returns JSON `status=queue_worker_error`; claimed task is retained as `*.failed` with `*.failed.result.json`; no worker LLM call is attempted for validation failures. |
 | Escalation policy denies cloud delegation | Structured JSON `status=error`; `summary` contains `(escalation denied) ...`; transcript status `escalation_denied`. |
 | Subagent endpoint times out / errors | Structured JSON `status=error`; `summary` contains `(subagent LLM call failed: <ExceptionType>: <reason>)`; transcript status `llm_failed`. |
