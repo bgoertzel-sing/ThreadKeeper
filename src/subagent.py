@@ -854,19 +854,13 @@ def _validate_queued_dispatch_task(task):
         if not isinstance(tool_name, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", tool_name):
             raise ValueError("queued dispatch task tool names must be safe identifiers")
     raw_max_turns = task.get("max_turns", SUBAGENT_MAX_TURNS_HARD_CAP)
-    if isinstance(raw_max_turns, bool):
+    if isinstance(raw_max_turns, bool) or not isinstance(raw_max_turns, int):
         raise ValueError("queued dispatch task max_turns must be an integer")
-    try:
-        max_turns = int(raw_max_turns)
-    except (TypeError, ValueError):
-        raise ValueError("queued dispatch task max_turns must be an integer")
+    max_turns = raw_max_turns
     raw_max_chars = task.get("max_chars", SUBAGENT_MAX_DIGEST_CHARS)
-    if isinstance(raw_max_chars, bool):
+    if isinstance(raw_max_chars, bool) or not isinstance(raw_max_chars, int):
         raise ValueError("queued dispatch task max_chars must be an integer")
-    try:
-        max_chars = int(raw_max_chars)
-    except (TypeError, ValueError):
-        raise ValueError("queued dispatch task max_chars must be an integer")
+    max_chars = raw_max_chars
     task_contract = task.get("task_contract") or {}
     if not isinstance(task_contract, dict):
         raise ValueError("queued dispatch task task_contract must be a JSON object")
