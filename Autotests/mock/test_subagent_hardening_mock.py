@@ -32,6 +32,8 @@ def test_env_numeric_knobs_fallback_and_clamp_on_reload(monkeypatch):
         "OMEGACLAW_SUBAGENT_MAX_PATH_ARG_CHARS": "0",
         "OMEGACLAW_SUBAGENT_MAX_TOOL_ARG_CHARS": "0",
         "OMEGACLAW_SUBAGENT_SHELL_MAX_ARGV": "0",
+        "OMEGACLAW_SUBAGENT_SHELL_OUTPUT_CAP": "0",
+        "OMEGACLAW_SUBAGENT_SHELL_TIMEOUT_S": "bad-float",
         "OMEGACLAW_SUBAGENT_MAX_READ_FILE_CHARS": "0",
         "OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEMS": "-2",
         "OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEM_CHARS": "0",
@@ -55,6 +57,8 @@ def test_env_numeric_knobs_fallback_and_clamp_on_reload(monkeypatch):
     assert reloaded._SUBAGENT_MAX_PATH_ARG_CHARS == 1
     assert reloaded._SUBAGENT_MAX_TOOL_ARG_CHARS == 1
     assert reloaded._SHELL_MAX_ARGV == 1
+    assert reloaded._SHELL_OUTPUT_CAP == 1
+    assert reloaded._SHELL_TIMEOUT_S == 30.0
     assert reloaded._SUBAGENT_MAX_READ_FILE_CHARS == 1
     assert reloaded._SUBAGENT_MAX_CONTRACT_ITEMS == 0
     assert reloaded._SUBAGENT_MAX_CONTRACT_ITEM_CHARS == 1
@@ -275,6 +279,18 @@ def test_shell_tool_does_not_inherit_secret_environment(tmp_path, monkeypatch):
     assert "UNIT_API_KEY" not in result
     assert f"HOME={tmp_path}" in result
     assert "PATH=" in result
+
+
+def test_shell_tool_output_is_bounded_with_marker(tmp_path, monkeypatch):
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_ENABLE_SHELL", "1")
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_SHELL_ALLOWLIST", "printf")
+    monkeypatch.setattr(subagent, "_SHELL_OUTPUT_CAP", 5)
+
+    result = subagent._tool_shell("printf abcdefghij")
+
+    assert result.startswith("abcde\n...(shell output truncated at 5 chars)...")
+    assert "fghij" not in result
 
 
 def test_history_is_bounded_and_evicted_turns_are_digested(monkeypatch):

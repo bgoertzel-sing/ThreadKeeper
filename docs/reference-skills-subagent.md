@@ -183,8 +183,8 @@ denial reason. Errors are never raised into the parent's MeTTa interpreter.
   allowlist, command-name-only executable tokens (no explicit paths), a
   minimal child environment (no inherited API keys/tokens), a sanitized `PATH`
   that excludes the workspace/current directory, no stdin, bounded argv count,
-  bounded output/timeout, and `cwd` fixed to
-  `OMEGACLAW_SUBAGENT_WORKSPACE`.
+  defensively parsed output/timeout caps, explicit truncation markers, and `cwd`
+  fixed to `OMEGACLAW_SUBAGENT_WORKSPACE`.
 - The subagent persona config must reference an API key via an
   env-var name; key material is never read from the config file
   itself. OpenAI-compatible endpoints also require the local OpenAI
@@ -221,6 +221,8 @@ clamped instead of crashing the module or disabling guards accidentally.
 | `OMEGACLAW_SUBAGENT_MAX_PATH_ARG_CHARS` | `512` | Maximum path argument length for file tools. |
 | `OMEGACLAW_SUBAGENT_MAX_TOOL_ARG_CHARS` | `20000` | Maximum string length for any single tool argument. |
 | `OMEGACLAW_SUBAGENT_SHELL_MAX_ARGV` | `32` | Maximum argv token count for the optional allowlisted `shell` tool. |
+| `OMEGACLAW_SUBAGENT_SHELL_OUTPUT_CAP` | `4000` | Maximum combined stdout/stderr characters returned by one optional shell call before a truncation marker is appended. |
+| `OMEGACLAW_SUBAGENT_SHELL_TIMEOUT_S` | `30.0` | Timeout in seconds for one optional shell subprocess; below-minimum or malformed values use a safe bounded value. |
 | `OMEGACLAW_SUBAGENT_MAX_READ_FILE_CHARS` | `20000` | Maximum text returned by one subagent `read-file` call before a truncation marker is appended. |
 | `OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEMS` | `32` | Maximum entries in each task-contract list field. |
 | `OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEM_CHARS` | `512` | Maximum length of each task-contract list item. |
@@ -255,6 +257,7 @@ end-to-end walkthrough.
 | Subagent endpoint times out / errors | Structured JSON `status=error`; `summary` contains `(subagent LLM call failed: <ExceptionType>: <reason>)`; transcript status `llm_failed`. |
 | Worker mixes `emit` with other parsed calls or multiple emits | Structured JSON `status=error` and `EMIT_PROTOCOL_VIOLATION`; transcript status `emit_protocol_violation`. |
 | Worker response exceeds the per-turn tool-call cap | Structured JSON `status=error`; `summary` contains `TURN_QUOTA_EXCEEDED`; transcript status `turn_quota_exceeded`. |
+| Optional `shell` output exceeds `OMEGACLAW_SUBAGENT_SHELL_OUTPUT_CAP` | Tool result is truncated in the worker context with an explicit `(shell output truncated at <N> chars)` marker. |
 | `read-file` target is larger than `OMEGACLAW_SUBAGENT_MAX_READ_FILE_CHARS` | Tool result is truncated in the worker context with an explicit `(read-file truncated at <N> chars)` marker. |
 | Loop exceeds `max_turns` without `emit` | Structured JSON `status=incomplete`; `summary` contains `(subagent: max_turns (<N>) reached without emit; last_results: <clip>)`; transcript status `max_turns`. |
 | Dispatch exceeds `OMEGACLAW_SUBAGENT_DISPATCH_TIMEOUT_S` wall-clock limit | Structured JSON `status=error`; `summary` contains `(subagent: dispatch wall-clock timeout (<N>s) exceeded at turn <T>)`; transcript status `dispatch_timeout`. |

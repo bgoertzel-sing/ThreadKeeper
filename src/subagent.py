@@ -260,8 +260,8 @@ _SUBAGENT_HISTORY_MAX_TURNS = _env_int("OMEGACLAW_SUBAGENT_HISTORY_MAX_TURNS", 6
 # Shell tool restrictions. Subagent's shell is more restricted than
 # parent's — disabled by default, optional executable allowlist, no shell=True,
 # output truncated, default 30s timeout.
-_SHELL_OUTPUT_CAP = 4000
-_SHELL_TIMEOUT_S = 30
+_SHELL_OUTPUT_CAP = _env_int("OMEGACLAW_SUBAGENT_SHELL_OUTPUT_CAP", 4000, minimum=1)
+_SHELL_TIMEOUT_S = _env_float("OMEGACLAW_SUBAGENT_SHELL_TIMEOUT_S", 30.0, minimum=1.0)
 _SHELL_MAX_ARGV = _env_int("OMEGACLAW_SUBAGENT_SHELL_MAX_ARGV", 32, minimum=1)
 
 # Subagent LLM call reliability controls. Keep defaults bounded so a stuck
@@ -2054,7 +2054,9 @@ def _tool_shell(cmd):
         )
         text = (out.stdout or b"").decode("utf-8", errors="replace")
         text += (out.stderr or b"").decode("utf-8", errors="replace")
-        return text[:_SHELL_OUTPUT_CAP]
+        if len(text) > _SHELL_OUTPUT_CAP:
+            return text[:_SHELL_OUTPUT_CAP] + f"\n...(shell output truncated at {_SHELL_OUTPUT_CAP} chars)..."
+        return text
     except subprocess.TimeoutExpired:
         return f"(shell error: timed out after {_SHELL_TIMEOUT_S}s)"
     except Exception as e:
