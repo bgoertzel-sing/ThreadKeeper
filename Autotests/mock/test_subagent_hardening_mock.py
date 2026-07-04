@@ -1140,6 +1140,34 @@ def test_run_queued_dispatch_rejects_missing_checksum_sidecar_before_worker_llm(
     assert Path(str(queue_path) + ".failed").exists()
 
 
+def test_run_queued_dispatch_preserves_task_cancel_file_before_worker_llm(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    cancel_file = tmp_path / "cancel.token"
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_QUEUE_ONLY", "1")
+    monkeypatch.setattr(subagent, "_SUBAGENT_CANCEL_FILE", str(cancel_file))
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_QUEUED_DISPATCHES", 4)
+    payload = json.loads(subagent.dispatch("queue then cancel", "write-file", "unit", max_turns=2))
+    queue_path = Path(payload["queue_path"])
+    cancel_file.write_text("cancel")
+    monkeypatch.setattr(subagent, "_SUBAGENT_CANCEL_FILE", "")
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")),
+    )
+
+    result = json.loads(subagent.run_queued_dispatch(str(queue_path)))
+
+    assert result["status"] == "cancelled"
+    assert result["result"]["status"] == "cancelled"
+    assert result["result"]["transcript_path"]
+    saved = json.loads(Path(result["result"]["transcript_path"]).read_text())
+    assert saved["status"] == "cancelled"
+    assert subagent._SUBAGENT_CANCEL_FILE == ""
+    assert not queue_path.exists()
+    assert Path(str(queue_path) + ".done").exists()
+
+
 def test_drain_queued_dispatches_is_bounded_and_preserves_queue_only_env(tmp_path, monkeypatch):
     _write_unit_persona(tmp_path, monkeypatch)
     monkeypatch.setenv("OMEGACLAW_SUBAGENT_QUEUE_ONLY", "1")

@@ -871,7 +871,7 @@ def _validate_queued_dispatch_task(task):
         raise ValueError(f"queued dispatch task contract invalid: {contract_error}")
     max_turns = max(1, min(max_turns, SUBAGENT_MAX_TURNS_HARD_CAP))
     max_chars = max(100, min(max_chars, SUBAGENT_MAX_DIGEST_CHARS))
-    return goal, ",".join(tool_subset), persona_key, max_turns, max_chars, task_contract
+    return goal, ",".join(tool_subset), persona_key, max_turns, max_chars, task_contract, cancel_file
 
 
 def run_queued_dispatch(queue_path):
@@ -906,15 +906,19 @@ def run_queued_dispatch(queue_path):
             os.unlink(f"{task_path}.sha256")
         except FileNotFoundError:
             pass
-        goal, tool_subset_csv, persona_key, max_turns, max_chars, task_contract = _validate_queued_dispatch_task(task)
+        goal, tool_subset_csv, persona_key, max_turns, max_chars, task_contract, cancel_file = _validate_queued_dispatch_task(task)
         dispatch_goal = json.dumps({
             "objective": goal,
             "task_contract": task_contract,
         }, ensure_ascii=False, sort_keys=True)
         previous_queue_only = os.environ.pop("OMEGACLAW_SUBAGENT_QUEUE_ONLY", None)
+        previous_cancel_file = globals().get("_SUBAGENT_CANCEL_FILE", "")
+        if cancel_file:
+            globals()["_SUBAGENT_CANCEL_FILE"] = cancel_file
         try:
             result_text = dispatch(dispatch_goal, tool_subset_csv, persona_key, max_turns=max_turns, max_chars=max_chars)
         finally:
+            globals()["_SUBAGENT_CANCEL_FILE"] = previous_cancel_file
             if previous_queue_only is not None:
                 os.environ["OMEGACLAW_SUBAGENT_QUEUE_ONLY"] = previous_queue_only
         try:
