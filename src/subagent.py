@@ -733,6 +733,31 @@ def _worker_loop_lock_path():
     return os.path.join(SUBAGENT_RUN_DIR, ".async-worker.lock")
 
 
+def _write_worker_loop_lock_metadata(lock, metadata):
+    """Best-effort JSON metadata for operator visibility while the lock is held."""
+    try:
+        lock.seek(0)
+        lock.truncate()
+        lock.write(json.dumps(metadata, ensure_ascii=False, sort_keys=True))
+        lock.write("\n")
+        lock.flush()
+        os.fsync(lock.fileno())
+    except Exception:
+        pass
+
+
+def _read_worker_loop_lock_metadata(lock_path):
+    try:
+        with open(lock_path, "r", encoding="utf-8") as f:
+            raw = f.read(4096).strip()
+        if not raw:
+            return {}
+        value = json.loads(raw)
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+
+
 def _coerce_worker_limit(value, default, minimum=0, maximum=None):
     if value is None:
         value = default
@@ -827,10 +852,21 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
                     "status": "worker_already_running",
                     "summary": "queued subagent async worker loop is already running",
                     "lock_path": lock_path,
+                    "worker_lock": _read_worker_loop_lock_metadata(lock_path),
                     "tasks_attempted": 0,
                     "tasks_completed": 0,
                     "remaining_queue_tasks": len(_pending_queued_dispatch_paths()),
                 }, ensure_ascii=False, sort_keys=True)
+        _write_worker_loop_lock_metadata(lock, {
+            "pid": os.getpid(),
+            "started_at": started_at,
+            "status": "running",
+            "run_dir": SUBAGENT_RUN_DIR,
+            "max_tasks": task_limit,
+            "max_idle_polls": idle_limit,
+            "max_runtime_s": runtime_limit,
+            "stop_file": stop_path,
+        })
         try:
             while task_limit <= 0 or tasks_attempted < task_limit:
                 if _worker_stop_requested(stop_path):
@@ -862,6 +898,14 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
             if not stop_reason:
                 stop_reason = "max_tasks"
         finally:
+            _write_worker_loop_lock_metadata(lock, {
+                "pid": os.getpid(),
+                "started_at": started_at,
+                "finished_at": time.time(),
+                "status": "finished",
+                "stop_reason": stop_reason or "unknown",
+                "tasks_attempted": tasks_attempted,
+            })
             if fcntl is not None:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
@@ -884,6 +928,7 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
         "max_idle_polls": idle_limit,
         "max_runtime_s": runtime_limit,
         "stop_file": stop_path,
+        "lock_path": lock_path,
         "tasks_attempted": tasks_attempted,
         "tasks_completed": tasks_completed,
         "remaining_queue_tasks": remaining,

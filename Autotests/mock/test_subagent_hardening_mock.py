@@ -1279,6 +1279,12 @@ def test_run_queued_worker_loop_rejects_concurrent_local_loop(tmp_path, monkeypa
         if subagent.fcntl is None:
             return
         subagent.fcntl.flock(lock.fileno(), subagent.fcntl.LOCK_EX | subagent.fcntl.LOCK_NB)
+        subagent._write_worker_loop_lock_metadata(lock, {
+            "pid": 12345,
+            "started_at": 111.0,
+            "status": "running",
+            "run_dir": subagent.SUBAGENT_RUN_DIR,
+        })
         try:
             result = json.loads(subagent.run_queued_worker_loop(
                 max_tasks=1, poll_interval_s=0, max_idle_polls=0,
@@ -1288,6 +1294,25 @@ def test_run_queued_worker_loop_rejects_concurrent_local_loop(tmp_path, monkeypa
 
     assert result["status"] == "worker_already_running"
     assert result["tasks_attempted"] == 0
+    assert result["worker_lock"]["status"] == "running"
+    assert result["worker_lock"]["pid"] == 12345
+
+
+def test_run_queued_worker_loop_writes_finished_lock_metadata(tmp_path, monkeypatch):
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr(subagent.time, "sleep", lambda *_args: None)
+
+    result = json.loads(subagent.run_queued_worker_loop(
+        max_tasks=1, poll_interval_s=0, max_idle_polls=0,
+    ))
+    lock_path = Path(result["lock_path"])
+    metadata = json.loads(lock_path.read_text(encoding="utf-8"))
+
+    assert result["status"] == "worker_idle"
+    assert result["stop_reason"] == "idle"
+    assert metadata["status"] == "finished"
+    assert metadata["stop_reason"] == "idle"
+    assert metadata["tasks_attempted"] == 0
 
 
 def test_queue_only_dispatch_backpressure_fails_before_worker_llm(tmp_path, monkeypatch):

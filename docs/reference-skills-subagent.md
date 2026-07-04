@@ -113,9 +113,13 @@ does not daemonize, sleep, poll forever, or auto-start from `dispatch`.
 worker loop: it repeatedly claims pending queue records until an explicit bound
 is reached (`max_tasks`, `max_idle_polls`, `max_runtime_s`, or a `stop_file`).
 The loop uses a best-effort local lock (`.async-worker.lock`) to avoid two local
-workers draining the same queue concurrently when `fcntl` is available. It still
-does not start itself from `dispatch` and is not a service manager; deployments
-must launch it deliberately under their chosen supervisor.
+workers draining the same queue concurrently when `fcntl` is available. While
+held, the lock file contains compact JSON metadata (`pid`, `started_at`, bounds,
+`stop_file`, and status) so a supervisor/operator can distinguish an active
+local worker from a stale prior run; completed loops leave a final `status` /
+`stop_reason` summary in the same file. It still does not start itself from
+`dispatch` and is not a service manager; deployments must launch it deliberately
+under their chosen supervisor.
 
 When a JSON task contract sets `"patch_proposal_only": true`, `write-file` and
 `append-file` calls do not mutate workspace files. Instead they append full
@@ -266,7 +270,7 @@ end-to-end walkthrough.
 | Queued worker sees an escaping task path | `run_queued_dispatch(...)` returns JSON `status=queue_worker_error`; no worker LLM call is attempted. |
 | Queued worker sees a missing/mismatched queue-task checksum sidecar after claiming a task | `run_queued_dispatch(...)` returns JSON `status=queue_worker_error`; claimed task is retained as `*.failed` with a fresh checksum sidecar when possible; no worker LLM call is attempted. |
 | Queued worker sees bad queued JSON/shape after claiming a task | `run_queued_dispatch(...)` returns JSON `status=queue_worker_error`; claimed task is retained as `*.failed` with `*.failed.result.json`; no worker LLM call is attempted for validation failures. |
-| Async worker loop sees an existing worker lock | `run_queued_worker_loop(...)` returns JSON `status=worker_already_running`; no queue record is claimed. |
+| Async worker loop sees an existing worker lock | `run_queued_worker_loop(...)` returns JSON `status=worker_already_running` plus any compact `worker_lock` metadata readable from `.async-worker.lock`; no queue record is claimed. |
 | Async worker loop sees its stop-file token before claiming work | `run_queued_worker_loop(...)` returns JSON `status=worker_stopped`; pending queue records remain pending. |
 | Escalation policy denies cloud delegation | Structured JSON `status=error`; `summary` contains `(escalation denied) ...`; transcript status `escalation_denied`. |
 | Subagent endpoint times out / errors | Structured JSON `status=error`; `summary` contains `(subagent LLM call failed: <ExceptionType>: <reason>)`; transcript status `llm_failed`. |
