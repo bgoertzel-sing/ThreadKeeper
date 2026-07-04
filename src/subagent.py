@@ -811,8 +811,24 @@ def review_subagent_candidate(transcript_path):
 def _validate_queued_dispatch_task(task):
     if not isinstance(task, dict):
         raise ValueError("queued dispatch task must be a JSON object")
+    allowed_keys = {
+        "run_id", "status", "queued_at", "persona_key", "goal", "tool_subset",
+        "max_turns", "max_chars", "task_contract", "cancel_file",
+    }
+    unknown_keys = sorted(set(task) - allowed_keys)
+    if unknown_keys:
+        raise ValueError(f"queued dispatch task has unknown field(s): {unknown_keys}")
     if task.get("status") != "queued":
         raise ValueError("queued dispatch task status must be 'queued'")
+    run_id = task.get("run_id", "")
+    if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,96}", run_id):
+        raise ValueError("queued dispatch task run_id must be a safe bounded identifier")
+    queued_at = task.get("queued_at")
+    if not isinstance(queued_at, (int, float)) or queued_at < 0:
+        raise ValueError("queued dispatch task queued_at must be a non-negative number")
+    cancel_file = task.get("cancel_file", "")
+    if not isinstance(cancel_file, str) or "\x00" in cancel_file or len(cancel_file) > _SUBAGENT_MAX_PATH_ARG_CHARS:
+        raise ValueError("queued dispatch task cancel_file must be a bounded path string")
     goal = task.get("goal")
     persona_key = task.get("persona_key")
     tool_subset = task.get("tool_subset")

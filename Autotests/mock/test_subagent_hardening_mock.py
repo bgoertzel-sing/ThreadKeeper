@@ -993,6 +993,30 @@ def test_run_queued_dispatch_retains_failed_claim_for_audit(tmp_path, monkeypatc
     assert subagent._pending_dispatch_queue_count() == 0
 
 
+def test_run_queued_dispatch_rejects_unexpected_queue_task_fields_before_worker_llm(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_QUEUE_ONLY", "1")
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_QUEUED_DISPATCHES", 4)
+    payload = json.loads(subagent.dispatch("queue strict schema", "write-file", "unit", max_turns=2))
+    queue_path = Path(payload["queue_path"])
+    queued = json.loads(queue_path.read_text())
+    queued["worker_override"] = "unexpected mutable instruction"
+    digest = subagent._json_atomic_write(str(queue_path), queued)
+    subagent._write_transcript_integrity_sidecar(str(queue_path), digest)
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")),
+    )
+
+    result = json.loads(subagent.run_queued_dispatch(str(queue_path)))
+
+    assert result["status"] == "queue_worker_error"
+    assert "unknown field" in result["summary"]
+    assert not queue_path.exists()
+    assert Path(str(queue_path) + ".failed").exists()
+
+
 def test_run_queued_dispatch_rejects_checksum_mismatch_before_worker_llm(tmp_path, monkeypatch):
     _write_unit_persona(tmp_path, monkeypatch)
     monkeypatch.setenv("OMEGACLAW_SUBAGENT_QUEUE_ONLY", "1")
