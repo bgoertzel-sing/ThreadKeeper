@@ -482,6 +482,51 @@ def test_run_index_entries_are_hash_chained(tmp_path, monkeypatch):
     assert entries[1]["entry_sha256"] == subagent._index_entry_hash(entries[1])
 
 
+def test_verify_subagent_run_index_checks_chain_and_transcripts(tmp_path, monkeypatch):
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+    runs = Path(subagent.SUBAGENT_RUN_DIR)
+    runs.mkdir(parents=True)
+    first_transcript = runs / "one.json"
+    second_transcript = runs / "two.json"
+    first_digest = subagent._json_atomic_write(str(first_transcript), {"status": "ok", "run_id": "one"})
+    second_digest = subagent._json_atomic_write(str(second_transcript), {"status": "error", "run_id": "two"})
+
+    subagent._append_run_index({
+        "run_id": "one", "status": "ok",
+        "transcript_path": str(first_transcript), "transcript_sha256": first_digest,
+    })
+    subagent._append_run_index({
+        "run_id": "two", "status": "error",
+        "transcript_path": str(second_transcript), "transcript_sha256": second_digest,
+    })
+
+    audit = json.loads(subagent.verify_subagent_run_index())
+
+    assert audit["status"] == "index_verified"
+    assert audit["entries_checked"] == 2
+    assert audit["transcripts_checked"] == 2
+    assert audit["issue_count"] == 0
+
+
+def test_verify_subagent_run_index_detects_tampering(tmp_path, monkeypatch):
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+    runs = Path(subagent.SUBAGENT_RUN_DIR)
+    runs.mkdir(parents=True)
+    transcript = runs / "one.json"
+    digest = subagent._json_atomic_write(str(transcript), {"status": "ok", "run_id": "one"})
+    subagent._append_run_index({
+        "run_id": "one", "status": "ok",
+        "transcript_path": str(transcript), "transcript_sha256": digest,
+    })
+    transcript.write_text(json.dumps({"status": "changed", "run_id": "one"}), encoding="utf-8")
+
+    audit = json.loads(subagent.verify_subagent_run_index())
+
+    assert audit["status"] == "index_tampered"
+    assert audit["issue_count"] == 1
+    assert audit["issues"][0]["issue"] == "transcript_hash_mismatch"
+
+
 def test_dispatch_rejects_mixed_emit_and_tool_response(tmp_path, monkeypatch):
     _write_unit_persona(tmp_path, monkeypatch)
     monkeypatch.setattr(

@@ -460,6 +460,89 @@ def _append_run_index(record):
     return index_path
 
 
+def verify_subagent_run_index(index_path=None):
+    """Verify the local subagent run-index hash chain and transcript hashes.
+
+    This is a read-only operator/parent audit helper. It validates the compact
+    ``index.jsonl`` chain under ``SUBAGENT_RUN_DIR`` (or an explicit in-run-dir
+    path), and for each entry with a local transcript path verifies that the
+    transcript still hashes to the recorded SHA-256. It never repairs, rewrites,
+    drains queues, calls a worker LLM, or expands transcripts into parent
+    context.
+    """
+    try:
+        run_dir = os.path.realpath(os.path.abspath(SUBAGENT_RUN_DIR))
+        path = index_path or os.path.join(run_dir, "index.jsonl")
+        path = os.path.realpath(os.path.abspath(str(path)))
+        if os.path.commonpath([run_dir, path]) != run_dir:
+            raise ValueError(f"subagent run index path escapes run dir ({run_dir}): {index_path}")
+        if os.path.basename(path) != "index.jsonl":
+            raise ValueError("subagent run index path must be index.jsonl")
+        if not os.path.exists(path):
+            return json.dumps({
+                "status": "index_missing",
+                "summary": "subagent run index does not exist",
+                "index_path": path,
+                "entries_checked": 0,
+                "next_action": "no finished subagent records to audit yet",
+            }, ensure_ascii=False, sort_keys=True)
+
+        issues = []
+        previous_hash = ""
+        entries_checked = 0
+        transcripts_checked = 0
+        with open(path, "r", encoding="utf-8") as f:
+            for line_no, line in enumerate(f, start=1):
+                if not line.strip():
+                    continue
+                entries_checked += 1
+                try:
+                    entry = json.loads(line)
+                except Exception as e:
+                    issues.append({"line": line_no, "issue": f"invalid_json:{type(e).__name__}"})
+                    previous_hash = ""
+                    continue
+                actual_entry_hash = _index_entry_hash(entry)
+                recorded_entry_hash = str(entry.get("entry_sha256") or "").strip().lower()
+                recorded_previous = str(entry.get("previous_entry_sha256") or "").strip().lower()
+                if recorded_entry_hash != actual_entry_hash:
+                    issues.append({"line": line_no, "run_id": entry.get("run_id", ""), "issue": "entry_hash_mismatch"})
+                if recorded_previous != previous_hash:
+                    issues.append({"line": line_no, "run_id": entry.get("run_id", ""), "issue": "previous_hash_mismatch"})
+                transcript_path = str(entry.get("transcript_path") or "")
+                expected_transcript_hash = str(entry.get("transcript_sha256") or "").strip().lower()
+                if transcript_path and expected_transcript_hash:
+                    try:
+                        resolved_transcript = _resolve_subagent_transcript_path(transcript_path)
+                        with open(resolved_transcript, "rb") as transcript:
+                            actual_transcript_hash = hashlib.sha256(transcript.read()).hexdigest()
+                        transcripts_checked += 1
+                        if actual_transcript_hash != expected_transcript_hash:
+                            issues.append({"line": line_no, "run_id": entry.get("run_id", ""), "issue": "transcript_hash_mismatch"})
+                    except Exception as e:
+                        issues.append({"line": line_no, "run_id": entry.get("run_id", ""), "issue": f"transcript_unverifiable:{type(e).__name__}"})
+                previous_hash = recorded_entry_hash or actual_entry_hash
+        status = "index_verified" if not issues else "index_tampered"
+        return json.dumps({
+            "status": status,
+            "summary": "subagent run index audit completed",
+            "index_path": path,
+            "entries_checked": entries_checked,
+            "transcripts_checked": transcripts_checked,
+            "issues": issues[:20],
+            "issue_count": len(issues),
+            "last_entry_sha256": previous_hash,
+            "next_action": "inspect run index/transcripts before trusting audit trail" if issues else "audit chain verified",
+        }, ensure_ascii=False, sort_keys=True)
+    except Exception as e:
+        return json.dumps({
+            "status": "index_audit_error",
+            "summary": f"subagent run index audit failed: {type(e).__name__}: {e}",
+            "index_path": str(index_path or ""),
+            "next_action": "fix index path/integrity before audit",
+        }, ensure_ascii=False, sort_keys=True)
+
+
 def _dispatch_queue_dir():
     return os.path.join(SUBAGENT_RUN_DIR, "queue")
 

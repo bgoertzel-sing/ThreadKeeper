@@ -76,6 +76,9 @@ entry under the run directory.
 Index entries include `previous_entry_sha256` and `entry_sha256` hash-chain
 fields so supervisors can list runs and cheaply detect accidental corruption,
 truncation, reordering, or later mutation during audit.
+The read-only helper `subagent.verify_subagent_run_index()` verifies that hash
+chain and any recorded local transcript SHA-256s without repairing files,
+draining queues, or calling a worker LLM.
 
 `worker_token_usage` contains aggregated `input_tokens`, `output_tokens`, and
 `total_tokens` across all worker LLM calls in the dispatch, for cost
@@ -156,7 +159,9 @@ denial reason. Errors are never raised into the parent's MeTTa interpreter.
   full prompts, responses, tool calls/results, task contracts, and
   history digests are saved in the local transcript record. Finished
   records have a SHA-256 sidecar plus a hash-chained `index.jsonl` audit entry,
-  and the parent digest returns the same transcript hash for audit checks.
+  and the parent digest returns the same transcript hash for audit checks. Use
+  `verify_subagent_run_index()` for a bounded read-only audit of the compact
+  index chain and transcript hashes.
   Queued tasks can be consumed one at a time by `run_queued_dispatch`, or in a
   small bounded batch by `drain_queued_dispatches(max_tasks=...)`; both use
   atomic claim/finish filenames and reuse the same dispatcher validation path
