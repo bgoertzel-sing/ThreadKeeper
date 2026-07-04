@@ -45,6 +45,7 @@ import tempfile
 import uuid
 import hashlib
 import contextlib
+import math
 try:
     import fcntl
 except Exception:  # pragma: no cover - non-Unix fallback
@@ -824,8 +825,13 @@ def _validate_queued_dispatch_task(task):
     if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,96}", run_id):
         raise ValueError("queued dispatch task run_id must be a safe bounded identifier")
     queued_at = task.get("queued_at")
-    if not isinstance(queued_at, (int, float)) or queued_at < 0:
-        raise ValueError("queued dispatch task queued_at must be a non-negative number")
+    if (
+        isinstance(queued_at, bool)
+        or not isinstance(queued_at, (int, float))
+        or not math.isfinite(float(queued_at))
+        or queued_at < 0
+    ):
+        raise ValueError("queued dispatch task queued_at must be a finite non-negative number")
     cancel_file = task.get("cancel_file", "")
     if not isinstance(cancel_file, str) or "\x00" in cancel_file or len(cancel_file) > _SUBAGENT_MAX_PATH_ARG_CHARS:
         raise ValueError("queued dispatch task cancel_file must be a bounded path string")
@@ -847,12 +853,18 @@ def _validate_queued_dispatch_task(task):
     for tool_name in tool_subset:
         if not isinstance(tool_name, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", tool_name):
             raise ValueError("queued dispatch task tool names must be safe identifiers")
-    try:
-        max_turns = int(task.get("max_turns", SUBAGENT_MAX_TURNS_HARD_CAP))
-    except (TypeError, ValueError):
+    raw_max_turns = task.get("max_turns", SUBAGENT_MAX_TURNS_HARD_CAP)
+    if isinstance(raw_max_turns, bool):
         raise ValueError("queued dispatch task max_turns must be an integer")
     try:
-        max_chars = int(task.get("max_chars", SUBAGENT_MAX_DIGEST_CHARS))
+        max_turns = int(raw_max_turns)
+    except (TypeError, ValueError):
+        raise ValueError("queued dispatch task max_turns must be an integer")
+    raw_max_chars = task.get("max_chars", SUBAGENT_MAX_DIGEST_CHARS)
+    if isinstance(raw_max_chars, bool):
+        raise ValueError("queued dispatch task max_chars must be an integer")
+    try:
+        max_chars = int(raw_max_chars)
     except (TypeError, ValueError):
         raise ValueError("queued dispatch task max_chars must be an integer")
     task_contract = task.get("task_contract") or {}
@@ -1679,11 +1691,15 @@ def _validate_task_contract(contract):
             f"{_SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS} characters"
         )
     for field in ("allowed_paths", "forbidden_actions", "done_criteria"):
-        values = list((contract or {}).get(field) or [])
+        values = (contract or {}).get(field) or []
+        if not isinstance(values, list):
+            return f"task contract {field} must be a list of strings"
         if len(values) > _SUBAGENT_MAX_CONTRACT_ITEMS:
             return f"task contract {field} has {len(values)} item(s), max {_SUBAGENT_MAX_CONTRACT_ITEMS}"
         for value in values:
-            if len(str(value)) > _SUBAGENT_MAX_CONTRACT_ITEM_CHARS:
+            if not isinstance(value, str) or "\x00" in value:
+                return f"task contract {field} entries must be strings without NUL bytes"
+            if len(value) > _SUBAGENT_MAX_CONTRACT_ITEM_CHARS:
                 return (
                     f"task contract {field} item exceeds "
                     f"{_SUBAGENT_MAX_CONTRACT_ITEM_CHARS} characters"

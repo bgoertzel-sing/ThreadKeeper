@@ -1017,6 +1017,55 @@ def test_run_queued_dispatch_rejects_unexpected_queue_task_fields_before_worker_
     assert Path(str(queue_path) + ".failed").exists()
 
 
+def test_run_queued_dispatch_rejects_strict_numeric_schema_before_worker_llm(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_QUEUE_ONLY", "1")
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_QUEUED_DISPATCHES", 4)
+    payload = json.loads(subagent.dispatch("queue strict numeric schema", "write-file", "unit", max_turns=2))
+    queue_path = Path(payload["queue_path"])
+    queued = json.loads(queue_path.read_text())
+    queued["queued_at"] = float("nan")
+    queued["max_turns"] = True
+    digest = subagent._json_atomic_write(str(queue_path), queued)
+    subagent._write_transcript_integrity_sidecar(str(queue_path), digest)
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")),
+    )
+
+    result = json.loads(subagent.run_queued_dispatch(str(queue_path)))
+
+    assert result["status"] == "queue_worker_error"
+    assert "queued_at" in result["summary"]
+    assert not queue_path.exists()
+    assert Path(str(queue_path) + ".failed").exists()
+
+
+def test_run_queued_dispatch_rejects_task_contract_shape_before_worker_llm(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_QUEUE_ONLY", "1")
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_QUEUED_DISPATCHES", 4)
+    payload = json.loads(subagent.dispatch("queue strict contract schema", "write-file", "unit", max_turns=2))
+    queue_path = Path(payload["queue_path"])
+    queued = json.loads(queue_path.read_text())
+    queued["task_contract"] = {"objective": "bad contract shape", "allowed_paths": "safe"}
+    digest = subagent._json_atomic_write(str(queue_path), queued)
+    subagent._write_transcript_integrity_sidecar(str(queue_path), digest)
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")),
+    )
+
+    result = json.loads(subagent.run_queued_dispatch(str(queue_path)))
+
+    assert result["status"] == "queue_worker_error"
+    assert "allowed_paths must be a list" in result["summary"]
+    assert not queue_path.exists()
+    assert Path(str(queue_path) + ".failed").exists()
+
+
 def test_run_queued_dispatch_rejects_checksum_mismatch_before_worker_llm(tmp_path, monkeypatch):
     _write_unit_persona(tmp_path, monkeypatch)
     monkeypatch.setenv("OMEGACLAW_SUBAGENT_QUEUE_ONLY", "1")
