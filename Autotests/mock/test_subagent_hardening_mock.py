@@ -31,6 +31,7 @@ def test_env_numeric_knobs_fallback_and_clamp_on_reload(monkeypatch):
         "OMEGACLAW_SUBAGENT_MAX_TOOL_CALLS_PER_TURN": "0",
         "OMEGACLAW_SUBAGENT_MAX_PATH_ARG_CHARS": "0",
         "OMEGACLAW_SUBAGENT_MAX_TOOL_ARG_CHARS": "0",
+        "OMEGACLAW_SUBAGENT_SHELL_MAX_ARGV": "0",
         "OMEGACLAW_SUBAGENT_MAX_READ_FILE_CHARS": "0",
         "OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEMS": "-2",
         "OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEM_CHARS": "0",
@@ -53,6 +54,7 @@ def test_env_numeric_knobs_fallback_and_clamp_on_reload(monkeypatch):
     assert reloaded._SUBAGENT_MAX_TOOL_CALLS_PER_TURN == 1
     assert reloaded._SUBAGENT_MAX_PATH_ARG_CHARS == 1
     assert reloaded._SUBAGENT_MAX_TOOL_ARG_CHARS == 1
+    assert reloaded._SHELL_MAX_ARGV == 1
     assert reloaded._SUBAGENT_MAX_READ_FILE_CHARS == 1
     assert reloaded._SUBAGENT_MAX_CONTRACT_ITEMS == 0
     assert reloaded._SUBAGENT_MAX_CONTRACT_ITEM_CHARS == 1
@@ -232,6 +234,17 @@ def test_shell_tool_rejects_explicit_executable_paths(tmp_path, monkeypatch):
     result = subagent._tool_shell(f'{python_exe} -c "print(1)"')
 
     assert "executable must be an allowlisted command name" in result
+
+
+def test_shell_tool_rejects_too_many_argv_tokens(tmp_path, monkeypatch):
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_ENABLE_SHELL", "1")
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_SHELL_ALLOWLIST", "printf")
+    monkeypatch.setattr(subagent, "_SHELL_MAX_ARGV", 2)
+
+    result = subagent._tool_shell("printf one two")
+
+    assert "too many arguments" in result
 
 
 def test_shell_tool_does_not_resolve_allowlisted_executable_from_workspace_path(tmp_path, monkeypatch):

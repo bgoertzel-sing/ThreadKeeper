@@ -262,6 +262,7 @@ _SUBAGENT_HISTORY_MAX_TURNS = _env_int("OMEGACLAW_SUBAGENT_HISTORY_MAX_TURNS", 6
 # output truncated, default 30s timeout.
 _SHELL_OUTPUT_CAP = 4000
 _SHELL_TIMEOUT_S = 30
+_SHELL_MAX_ARGV = _env_int("OMEGACLAW_SUBAGENT_SHELL_MAX_ARGV", 32, minimum=1)
 
 # Subagent LLM call reliability controls. Keep defaults bounded so a stuck
 # worker endpoint cannot hang the parent loop indefinitely.
@@ -2026,6 +2027,10 @@ def _tool_shell(cmd):
         return f"(shell error: invalid command: {e})"
     if not argv:
         return "(shell error: empty command)"
+    if len(argv) > _SHELL_MAX_ARGV:
+        return f"(shell error: too many arguments; max {_SHELL_MAX_ARGV} argv tokens)"
+    if any("\x00" in str(arg) for arg in argv):
+        return "(shell error: arguments must not contain NUL bytes)"
     allow = _shell_allowlist()
     exe_token = argv[0]
     exe = os.path.basename(exe_token)

@@ -182,8 +182,8 @@ denial reason. Errors are never raised into the parent's MeTTa interpreter.
   it still uses argv-list execution (`shell=False`), an executable
   allowlist, command-name-only executable tokens (no explicit paths), a
   minimal child environment (no inherited API keys/tokens), a sanitized `PATH`
-  that excludes the workspace/current directory, no stdin, bounded output/timeout,
-  and `cwd` fixed to
+  that excludes the workspace/current directory, no stdin, bounded argv count,
+  bounded output/timeout, and `cwd` fixed to
   `OMEGACLAW_SUBAGENT_WORKSPACE`.
 - The subagent persona config must reference an API key via an
   env-var name; key material is never read from the config file
@@ -220,6 +220,7 @@ clamped instead of crashing the module or disabling guards accidentally.
 | `OMEGACLAW_SUBAGENT_CANCEL_FILE` | unset | If the file exists, dispatch stops with `status=cancelled`. |
 | `OMEGACLAW_SUBAGENT_MAX_PATH_ARG_CHARS` | `512` | Maximum path argument length for file tools. |
 | `OMEGACLAW_SUBAGENT_MAX_TOOL_ARG_CHARS` | `20000` | Maximum string length for any single tool argument. |
+| `OMEGACLAW_SUBAGENT_SHELL_MAX_ARGV` | `32` | Maximum argv token count for the optional allowlisted `shell` tool. |
 | `OMEGACLAW_SUBAGENT_MAX_READ_FILE_CHARS` | `20000` | Maximum text returned by one subagent `read-file` call before a truncation marker is appended. |
 | `OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEMS` | `32` | Maximum entries in each task-contract list field. |
 | `OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEM_CHARS` | `512` | Maximum length of each task-contract list item. |
