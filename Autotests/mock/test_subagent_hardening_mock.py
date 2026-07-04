@@ -871,6 +871,35 @@ def test_run_queued_dispatch_claims_task_and_runs_once(tmp_path, monkeypatch):
     assert os.environ.get("OMEGACLAW_SUBAGENT_QUEUE_ONLY") == "1"
 
 
+def test_run_queued_dispatch_preserves_task_contract_during_worker_run(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_QUEUE_ONLY", "1")
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_QUEUED_DISPATCHES", 4)
+    contract_goal = json.dumps({
+        "objective": "queued contract must still constrain writes",
+        "allowed_paths": ["safe"],
+    })
+    payload = json.loads(subagent.dispatch(contract_goal, "write-file", "unit", max_turns=2))
+    queue_path = Path(payload["queue_path"])
+
+    responses = iter([
+        ('(write-file "unsafe.txt" "nope")\n(write-file "safe/out.txt" "ok")', 4, 2),
+        ('(emit "contract preserved")', 3, 1),
+    ])
+    monkeypatch.setattr(subagent, "_call_subagent_llm", lambda *_args: next(responses))
+
+    result = json.loads(subagent.run_queued_dispatch(str(queue_path)))
+
+    assert result["status"] == "ok"
+    assert result["result"]["summary"] == "contract preserved"
+    assert result["result"]["files_changed"] == ["safe/out.txt"]
+    assert not (tmp_path / "workspace" / "unsafe.txt").exists()
+    assert (tmp_path / "workspace" / "safe" / "out.txt").read_text() == "ok"
+    worker_transcript = json.loads(Path(result["result"]["transcript_path"]).read_text())
+    assert worker_transcript["task_contract"]["allowed_paths"] == ["safe"]
+    assert "CONTRACT_VIOLATION" in worker_transcript["turns"][0]["tool_results"]
+
+
 def test_run_queued_dispatch_rejects_path_escape(tmp_path, monkeypatch):
     monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
     outside = tmp_path / "outside.json"

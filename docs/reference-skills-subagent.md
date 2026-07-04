@@ -95,10 +95,11 @@ has `OMEGACLAW_SUBAGENT_MAX_QUEUED_DISPATCHES` pending JSON tasks, dispatch
 fails closed with transcript status `queue_backpressure` before any worker call.
 The Python helper `subagent.run_queued_dispatch(queue_path)` is the current
 single-task worker primitive: it atomically claims one queued task, revalidates
-the task shape, runs normal synchronous dispatch with queue-only mode
-suppressed, writes a compact `*.result.json`, and leaves the task as `*.done`
-for audit instead of silently re-running it. If validation or execution fails
-after a task has been claimed, the helper retains the claimed task as
+the task shape and task contract, re-injects that contract into the synchronous
+dispatch goal while queue-only mode is suppressed, writes a compact
+`*.result.json`, and leaves the task as `*.done` for audit instead of silently
+re-running it. If validation or execution fails after a task has been claimed,
+the helper retains the claimed task as
 `*.failed` and writes `*.failed.result.json` so malformed queued records do not
 vanish into a limbo state.
 `subagent.drain_queued_dispatches(max_tasks=1)` is the bounded
@@ -164,8 +165,9 @@ denial reason. Errors are never raised into the parent's MeTTa interpreter.
   index chain and transcript hashes.
   Queued tasks can be consumed one at a time by `run_queued_dispatch`, or in a
   small bounded batch by `drain_queued_dispatches(max_tasks=...)`; both use
-  atomic claim/finish filenames and reuse the same dispatcher validation path
-  rather than trusting queue-record contents. Neither helper starts a daemon or
+  atomic claim/finish filenames, validate queue-record shape/contracts, and
+  preserve the queued task contract through the worker dispatch rather than
+  trusting or dropping queue-record contents. Neither helper starts a daemon or
   self-schedules a live async loop.
   Task contracts may also request patch-proposal-only mode, which records child
   file-change proposals without applying them.

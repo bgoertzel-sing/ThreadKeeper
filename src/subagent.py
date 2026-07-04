@@ -821,9 +821,17 @@ def _validate_queued_dispatch_task(task):
         max_chars = int(task.get("max_chars", SUBAGENT_MAX_DIGEST_CHARS))
     except (TypeError, ValueError):
         raise ValueError("queued dispatch task max_chars must be an integer")
+    task_contract = task.get("task_contract") or {}
+    if not isinstance(task_contract, dict):
+        raise ValueError("queued dispatch task task_contract must be a JSON object")
+    task_contract = dict(task_contract)
+    task_contract.setdefault("objective", goal)
+    contract_error = _validate_task_contract(task_contract)
+    if contract_error:
+        raise ValueError(f"queued dispatch task contract invalid: {contract_error}")
     max_turns = max(1, min(max_turns, SUBAGENT_MAX_TURNS_HARD_CAP))
     max_chars = max(100, min(max_chars, SUBAGENT_MAX_DIGEST_CHARS))
-    return goal, ",".join(tool_subset), persona_key, max_turns, max_chars
+    return goal, ",".join(tool_subset), persona_key, max_turns, max_chars, task_contract
 
 
 def run_queued_dispatch(queue_path):
@@ -850,10 +858,14 @@ def run_queued_dispatch(queue_path):
         except FileNotFoundError:
             raise ValueError(f"queued dispatch task not found: {task_path}")
         task, task_sha256 = _read_json_file(claimed_path)
-        goal, tool_subset_csv, persona_key, max_turns, max_chars = _validate_queued_dispatch_task(task)
+        goal, tool_subset_csv, persona_key, max_turns, max_chars, task_contract = _validate_queued_dispatch_task(task)
+        dispatch_goal = json.dumps({
+            "objective": goal,
+            "task_contract": task_contract,
+        }, ensure_ascii=False, sort_keys=True)
         previous_queue_only = os.environ.pop("OMEGACLAW_SUBAGENT_QUEUE_ONLY", None)
         try:
-            result_text = dispatch(goal, tool_subset_csv, persona_key, max_turns=max_turns, max_chars=max_chars)
+            result_text = dispatch(dispatch_goal, tool_subset_csv, persona_key, max_turns=max_turns, max_chars=max_chars)
         finally:
             if previous_queue_only is not None:
                 os.environ["OMEGACLAW_SUBAGENT_QUEUE_ONLY"] = previous_queue_only
