@@ -645,8 +645,8 @@ def _resolve_queue_task_path(queue_path):
     candidate = os.path.realpath(os.path.abspath(str(queue_path)))
     if os.path.commonpath([queue_dir, candidate]) != queue_dir:
         raise ValueError(f"queued dispatch path escapes queue dir ({queue_dir}): {queue_path}")
-    if not candidate.endswith(".json"):
-        raise ValueError("queued dispatch path must be a .json task record")
+    if not _is_pending_queue_task_name(os.path.basename(candidate)):
+        raise ValueError("queued dispatch path must be a pending queue/*.json task record")
     return candidate
 
 

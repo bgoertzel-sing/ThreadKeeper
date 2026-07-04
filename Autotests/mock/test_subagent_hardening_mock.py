@@ -882,6 +882,23 @@ def test_run_queued_dispatch_rejects_path_escape(tmp_path, monkeypatch):
     assert "escapes queue dir" in result["summary"]
 
 
+def test_run_queued_dispatch_rejects_result_sidecar_without_renaming(tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs"
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(run_dir))
+    queue_dir = run_dir / "queue"
+    queue_dir.mkdir(parents=True)
+    sidecar = queue_dir / "task.json.done.result.json"
+    sidecar.write_text('{"status":"ok"}', encoding="utf-8")
+
+    result = json.loads(subagent.run_queued_dispatch(str(sidecar)))
+
+    assert result["status"] == "queue_worker_error"
+    assert "pending queue/*.json task record" in result["summary"]
+    assert sidecar.exists()
+    assert not Path(str(sidecar) + ".claimed").exists()
+    assert not Path(str(sidecar) + ".failed").exists()
+
+
 def test_run_queued_dispatch_retains_failed_claim_for_audit(tmp_path, monkeypatch):
     _write_unit_persona(tmp_path, monkeypatch)
     monkeypatch.setenv("OMEGACLAW_SUBAGENT_QUEUE_ONLY", "1")
