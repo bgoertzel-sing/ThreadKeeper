@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""Run one bounded ThreadKeeper subagent queue-worker loop.
+
+This is an operator/supervisor entrypoint for the async queue primitive. It does
+not daemonize, self-schedule, or enqueue tasks; it only invokes
+subagent.run_queued_worker_loop(...) with explicit bounds and prints the
+structured JSON result to stdout.
+"""
+import argparse
+import json
+import os
+from pathlib import Path
+import sys
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _optional_int(value: str | None):
+    if value is None:
+        return None
+    return int(value)
+
+
+def _optional_float(value: str | None):
+    if value is None:
+        return None
+    return float(value)
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Run a bounded ThreadKeeper subagent queue worker loop once.",
+    )
+    parser.add_argument(
+        "--run-dir",
+        help="Override OMEGACLAW_SUBAGENT_RUN_DIR before importing subagent.",
+    )
+    parser.add_argument(
+        "--max-tasks",
+        type=_optional_int,
+        default=None,
+        help="Maximum queued tasks to attempt in this invocation; 0 is a safe no-claim smoke.",
+    )
+    parser.add_argument(
+        "--max-idle-polls",
+        type=_optional_int,
+        default=None,
+        help="Number of empty queue polls before exiting idle.",
+    )
+    parser.add_argument(
+        "--poll-interval-s",
+        type=_optional_float,
+        default=None,
+        help="Seconds to sleep between empty queue polls.",
+    )
+    parser.add_argument(
+        "--max-runtime-s",
+        type=_optional_float,
+        default=None,
+        help="Wall-clock runtime cap for this invocation; 0 disables the cap.",
+    )
+    parser.add_argument(
+        "--stop-file",
+        default=None,
+        help="Optional stop-token path checked before claiming queued work.",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print the structured JSON result.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv=None) -> int:
+    args = parse_args(argv)
+    if args.run_dir:
+        os.environ["OMEGACLAW_SUBAGENT_RUN_DIR"] = args.run_dir
+
+    src = _repo_root() / "src"
+    if str(src) not in sys.path:
+        sys.path.insert(0, str(src))
+
+    import subagent  # noqa: WPS433 - import after run-dir env override
+
+    result_text = subagent.run_queued_worker_loop(
+        max_tasks=args.max_tasks,
+        poll_interval_s=args.poll_interval_s,
+        max_idle_polls=args.max_idle_polls,
+        stop_file=args.stop_file,
+        max_runtime_s=args.max_runtime_s,
+    )
+    if args.pretty:
+        print(json.dumps(json.loads(result_text), ensure_ascii=False, sort_keys=True, indent=2))
+    else:
+        print(result_text)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

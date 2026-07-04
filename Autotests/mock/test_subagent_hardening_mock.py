@@ -5,6 +5,7 @@ import importlib
 import json
 import multiprocessing
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -1313,6 +1314,35 @@ def test_run_queued_worker_loop_writes_finished_lock_metadata(tmp_path, monkeypa
     assert metadata["status"] == "finished"
     assert metadata["stop_reason"] == "idle"
     assert metadata["tasks_attempted"] == 0
+
+
+def test_run_subagent_worker_loop_script_supports_no_claim_smoke(tmp_path):
+    script = ROOT / "scripts" / "run-subagent-worker-loop"
+    run_dir = tmp_path / "script-runs"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--run-dir",
+            str(run_dir),
+            "--max-tasks",
+            "0",
+            "--max-idle-polls",
+            "0",
+            "--poll-interval-s",
+            "0",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    result = json.loads(completed.stdout)
+    assert result["status"] == "worker_idle"
+    assert result["stop_reason"] == "max_tasks"
+    assert result["tasks_attempted"] == 0
+    assert result["remaining_queue_tasks"] == 0
 
 
 def test_queue_only_dispatch_backpressure_fails_before_worker_llm(tmp_path, monkeypatch):

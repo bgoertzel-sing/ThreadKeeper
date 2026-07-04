@@ -119,7 +119,11 @@ held, the lock file contains compact JSON metadata (`pid`, `started_at`, bounds,
 local worker from a stale prior run; completed loops leave a final `status` /
 `stop_reason` summary in the same file. It still does not start itself from
 `dispatch` and is not a service manager; deployments must launch it deliberately
-under their chosen supervisor.
+under their chosen supervisor. The repository also provides the conservative
+operator entrypoint `scripts/run-subagent-worker-loop`, which imports `subagent`
+after applying an optional `--run-dir`, invokes one bounded worker-loop run, and
+prints the structured JSON result; `--max-tasks 0` is the intended no-claim smoke
+for install/supervisor wiring checks.
 
 When a JSON task contract sets `"patch_proposal_only": true`, `write-file` and
 `append-file` calls do not mutate workspace files. Instead they append full
