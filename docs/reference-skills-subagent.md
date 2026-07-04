@@ -108,8 +108,14 @@ into a limbo state.
 `subagent.drain_queued_dispatches(max_tasks=1)` is the bounded
 operator-supervised wrapper: each call drains at most `max_tasks` pending queue
 records in oldest-first order and returns compact JSON metadata. It deliberately
-does not daemonize, sleep, poll forever, or auto-start from `dispatch`; any live
-worker loop must be launched and bounded by an external supervisor/operator.
+does not daemonize, sleep, poll forever, or auto-start from `dispatch`.
+`subagent.run_queued_worker_loop(...)` is the corresponding supervised async
+worker loop: it repeatedly claims pending queue records until an explicit bound
+is reached (`max_tasks`, `max_idle_polls`, `max_runtime_s`, or a `stop_file`).
+The loop uses a best-effort local lock (`.async-worker.lock`) to avoid two local
+workers draining the same queue concurrently when `fcntl` is available. It still
+does not start itself from `dispatch` and is not a service manager; deployments
+must launch it deliberately under their chosen supervisor.
 
 When a JSON task contract sets `"patch_proposal_only": true`, `write-file` and
 `append-file` calls do not mutate workspace files. Instead they append full
@@ -167,11 +173,13 @@ denial reason. Errors are never raised into the parent's MeTTa interpreter.
   `verify_subagent_run_index()` for a bounded read-only audit of the compact
   index chain and transcript hashes.
   Queued tasks can be consumed one at a time by `run_queued_dispatch`, or in a
-  small bounded batch by `drain_queued_dispatches(max_tasks=...)`; both use
-  atomic claim/finish filenames, validate queue-record shape/contracts, and
-  preserve the queued task contract through the worker dispatch rather than
-  trusting or dropping queue-record contents. Neither helper starts a daemon or
-  self-schedules a live async loop.
+  small bounded batch by `drain_queued_dispatches(max_tasks=...)`, or by the
+  bounded async loop `run_queued_worker_loop(max_tasks=..., poll_interval_s=..., max_idle_polls=..., stop_file=..., max_runtime_s=...)`.
+  These paths use atomic claim/finish filenames, validate queue-record
+  shape/contracts, and preserve the queued task contract through the worker
+  dispatch rather than trusting or dropping queue-record contents. The async loop
+  is real polling work, but it remains explicitly operator/supervisor launched;
+  it does not self-schedule from a parent dispatch.
   Task contracts may also request patch-proposal-only mode, which records child
   file-change proposals without applying them.
 - The subagent cannot call `send`, `remember`, `pin`, `metta`,
@@ -210,6 +218,11 @@ clamped instead of crashing the module or disabling guards accidentally.
 | `OMEGACLAW_SUBAGENT_RUN_DIR` | `memory/subagent-runs` | Directory for persistent JSON transcript/run records, `index.jsonl`, checksum sidecars, worker rate/concurrency state, and optional queued dispatch tasks. |
 | `OMEGACLAW_SUBAGENT_QUEUE_ONLY` | unset/false | If true, validate and enqueue the dispatch under `OMEGACLAW_SUBAGENT_RUN_DIR/queue/` without calling the worker LLM. |
 | `OMEGACLAW_SUBAGENT_MAX_QUEUED_DISPATCHES` | `32` | Maximum pending queued dispatch task records before returning `queue_backpressure`; `0` means no pending queue capacity. |
+| `OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_TASKS` | `32` | Default maximum tasks for one explicit `run_queued_worker_loop(...)` invocation; `0` exits without claiming work. |
+| `OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_IDLE_POLLS` | `3` | Default number of empty queue polls before an explicit worker-loop invocation exits idle. |
+| `OMEGACLAW_SUBAGENT_ASYNC_WORKER_POLL_INTERVAL_S` | `2.0` | Default sleep interval between empty queue polls inside the supervised worker loop. |
+| `OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_RUNTIME_S` | `600.0` | Default wall-clock cap for one explicit worker-loop invocation; `0` disables the runtime cap. |
+| `OMEGACLAW_SUBAGENT_ASYNC_WORKER_STOP_FILE` | unset | Optional stop-token path; if it exists, `run_queued_worker_loop(...)` exits before claiming more work. |
 | `OMEGACLAW_SUBAGENT_LLM_TIMEOUT_S` | `180` | Timeout for each worker LLM call. |
 | `OMEGACLAW_SUBAGENT_LLM_RETRIES` | `1` | Retry count after the first worker LLM attempt. |
 | `OMEGACLAW_SUBAGENT_LLM_BACKOFF_S` | `1.0` | Exponential backoff base between worker retries. |
@@ -253,6 +266,8 @@ end-to-end walkthrough.
 | Queued worker sees an escaping task path | `run_queued_dispatch(...)` returns JSON `status=queue_worker_error`; no worker LLM call is attempted. |
 | Queued worker sees a missing/mismatched queue-task checksum sidecar after claiming a task | `run_queued_dispatch(...)` returns JSON `status=queue_worker_error`; claimed task is retained as `*.failed` with a fresh checksum sidecar when possible; no worker LLM call is attempted. |
 | Queued worker sees bad queued JSON/shape after claiming a task | `run_queued_dispatch(...)` returns JSON `status=queue_worker_error`; claimed task is retained as `*.failed` with `*.failed.result.json`; no worker LLM call is attempted for validation failures. |
+| Async worker loop sees an existing worker lock | `run_queued_worker_loop(...)` returns JSON `status=worker_already_running`; no queue record is claimed. |
+| Async worker loop sees its stop-file token before claiming work | `run_queued_worker_loop(...)` returns JSON `status=worker_stopped`; pending queue records remain pending. |
 | Escalation policy denies cloud delegation | Structured JSON `status=error`; `summary` contains `(escalation denied) ...`; transcript status `escalation_denied`. |
 | Subagent endpoint times out / errors | Structured JSON `status=error`; `summary` contains `(subagent LLM call failed: <ExceptionType>: <reason>)`; transcript status `llm_failed`. |
 | Worker mixes `emit` with other parsed calls or multiple emits | Structured JSON `status=error` and `EMIT_PROTOCOL_VIOLATION`; transcript status `emit_protocol_violation`. |

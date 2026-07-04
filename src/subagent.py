@@ -286,6 +286,11 @@ _SUBAGENT_MAX_CONTRACT_ITEMS = _env_int("OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEMS",
 _SUBAGENT_MAX_CONTRACT_ITEM_CHARS = _env_int("OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEM_CHARS", 512, minimum=1)
 _SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS = _env_int("OMEGACLAW_SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS", 4000, minimum=1)
 _SUBAGENT_MAX_QUEUED_DISPATCHES = _env_int("OMEGACLAW_SUBAGENT_MAX_QUEUED_DISPATCHES", 32, minimum=0)
+_SUBAGENT_ASYNC_WORKER_MAX_TASKS = _env_int("OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_TASKS", 32, minimum=0)
+_SUBAGENT_ASYNC_WORKER_MAX_IDLE_POLLS = _env_int("OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_IDLE_POLLS", 3, minimum=0)
+_SUBAGENT_ASYNC_WORKER_POLL_INTERVAL_S = _env_float("OMEGACLAW_SUBAGENT_ASYNC_WORKER_POLL_INTERVAL_S", 2.0, minimum=0.0)
+_SUBAGENT_ASYNC_WORKER_MAX_RUNTIME_S = _env_float("OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_RUNTIME_S", 600.0, minimum=0.0)
+_SUBAGENT_ASYNC_WORKER_STOP_FILE = os.environ.get("OMEGACLAW_SUBAGENT_ASYNC_WORKER_STOP_FILE", "")
 
 # Dispatch-level wall-clock timeout. Even if individual LLM calls are bounded,
 # a subagent making many fast calls could run for a very long time. This cap
@@ -719,6 +724,168 @@ def drain_queued_dispatches(max_tasks=1):
         "status": "drained" if results else "queue_empty",
         "tasks_attempted": attempted,
         "tasks_completed": sum(1 for item in results if item.get("status") not in ("queue_worker_error",)),
+        "remaining_queue_tasks": remaining,
+        "results": results,
+    }, ensure_ascii=False, sort_keys=True)
+
+
+def _worker_loop_lock_path():
+    return os.path.join(SUBAGENT_RUN_DIR, ".async-worker.lock")
+
+
+def _coerce_worker_limit(value, default, minimum=0, maximum=None):
+    if value is None:
+        value = default
+    try:
+        coerced = int(value)
+    except (TypeError, ValueError):
+        coerced = default
+    coerced = max(minimum, coerced)
+    if maximum is not None:
+        coerced = min(coerced, maximum)
+    return coerced
+
+
+def _coerce_worker_float(value, default, minimum=0.0):
+    if value is None:
+        value = default
+    try:
+        coerced = float(value)
+    except (TypeError, ValueError):
+        coerced = default
+    if not math.isfinite(coerced):
+        coerced = default
+    return max(minimum, coerced)
+
+
+def _worker_stop_requested(stop_file):
+    if not stop_file:
+        return False
+    try:
+        return os.path.exists(stop_file)
+    except Exception:
+        return False
+
+
+def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=None,
+                           stop_file=None, max_runtime_s=None):
+    """Run a bounded async worker loop over queued subagent dispatches.
+
+    This is the live worker-loop primitive corresponding to queue-only
+    dispatch: it repeatedly claims pending ``queue/*.json`` records via
+    ``run_queued_dispatch`` until one of several explicit bounds is reached
+    (max tasks, idle polls, runtime, or a stop-file token). It does not start
+    itself from ``dispatch`` and it is not a daemon; an operator/supervisor must
+    launch it deliberately. A best-effort lock prevents two local worker loops
+    from draining the same queue concurrently when ``fcntl`` is available.
+    """
+    os.makedirs(SUBAGENT_RUN_DIR, exist_ok=True)
+    task_limit = _coerce_worker_limit(
+        max_tasks, _SUBAGENT_ASYNC_WORKER_MAX_TASKS, minimum=0,
+        maximum=_SUBAGENT_MAX_QUEUED_DISPATCHES or _SUBAGENT_ASYNC_WORKER_MAX_TASKS or None,
+    )
+    idle_limit = _coerce_worker_limit(
+        max_idle_polls, _SUBAGENT_ASYNC_WORKER_MAX_IDLE_POLLS, minimum=0,
+    )
+    poll_interval = _coerce_worker_float(
+        poll_interval_s, _SUBAGENT_ASYNC_WORKER_POLL_INTERVAL_S, minimum=0.0,
+    )
+    runtime_limit = _coerce_worker_float(
+        max_runtime_s, _SUBAGENT_ASYNC_WORKER_MAX_RUNTIME_S, minimum=0.0,
+    )
+    stop_path = str(stop_file if stop_file is not None else _SUBAGENT_ASYNC_WORKER_STOP_FILE)
+    started_at = time.time()
+    results = []
+    tasks_attempted = 0
+    idle_polls = 0
+    if task_limit == 0:
+        return json.dumps({
+            "status": "worker_idle",
+            "summary": "queued subagent async worker loop completed bounded run",
+            "stop_reason": "max_tasks",
+            "started_at": started_at,
+            "finished_at": time.time(),
+            "max_tasks": task_limit,
+            "poll_interval_s": poll_interval,
+            "max_idle_polls": idle_limit,
+            "max_runtime_s": runtime_limit,
+            "stop_file": stop_path,
+            "tasks_attempted": 0,
+            "tasks_completed": 0,
+            "remaining_queue_tasks": len(_pending_queued_dispatch_paths()),
+            "results": [],
+        }, ensure_ascii=False, sort_keys=True)
+    stop_reason = ""
+    lock_path = _worker_loop_lock_path()
+
+    with open(lock_path, "a+", encoding="utf-8") as lock:
+        if fcntl is not None:
+            try:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return json.dumps({
+                    "status": "worker_already_running",
+                    "summary": "queued subagent async worker loop is already running",
+                    "lock_path": lock_path,
+                    "tasks_attempted": 0,
+                    "tasks_completed": 0,
+                    "remaining_queue_tasks": len(_pending_queued_dispatch_paths()),
+                }, ensure_ascii=False, sort_keys=True)
+        try:
+            while task_limit <= 0 or tasks_attempted < task_limit:
+                if _worker_stop_requested(stop_path):
+                    stop_reason = "stop_file"
+                    break
+                if runtime_limit and (time.time() - started_at) >= runtime_limit:
+                    stop_reason = "max_runtime"
+                    break
+                pending = _pending_queued_dispatch_paths()
+                if not pending:
+                    idle_polls += 1
+                    if idle_polls > idle_limit:
+                        stop_reason = "idle"
+                        break
+                    if poll_interval:
+                        time.sleep(poll_interval)
+                    continue
+                idle_polls = 0
+                queue_path = pending[0]
+                tasks_attempted += 1
+                try:
+                    results.append(json.loads(run_queued_dispatch(queue_path)))
+                except Exception as e:
+                    results.append({
+                        "status": "queue_worker_error",
+                        "summary": f"queued worker loop error: {type(e).__name__}: {e}",
+                        "queue_path": queue_path,
+                    })
+            if not stop_reason:
+                stop_reason = "max_tasks"
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    remaining = len(_pending_queued_dispatch_paths())
+    tasks_completed = sum(1 for item in results if item.get("status") not in ("queue_worker_error",))
+    if results:
+        status = "worker_drained"
+    elif stop_reason == "stop_file":
+        status = "worker_stopped"
+    else:
+        status = "worker_idle"
+    return json.dumps({
+        "status": status,
+        "summary": "queued subagent async worker loop completed bounded run",
+        "stop_reason": stop_reason,
+        "started_at": started_at,
+        "finished_at": time.time(),
+        "max_tasks": task_limit,
+        "poll_interval_s": poll_interval,
+        "max_idle_polls": idle_limit,
+        "max_runtime_s": runtime_limit,
+        "stop_file": stop_path,
+        "tasks_attempted": tasks_attempted,
+        "tasks_completed": tasks_completed,
         "remaining_queue_tasks": remaining,
         "results": results,
     }, ensure_ascii=False, sort_keys=True)

@@ -39,6 +39,10 @@ def test_env_numeric_knobs_fallback_and_clamp_on_reload(monkeypatch):
         "OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEM_CHARS": "0",
         "OMEGACLAW_SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS": "0",
         "OMEGACLAW_SUBAGENT_MAX_QUEUED_DISPATCHES": "-4",
+        "OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_TASKS": "-4",
+        "OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_IDLE_POLLS": "-1",
+        "OMEGACLAW_SUBAGENT_ASYNC_WORKER_POLL_INTERVAL_S": "bad-float",
+        "OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_RUNTIME_S": "bad-float",
     }
     for name, value in bad_values.items():
         monkeypatch.setenv(name, value)
@@ -64,6 +68,10 @@ def test_env_numeric_knobs_fallback_and_clamp_on_reload(monkeypatch):
     assert reloaded._SUBAGENT_MAX_CONTRACT_ITEM_CHARS == 1
     assert reloaded._SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS == 1
     assert reloaded._SUBAGENT_MAX_QUEUED_DISPATCHES == 0
+    assert reloaded._SUBAGENT_ASYNC_WORKER_MAX_TASKS == 0
+    assert reloaded._SUBAGENT_ASYNC_WORKER_MAX_IDLE_POLLS == 0
+    assert reloaded._SUBAGENT_ASYNC_WORKER_POLL_INTERVAL_S == 2.0
+    assert reloaded._SUBAGENT_ASYNC_WORKER_MAX_RUNTIME_S == 600.0
 
     monkeypatch.undo()
     importlib.reload(subagent)
@@ -1205,6 +1213,81 @@ def test_drain_queued_dispatches_reports_empty_queue(tmp_path, monkeypatch):
     assert drained["tasks_attempted"] == 0
     assert drained["remaining_queue_tasks"] == 0
     assert drained["results"] == []
+
+
+def test_run_queued_worker_loop_drains_until_idle_and_preserves_queue_only_env(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_QUEUE_ONLY", "1")
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_QUEUED_DISPATCHES", 4)
+
+    first = json.loads(subagent.dispatch("queue async first", "write-file", "unit", max_turns=2))
+    second = json.loads(subagent.dispatch("queue async second", "write-file", "unit", max_turns=2))
+    calls = {"n": 0}
+
+    def worker_response(*_args):
+        calls["n"] += 1
+        return (f'(emit "async worker done {calls["n"]}")', 1, 1)
+
+    monkeypatch.setattr(subagent, "_call_subagent_llm", worker_response)
+    monkeypatch.setattr(subagent.time, "sleep", lambda *_args: None)
+
+    result = json.loads(subagent.run_queued_worker_loop(
+        max_tasks=4, poll_interval_s=0, max_idle_polls=0, max_runtime_s=30,
+    ))
+
+    assert result["status"] == "worker_drained"
+    assert result["stop_reason"] == "idle"
+    assert result["tasks_attempted"] == 2
+    assert result["tasks_completed"] == 2
+    assert result["remaining_queue_tasks"] == 0
+    assert calls["n"] == 2
+    assert Path(first["queue_path"] + ".done").exists()
+    assert Path(second["queue_path"] + ".done").exists()
+    assert os.environ.get("OMEGACLAW_SUBAGENT_QUEUE_ONLY") == "1"
+
+
+def test_run_queued_worker_loop_honors_stop_file_before_worker_llm(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    stop_file = tmp_path / "stop.worker"
+    stop_file.write_text("stop", encoding="utf-8")
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_QUEUE_ONLY", "1")
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_QUEUED_DISPATCHES", 4)
+    queued = json.loads(subagent.dispatch("queue but stop worker", "write-file", "unit", max_turns=2))
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")),
+    )
+
+    result = json.loads(subagent.run_queued_worker_loop(
+        max_tasks=4, poll_interval_s=0, max_idle_polls=0, stop_file=str(stop_file),
+    ))
+
+    assert result["status"] == "worker_stopped"
+    assert result["stop_reason"] == "stop_file"
+    assert result["tasks_attempted"] == 0
+    assert result["remaining_queue_tasks"] == 1
+    assert Path(queued["queue_path"]).exists()
+
+
+def test_run_queued_worker_loop_rejects_concurrent_local_loop(tmp_path, monkeypatch):
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr(subagent.time, "sleep", lambda *_args: None)
+    lock_path = Path(subagent.SUBAGENT_RUN_DIR) / ".async-worker.lock"
+    lock_path.parent.mkdir(parents=True)
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        if subagent.fcntl is None:
+            return
+        subagent.fcntl.flock(lock.fileno(), subagent.fcntl.LOCK_EX | subagent.fcntl.LOCK_NB)
+        try:
+            result = json.loads(subagent.run_queued_worker_loop(
+                max_tasks=1, poll_interval_s=0, max_idle_polls=0,
+            ))
+        finally:
+            subagent.fcntl.flock(lock.fileno(), subagent.fcntl.LOCK_UN)
+
+    assert result["status"] == "worker_already_running"
+    assert result["tasks_attempted"] == 0
 
 
 def test_queue_only_dispatch_backpressure_fails_before_worker_llm(tmp_path, monkeypatch):
