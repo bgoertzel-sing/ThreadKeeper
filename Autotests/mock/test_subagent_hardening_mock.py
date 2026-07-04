@@ -1247,6 +1247,83 @@ def test_run_queued_worker_loop_drains_until_idle_and_preserves_queue_only_env(t
     assert os.environ.get("OMEGACLAW_SUBAGENT_QUEUE_ONLY") == "1"
 
 
+def test_run_queued_worker_loop_stops_on_max_runtime(tmp_path, monkeypatch):
+    """The loop should exit with stop_reason=max_runtime when the wall-clock
+    cap is reached between queued tasks, before claiming more work."""
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_QUEUE_ONLY", "1")
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_QUEUED_DISPATCHES", 4)
+
+    first = json.loads(subagent.dispatch("runtime cap first", "write-file", "unit", max_turns=2))
+    second = json.loads(subagent.dispatch("runtime cap second", "write-file", "unit", max_turns=2))
+    calls = {"n": 0}
+
+    def worker_response(*_args):
+        calls["n"] += 1
+        return (f'(emit "runtime cap done {calls["n"]}")', 1, 1)
+
+    monkeypatch.setattr(subagent, "_call_subagent_llm", worker_response)
+    monkeypatch.setattr(subagent.time, "sleep", lambda *_args: None)
+
+    # Simulate: first task succeeds, then runtime cap is hit before second task.
+    original_time = subagent.time.time
+    fake_clock = {"t": 0.0}
+
+    def fake_time():
+        return fake_clock["t"]
+
+    def fake_worker_loop_time(*_args):
+        # After first task completes, jump clock past runtime cap
+        if calls["n"] >= 1:
+            fake_clock["t"] = 100.0
+        return fake_time()
+
+    monkeypatch.setattr(subagent.time, "time", fake_worker_loop_time)
+
+    result = json.loads(subagent.run_queued_worker_loop(
+        max_tasks=4, poll_interval_s=0, max_idle_polls=0, max_runtime_s=10.0,
+    ))
+
+    assert result["stop_reason"] == "max_runtime"
+    assert result["tasks_attempted"] == 1
+    assert calls["n"] == 1
+    assert Path(first["queue_path"] + ".done").exists()
+    assert Path(second["queue_path"]).exists()  # second still pending
+
+
+def test_run_queued_worker_loop_records_worker_error_and_continues(tmp_path, monkeypatch):
+    """A failing queued task should be recorded as queue_worker_error in
+    results, but the loop should continue to the next pending task."""
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_QUEUE_ONLY", "1")
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_QUEUED_DISPATCHES", 4)
+
+    first = json.loads(subagent.dispatch("error task", "write-file", "unit", max_turns=2))
+    second = json.loads(subagent.dispatch("good task", "write-file", "unit", max_turns=2))
+    calls = {"n": 0}
+
+    def worker_response(*_args):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("simulated worker failure")
+        return (f'(emit "recovered after error")', 1, 1)
+
+    monkeypatch.setattr(subagent, "_call_subagent_llm", worker_response)
+    monkeypatch.setattr(subagent.time, "sleep", lambda *_args: None)
+
+    result = json.loads(subagent.run_queued_worker_loop(
+        max_tasks=4, poll_interval_s=0, max_idle_polls=0, max_runtime_s=30,
+    ))
+
+    assert result["status"] == "worker_drained"
+    assert result["tasks_attempted"] == 2
+    assert result["tasks_completed"] == 1
+    # First result should be an error; second should be a success
+    statuses = [r.get("status") for r in result["results"]]
+    assert "queue_worker_error" in statuses
+    assert "ok" in statuses
+
+
 def test_run_queued_worker_loop_honors_stop_file_before_worker_llm(tmp_path, monkeypatch):
     _write_unit_persona(tmp_path, monkeypatch)
     stop_file = tmp_path / "stop.worker"
