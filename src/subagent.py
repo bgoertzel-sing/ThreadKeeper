@@ -771,6 +771,25 @@ def _coerce_worker_limit(value, default, minimum=0, maximum=None):
     return coerced
 
 
+def _validate_worker_limit_arg(value, default, name, minimum=0, maximum=None):
+    """Resolve an async-worker integer bound with strict explicit-arg checks.
+
+    Environment knobs are already parsed defensively at import time. Explicit
+    Python/operator arguments are closer to tool-call inputs, so fail closed on
+    booleans, floats, strings, or below-minimum values instead of silently
+    coercing a malformed request into an unintended worker run.
+    """
+    if value is None:
+        return _coerce_worker_limit(default, default, minimum=minimum, maximum=maximum)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be an integer >= {minimum}")
+    if value < minimum:
+        raise ValueError(f"{name} must be an integer >= {minimum}")
+    if maximum is not None:
+        return min(value, maximum)
+    return value
+
+
 def _coerce_worker_float(value, default, minimum=0.0):
     if value is None:
         value = default
@@ -781,6 +800,18 @@ def _coerce_worker_float(value, default, minimum=0.0):
     if not math.isfinite(coerced):
         coerced = default
     return max(minimum, coerced)
+
+
+def _validate_worker_float_arg(value, default, name, minimum=0.0):
+    """Resolve an async-worker float bound with strict explicit-arg checks."""
+    if value is None:
+        return _coerce_worker_float(default, default, minimum=minimum)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be a finite number >= {minimum}")
+    coerced = float(value)
+    if not math.isfinite(coerced) or coerced < minimum:
+        raise ValueError(f"{name} must be a finite number >= {minimum}")
+    return coerced
 
 
 def _validate_worker_stop_file(stop_file):
@@ -818,21 +849,36 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
     from draining the same queue concurrently when ``fcntl`` is available.
     """
     os.makedirs(SUBAGENT_RUN_DIR, exist_ok=True)
+    started_at = time.time()
+    # Defaults for structured config-invalid returns if an early explicit
+    # argument check fails before all resolved bounds are assigned.
     task_limit = _coerce_worker_limit(
-        max_tasks, _SUBAGENT_ASYNC_WORKER_MAX_TASKS, minimum=0,
+        _SUBAGENT_ASYNC_WORKER_MAX_TASKS, _SUBAGENT_ASYNC_WORKER_MAX_TASKS, minimum=0,
         maximum=_SUBAGENT_MAX_QUEUED_DISPATCHES or _SUBAGENT_ASYNC_WORKER_MAX_TASKS or None,
     )
     idle_limit = _coerce_worker_limit(
-        max_idle_polls, _SUBAGENT_ASYNC_WORKER_MAX_IDLE_POLLS, minimum=0,
+        _SUBAGENT_ASYNC_WORKER_MAX_IDLE_POLLS, _SUBAGENT_ASYNC_WORKER_MAX_IDLE_POLLS, minimum=0,
     )
     poll_interval = _coerce_worker_float(
-        poll_interval_s, _SUBAGENT_ASYNC_WORKER_POLL_INTERVAL_S, minimum=0.0,
+        _SUBAGENT_ASYNC_WORKER_POLL_INTERVAL_S, _SUBAGENT_ASYNC_WORKER_POLL_INTERVAL_S, minimum=0.0,
     )
     runtime_limit = _coerce_worker_float(
-        max_runtime_s, _SUBAGENT_ASYNC_WORKER_MAX_RUNTIME_S, minimum=0.0,
+        _SUBAGENT_ASYNC_WORKER_MAX_RUNTIME_S, _SUBAGENT_ASYNC_WORKER_MAX_RUNTIME_S, minimum=0.0,
     )
-    started_at = time.time()
     try:
+        task_limit = _validate_worker_limit_arg(
+            max_tasks, _SUBAGENT_ASYNC_WORKER_MAX_TASKS, "max_tasks", minimum=0,
+            maximum=_SUBAGENT_MAX_QUEUED_DISPATCHES or _SUBAGENT_ASYNC_WORKER_MAX_TASKS or None,
+        )
+        idle_limit = _validate_worker_limit_arg(
+            max_idle_polls, _SUBAGENT_ASYNC_WORKER_MAX_IDLE_POLLS, "max_idle_polls", minimum=0,
+        )
+        poll_interval = _validate_worker_float_arg(
+            poll_interval_s, _SUBAGENT_ASYNC_WORKER_POLL_INTERVAL_S, "poll_interval_s", minimum=0.0,
+        )
+        runtime_limit = _validate_worker_float_arg(
+            max_runtime_s, _SUBAGENT_ASYNC_WORKER_MAX_RUNTIME_S, "max_runtime_s", minimum=0.0,
+        )
         stop_path = _validate_worker_stop_file(
             stop_file if stop_file is not None else _SUBAGENT_ASYNC_WORKER_STOP_FILE
         )

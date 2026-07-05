@@ -230,7 +230,7 @@ clamped instead of crashing the module or disabling guards accidentally.
 | `OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_IDLE_POLLS` | `3` | Default number of empty queue polls before an explicit worker-loop invocation exits idle. |
 | `OMEGACLAW_SUBAGENT_ASYNC_WORKER_POLL_INTERVAL_S` | `2.0` | Default sleep interval between empty queue polls inside the supervised worker loop. |
 | `OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_RUNTIME_S` | `600.0` | Default wall-clock cap for one explicit worker-loop invocation; `0` disables the runtime cap. |
-| `OMEGACLAW_SUBAGENT_ASYNC_WORKER_STOP_FILE` | unset | Optional stop-token path; if it exists, `run_queued_worker_loop(...)` exits before claiming more work. NUL-containing or overlong values fail closed before the worker lock/queue claim. |
+| `OMEGACLAW_SUBAGENT_ASYNC_WORKER_STOP_FILE` | unset | Optional stop-token path; if it exists, `run_queued_worker_loop(...)` exits before claiming more work. Malformed explicit worker-loop bounds and NUL-containing or overlong stop-file values fail closed before the worker lock/queue claim. |
 | `OMEGACLAW_SUBAGENT_LLM_TIMEOUT_S` | `180` | Timeout for each worker LLM call. |
 | `OMEGACLAW_SUBAGENT_LLM_RETRIES` | `1` | Retry count after the first worker LLM attempt. |
 | `OMEGACLAW_SUBAGENT_LLM_BACKOFF_S` | `1.0` | Exponential backoff base between worker retries. |
@@ -274,7 +274,7 @@ end-to-end walkthrough.
 | Queued worker sees an escaping task path | `run_queued_dispatch(...)` returns JSON `status=queue_worker_error`; no worker LLM call is attempted. |
 | Queued worker sees a missing/mismatched queue-task checksum sidecar after claiming a task | `run_queued_dispatch(...)` returns JSON `status=queue_worker_error`; claimed task is retained as `*.failed` with a fresh checksum sidecar when possible; no worker LLM call is attempted. |
 | Queued worker sees bad queued JSON/shape after claiming a task | `run_queued_dispatch(...)` returns JSON `status=queue_worker_error`; claimed task is retained as `*.failed` with `*.failed.result.json`; no worker LLM call is attempted for validation failures. |
-| Async worker loop sees an invalid stop-file path/config value | `run_queued_worker_loop(...)` returns JSON `status=worker_config_invalid`; no worker lock is acquired and no queue record is claimed. |
+| Async worker loop sees malformed explicit bounds or an invalid stop-file path/config value | `run_queued_worker_loop(...)` returns JSON `status=worker_config_invalid`; no worker lock is acquired and no queue record is claimed. |
 | Async worker loop sees an existing worker lock | `run_queued_worker_loop(...)` returns JSON `status=worker_already_running` plus any compact `worker_lock` metadata readable from `.async-worker.lock`; no queue record is claimed. |
 | Async worker loop sees its stop-file token before claiming work | `run_queued_worker_loop(...)` returns JSON `status=worker_stopped`; pending queue records remain pending. |
 | Escalation policy denies cloud delegation | Structured JSON `status=error`; `summary` contains `(escalation denied) ...`; transcript status `escalation_denied`. |
