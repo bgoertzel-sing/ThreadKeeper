@@ -1533,6 +1533,38 @@ def test_run_subagent_worker_loop_script_rejects_unsafe_env_file_keys(tmp_path):
         assert key in completed.stderr
 
 
+def test_run_subagent_worker_loop_script_rejects_symlink_and_oversized_env_files(tmp_path):
+    script = ROOT / "scripts" / "run-subagent-worker-loop"
+
+    real_env = tmp_path / "real.env"
+    real_env.write_text("OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_TASKS=0\n", encoding="utf-8")
+    symlink_env = tmp_path / "linked.env"
+    symlink_env.symlink_to(real_env)
+
+    completed = subprocess.run(
+        [sys.executable, str(script), "--env-file", str(symlink_env), "--max-tasks", "0"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode != 0
+    assert "must not be symlinks" in completed.stderr
+
+    huge_env = tmp_path / "huge.env"
+    huge_env.write_text("OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_TASKS=" + ("1" * 5000) + "\n", encoding="utf-8")
+
+    completed = subprocess.run(
+        [sys.executable, str(script), "--env-file", str(huge_env), "--max-tasks", "0"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode != 0
+    assert "is too long" in completed.stderr
+
+
 def test_artifact_local_worker_loop_one_task_smoke_script(tmp_path):
     script = ROOT / "Autotests" / "mock" / "run_worker_loop_one_task_smoke.py"
     completed = subprocess.run(

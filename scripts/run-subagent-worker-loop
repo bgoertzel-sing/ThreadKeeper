@@ -25,6 +25,9 @@ _ENV_FILE_BLOCKED_KEYS = {
     "SHELL",
 }
 _ENV_FILE_BLOCKED_PREFIXES = ("LD_", "DYLD_")
+_ENV_FILE_MAX_BYTES = 64 * 1024
+_ENV_FILE_MAX_LINE_CHARS = 4096
+_ENV_FILE_MAX_VALUE_CHARS = 4096
 
 
 def _validate_env_file_key(key: str, env_path: Path, lineno: int) -> None:
@@ -44,9 +47,24 @@ def _load_env_file(path: str) -> None:
     are taken literally except for one matching pair of single or double quotes.
     No shell expansion is performed.
     """
-    env_path = Path(path).expanduser().resolve()
+    raw_path = Path(path).expanduser()
+    if raw_path.is_symlink():
+        raise ValueError(f"{raw_path}: worker env files must not be symlinks")
+    env_path = raw_path.resolve()
+    stat = env_path.stat()
+    if not env_path.is_file():
+        raise ValueError(f"{env_path}: worker env file is not a regular file")
+    if stat.st_size > _ENV_FILE_MAX_BYTES:
+        raise ValueError(
+            f"{env_path}: worker env file is too large ({stat.st_size} bytes > {_ENV_FILE_MAX_BYTES})"
+        )
     with env_path.open("r", encoding="utf-8") as handle:
         for lineno, raw_line in enumerate(handle, start=1):
+            if len(raw_line) > _ENV_FILE_MAX_LINE_CHARS:
+                raise ValueError(
+                    f"{env_path}:{lineno}: environment line is too long "
+                    f"({len(raw_line)} characters > {_ENV_FILE_MAX_LINE_CHARS})"
+                )
             line = raw_line.strip()
             if not line or line.startswith("#"):
                 continue
@@ -58,6 +76,11 @@ def _load_env_file(path: str) -> None:
             _validate_env_file_key(key, env_path, lineno)
             if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
                 value = value[1:-1]
+            if len(value) > _ENV_FILE_MAX_VALUE_CHARS:
+                raise ValueError(
+                    f"{env_path}:{lineno}: environment value for {key!r} is too long "
+                    f"({len(value)} characters > {_ENV_FILE_MAX_VALUE_CHARS})"
+                )
             os.environ[key] = value
 
 
