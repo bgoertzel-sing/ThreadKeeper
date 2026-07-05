@@ -1393,6 +1393,20 @@ def test_run_queued_worker_loop_writes_finished_lock_metadata(tmp_path, monkeypa
     assert metadata["tasks_attempted"] == 0
 
 
+def test_run_queued_worker_loop_rejects_invalid_stop_file_before_lock(tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs"
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(run_dir))
+
+    result = json.loads(subagent.run_queued_worker_loop(
+        max_tasks=1, poll_interval_s=0, max_idle_polls=0, stop_file="bad\x00token",
+    ))
+
+    assert result["status"] == "worker_config_invalid"
+    assert result["tasks_attempted"] == 0
+    assert "stop_file" in result["summary"]
+    assert not (run_dir / ".async-worker.lock").exists()
+
+
 def test_run_subagent_worker_loop_script_supports_no_claim_smoke(tmp_path):
     script = ROOT / "scripts" / "run-subagent-worker-loop"
     run_dir = tmp_path / "script-runs"

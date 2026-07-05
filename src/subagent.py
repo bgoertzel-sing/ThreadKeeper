@@ -783,6 +783,19 @@ def _coerce_worker_float(value, default, minimum=0.0):
     return max(minimum, coerced)
 
 
+def _validate_worker_stop_file(stop_file):
+    if not stop_file:
+        return ""
+    value = str(stop_file).strip()
+    if not value:
+        return ""
+    if "\x00" in value or len(value) > _SUBAGENT_MAX_PATH_ARG_CHARS:
+        raise ValueError(
+            f"worker stop_file must be a bounded path string (max {_SUBAGENT_MAX_PATH_ARG_CHARS} chars)"
+        )
+    return value
+
+
 def _worker_stop_requested(stop_file):
     if not stop_file:
         return False
@@ -818,8 +831,27 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
     runtime_limit = _coerce_worker_float(
         max_runtime_s, _SUBAGENT_ASYNC_WORKER_MAX_RUNTIME_S, minimum=0.0,
     )
-    stop_path = str(stop_file if stop_file is not None else _SUBAGENT_ASYNC_WORKER_STOP_FILE)
     started_at = time.time()
+    try:
+        stop_path = _validate_worker_stop_file(
+            stop_file if stop_file is not None else _SUBAGENT_ASYNC_WORKER_STOP_FILE
+        )
+    except Exception as e:
+        return json.dumps({
+            "status": "worker_config_invalid",
+            "summary": f"queued subagent async worker loop config invalid: {type(e).__name__}: {e}",
+            "started_at": started_at,
+            "finished_at": time.time(),
+            "max_tasks": task_limit,
+            "poll_interval_s": poll_interval,
+            "max_idle_polls": idle_limit,
+            "max_runtime_s": runtime_limit,
+            "stop_file": "",
+            "tasks_attempted": 0,
+            "tasks_completed": 0,
+            "remaining_queue_tasks": len(_pending_queued_dispatch_paths()),
+            "results": [],
+        }, ensure_ascii=False, sort_keys=True)
     results = []
     tasks_attempted = 0
     idle_polls = 0
