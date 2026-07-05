@@ -1456,6 +1456,60 @@ def test_run_subagent_worker_loop_script_supports_no_claim_smoke(tmp_path):
     assert result["remaining_queue_tasks"] == 0
 
 
+def test_run_subagent_worker_loop_script_loads_operator_env_file(tmp_path):
+    script = ROOT / "scripts" / "run-subagent-worker-loop"
+    env_run_dir = tmp_path / "env-file-runs"
+    cli_run_dir = tmp_path / "cli-runs"
+    env_file = tmp_path / "worker.env"
+    env_file.write_text(
+        f"# conservative staged worker-loop config\n"
+        f"OMEGACLAW_SUBAGENT_RUN_DIR={env_run_dir}\n"
+        f"OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_TASKS=9\n",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--env-file",
+            str(env_file),
+            "--run-dir",
+            str(cli_run_dir),
+            "--max-tasks",
+            "1",
+            "--max-idle-polls",
+            "0",
+            "--poll-interval-s",
+            "0",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    result = json.loads(completed.stdout)
+    assert result["status"] == "worker_idle"
+    assert result["lock_path"].startswith(str(cli_run_dir))
+    assert not env_run_dir.exists()  # explicit CLI run-dir remains the final override
+
+
+def test_run_subagent_worker_loop_script_rejects_bad_env_file(tmp_path):
+    script = ROOT / "scripts" / "run-subagent-worker-loop"
+    env_file = tmp_path / "bad.env"
+    env_file.write_text("not a valid line\n", encoding="utf-8")
+
+    completed = subprocess.run(
+        [sys.executable, str(script), "--env-file", str(env_file), "--max-tasks", "0"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode != 0
+    assert "expected KEY=VALUE" in completed.stderr
+
+
 def test_artifact_local_worker_loop_one_task_smoke_script(tmp_path):
     script = ROOT / "Autotests" / "mock" / "run_worker_loop_one_task_smoke.py"
     completed = subprocess.run(

@@ -121,9 +121,11 @@ local worker from a stale prior run; completed loops leave a final `status` /
 `dispatch` and is not a service manager; deployments must launch it deliberately
 under their chosen supervisor. The repository also provides the conservative
 operator entrypoint `scripts/run-subagent-worker-loop`, which imports `subagent`
-after applying an optional `--run-dir`, invokes one bounded worker-loop run, and
-prints the structured JSON result; `--max-tasks 0` is the intended no-claim smoke
-for install/supervisor wiring checks.
+after loading optional `--env-file KEY=VALUE` operator config files and applying
+an optional `--run-dir`, invokes one bounded worker-loop run, and prints the
+structured JSON result. Env files are parsed without shell expansion, and
+malformed lines fail closed before import; `--max-tasks 0` is the intended
+no-claim smoke for install/supervisor wiring checks.
 
 When a JSON task contract sets `"patch_proposal_only": true`, `write-file` and
 `append-file` calls do not mutate workspace files. Instead they append full

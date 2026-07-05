@@ -10,7 +10,36 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import sys
+
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _load_env_file(path: str) -> None:
+    """Load a small operator env file before importing subagent.
+
+    The format is intentionally conservative: blank lines and # comments are
+    ignored; all other lines must be KEY=VALUE with a shell-env-safe KEY. Values
+    are taken literally except for one matching pair of single or double quotes.
+    No shell expansion is performed.
+    """
+    env_path = Path(path).expanduser().resolve()
+    with env_path.open("r", encoding="utf-8") as handle:
+        for lineno, raw_line in enumerate(handle, start=1):
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                raise ValueError(f"{env_path}:{lineno}: expected KEY=VALUE")
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+            if not _ENV_KEY_RE.match(key):
+                raise ValueError(f"{env_path}:{lineno}: invalid environment key {key!r}")
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+                value = value[1:-1]
+            os.environ[key] = value
 
 
 def _repo_root() -> Path:
@@ -32,6 +61,12 @@ def _optional_float(value: str | None):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="Run a bounded ThreadKeeper subagent queue worker loop once.",
+    )
+    parser.add_argument(
+        "--env-file",
+        action="append",
+        default=[],
+        help="Load a KEY=VALUE operator env file before importing subagent; may be repeated.",
     )
     parser.add_argument(
         "--run-dir",
@@ -76,6 +111,8 @@ def parse_args(argv=None):
 
 def main(argv=None) -> int:
     args = parse_args(argv)
+    for env_file in args.env_file:
+        _load_env_file(env_file)
     if args.run_dir:
         os.environ["OMEGACLAW_SUBAGENT_RUN_DIR"] = args.run_dir
 
