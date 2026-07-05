@@ -46,6 +46,7 @@ import uuid
 import hashlib
 import contextlib
 import math
+import random
 try:
     import fcntl
 except Exception:  # pragma: no cover - non-Unix fallback
@@ -296,6 +297,17 @@ _SUBAGENT_ASYNC_WORKER_MAX_CONSECUTIVE_ERRORS = _env_int(
 )
 _SUBAGENT_ASYNC_WORKER_MAX_RESULTS = _env_int(
     "OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_RESULTS", 16, minimum=0,
+)
+
+# Transcript turn bounding. The full turn list (prompts + raw responses + tool
+# results) is written to the local transcript file for audit/debug. For
+# long-running dispatches this could grow large, so cap the number of turns
+# retained in the transcript and the per-field size of each turn entry.
+_SUBAGENT_MAX_TRANSCRIPT_TURNS = _env_int(
+    "OMEGACLAW_SUBAGENT_MAX_TRANSCRIPT_TURNS", 0, minimum=0,
+)
+_SUBAGENT_MAX_TRANSCRIPT_FIELD_CHARS = _env_int(
+    "OMEGACLAW_SUBAGENT_MAX_TRANSCRIPT_FIELD_CHARS", 0, minimum=0,
 )
 
 # Dispatch-level wall-clock timeout. Even if individual LLM calls are bounded,
@@ -1519,12 +1531,49 @@ def _new_run_record(persona_key, goal):
     }
 
 
+def _bound_transcript_turns(record):
+    """Cap the number of turns and per-field sizes in the transcript record.
+
+    This runs just before the transcript is written to disk. It keeps the most
+    recent turns up to _SUBAGENT_MAX_TRANSCRIPT_TURNS (0 = no cap) and truncates
+    individual turn field strings to _SUBAGENT_MAX_TRANSCRIPT_FIELD_CHARS
+    (0 = no cap). A `transcript_truncated` marker is added when truncation
+    occurs so audit readers know the transcript is a bounded view.
+    """
+    turns = record.get("turns")
+    if not isinstance(turns, list) or not turns:
+        return
+    max_turns = _SUBAGENT_MAX_TRANSCRIPT_TURNS
+    max_field = _SUBAGENT_MAX_TRANSCRIPT_FIELD_CHARS
+    if max_turns <= 0 and max_field <= 0:
+        return
+    truncated = False
+    if max_turns > 0 and len(turns) > max_turns:
+        dropped = len(turns) - max_turns
+        record["turns"] = turns[-max_turns:]
+        record["transcript_truncated"] = {
+            "turns_dropped": dropped,
+            "reason": "exceeds OMEGACLAW_SUBAGENT_MAX_TRANSCRIPT_TURNS",
+        }
+        truncated = True
+    if max_field > 0:
+        for t in record.get("turns", []):
+            for key in ("prompt", "raw_response", "tool_results"):
+                val = t.get(key)
+                if isinstance(val, str) and len(val) > max_field:
+                    t[key] = val[:max_field] + f"\n[...truncated at {max_field} chars...]"
+                    truncated = True
+    if truncated and "transcript_truncated" not in record:
+        record["transcript_truncated"] = {"reason": "field size cap"}
+
+
 def _finish_run_record(record, status, summary=None):
     if not record:
         return ""
     record["status"] = status
     record["summary"] = summary or ""
     record["finished_at"] = time.time()
+    _bound_transcript_turns(record)
     try:
         digest = _json_atomic_write(record["transcript_path"], record)
         sidecar = _write_transcript_integrity_sidecar(record["transcript_path"], digest)
@@ -1886,7 +1935,12 @@ def _call_with_retries(call_once, label):
             except Exception as e:
                 last_exc = e
                 if attempt < attempts:
-                    delay = max(0.0, _SUBAGENT_LLM_BACKOFF_S) * (2 ** (attempt - 1))
+                    base = max(0.0, _SUBAGENT_LLM_BACKOFF_S) * (2 ** (attempt - 1))
+                    # Add jitter (up to 25% of the base delay) to avoid
+                    # thundering-herd retries when multiple subagents
+                    # hit the same endpoint simultaneously.
+                    jitter = random.uniform(0.0, max(0.0, base * 0.25))
+                    delay = base + jitter
                     if delay:
                         time.sleep(delay)
         finally:

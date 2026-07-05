@@ -2024,3 +2024,106 @@ def test_worker_loop_running_lock_metadata_has_live_counters(tmp_path, monkeypat
     assert last_running["consecutive_errors"] == 0
     assert last_running["error_count"] == 0
     assert last_running["tasks_completed"] == 1
+
+
+def test_transcript_turn_bounding_caps_turn_count(monkeypatch, tmp_path):
+    """_bound_transcript_turns drops older turns when the cap is exceeded."""
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_TRANSCRIPT_TURNS", 2)
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_TRANSCRIPT_FIELD_CHARS", 0)
+    record = {
+        "turns": [
+            {"turn": 1, "prompt": "a", "raw_response": "r1", "tool_calls": []},
+            {"turn": 2, "prompt": "b", "raw_response": "r2", "tool_calls": []},
+            {"turn": 3, "prompt": "c", "raw_response": "r3", "tool_calls": []},
+            {"turn": 4, "prompt": "d", "raw_response": "r4", "tool_calls": []},
+        ],
+    }
+    subagent._bound_transcript_turns(record)
+    assert len(record["turns"]) == 2
+    assert record["turns"][0]["turn"] == 3
+    assert record["turns"][1]["turn"] == 4
+    assert record["transcript_truncated"]["turns_dropped"] == 2
+
+
+def test_transcript_turn_bounding_caps_field_sizes(monkeypatch, tmp_path):
+    """_bound_transcript_turns truncates long prompt/response/tool_results fields."""
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_TRANSCRIPT_TURNS", 0)
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_TRANSCRIPT_FIELD_CHARS", 100)
+    long_str = "x" * 500
+    record = {
+        "turns": [
+            {
+                "turn": 1,
+                "prompt": long_str,
+                "raw_response": long_str,
+                "tool_calls": [],
+                "tool_results": long_str,
+            },
+        ],
+    }
+    subagent._bound_transcript_turns(record)
+    t = record["turns"][0]
+    assert len(t["prompt"]) < 200  # 100 + truncation marker
+    assert "truncated" in t["prompt"]
+    assert len(t["raw_response"]) < 200
+    assert "truncated" in t["raw_response"]
+    assert len(t["tool_results"]) < 200
+    assert "truncated" in t["tool_results"]
+    assert "transcript_truncated" in record
+
+
+def test_transcript_turn_bounding_disabled_when_zero(monkeypatch, tmp_path):
+    """_bound_transcript_turns is a no-op when both caps are 0."""
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_TRANSCRIPT_TURNS", 0)
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_TRANSCRIPT_FIELD_CHARS", 0)
+    record = {
+        "turns": [
+            {"turn": 1, "prompt": "x" * 500, "raw_response": "y" * 500, "tool_calls": []},
+        ],
+    }
+    subagent._bound_transcript_turns(record)
+    assert len(record["turns"]) == 1
+    assert len(record["turns"][0]["prompt"]) == 500
+    assert "transcript_truncated" not in record
+
+
+def test_transcript_turn_bounding_preserves_non_string_fields(monkeypatch, tmp_path):
+    """_bound_transcript_turns does not touch non-string fields like tool_calls."""
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_TRANSCRIPT_TURNS", 0)
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_TRANSCRIPT_FIELD_CHARS", 50)
+    tool_calls = [{"name": "read-file", "args": ["file.txt"]}]
+    record = {
+        "turns": [
+            {"turn": 1, "prompt": "short", "raw_response": "short", "tool_calls": tool_calls},
+        ],
+    }
+    subagent._bound_transcript_turns(record)
+    assert record["turns"][0]["tool_calls"] == tool_calls
+
+
+def test_retry_backoff_has_jitter(monkeypatch):
+    """_call_with_retries adds jitter to the exponential backoff delay."""
+    delays = []
+    original_sleep = subagent.time.sleep
+
+    def fake_sleep(d):
+        delays.append(d)
+
+    monkeypatch.setattr(subagent.time, "sleep", fake_sleep)
+    monkeypatch.setattr(subagent, "_SUBAGENT_LLM_RETRIES", 2)
+    monkeypatch.setattr(subagent, "_SUBAGENT_LLM_BACKOFF_S", 1.0)
+
+    call_count = [0]
+
+    def failing_call():
+        call_count[0] += 1
+        raise RuntimeError("fail")
+
+    result = subagent._call_with_retries(failing_call, "test")
+    assert "failed after 3 attempt(s)" in result
+    assert call_count[0] == 3
+    # Should have slept twice (between attempts 1->2 and 2->3)
+    assert len(delays) == 2
+    # Base delays: 1.0 and 2.0, jitter adds up to 25% of each
+    assert 1.0 <= delays[0] <= 1.25
+    assert 2.0 <= delays[1] <= 2.5
