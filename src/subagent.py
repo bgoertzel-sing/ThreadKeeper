@@ -291,6 +291,9 @@ _SUBAGENT_ASYNC_WORKER_MAX_IDLE_POLLS = _env_int("OMEGACLAW_SUBAGENT_ASYNC_WORKE
 _SUBAGENT_ASYNC_WORKER_POLL_INTERVAL_S = _env_float("OMEGACLAW_SUBAGENT_ASYNC_WORKER_POLL_INTERVAL_S", 2.0, minimum=0.0)
 _SUBAGENT_ASYNC_WORKER_MAX_RUNTIME_S = _env_float("OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_RUNTIME_S", 600.0, minimum=0.0)
 _SUBAGENT_ASYNC_WORKER_STOP_FILE = os.environ.get("OMEGACLAW_SUBAGENT_ASYNC_WORKER_STOP_FILE", "")
+_SUBAGENT_ASYNC_WORKER_MAX_CONSECUTIVE_ERRORS = _env_int(
+    "OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_CONSECUTIVE_ERRORS", 3, minimum=0,
+)
 
 # Dispatch-level wall-clock timeout. Even if individual LLM calls are bounded,
 # a subagent making many fast calls could run for a very long time. This cap
@@ -837,7 +840,8 @@ def _worker_stop_requested(stop_file):
 
 
 def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=None,
-                           stop_file=None, max_runtime_s=None):
+                           stop_file=None, max_runtime_s=None,
+                           max_consecutive_errors=None):
     """Run a bounded async worker loop over queued subagent dispatches.
 
     This is the live worker-loop primitive corresponding to queue-only
@@ -865,6 +869,9 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
     runtime_limit = _coerce_worker_float(
         _SUBAGENT_ASYNC_WORKER_MAX_RUNTIME_S, _SUBAGENT_ASYNC_WORKER_MAX_RUNTIME_S, minimum=0.0,
     )
+    consecutive_error_limit = _coerce_worker_limit(
+        _SUBAGENT_ASYNC_WORKER_MAX_CONSECUTIVE_ERRORS, _SUBAGENT_ASYNC_WORKER_MAX_CONSECUTIVE_ERRORS, minimum=0,
+    )
     try:
         task_limit = _validate_worker_limit_arg(
             max_tasks, _SUBAGENT_ASYNC_WORKER_MAX_TASKS, "max_tasks", minimum=0,
@@ -879,6 +886,10 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
         runtime_limit = _validate_worker_float_arg(
             max_runtime_s, _SUBAGENT_ASYNC_WORKER_MAX_RUNTIME_S, "max_runtime_s", minimum=0.0,
         )
+        consecutive_error_limit = _validate_worker_limit_arg(
+            max_consecutive_errors, _SUBAGENT_ASYNC_WORKER_MAX_CONSECUTIVE_ERRORS,
+            "max_consecutive_errors", minimum=0,
+        )
         stop_path = _validate_worker_stop_file(
             stop_file if stop_file is not None else _SUBAGENT_ASYNC_WORKER_STOP_FILE
         )
@@ -892,6 +903,7 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
             "poll_interval_s": poll_interval,
             "max_idle_polls": idle_limit,
             "max_runtime_s": runtime_limit,
+            "max_consecutive_errors": consecutive_error_limit,
             "stop_file": "",
             "tasks_attempted": 0,
             "tasks_completed": 0,
@@ -901,6 +913,8 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
     results = []
     tasks_attempted = 0
     idle_polls = 0
+    consecutive_errors = 0
+    error_count = 0
     if task_limit == 0:
         return json.dumps({
             "status": "worker_idle",
@@ -912,6 +926,7 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
             "poll_interval_s": poll_interval,
             "max_idle_polls": idle_limit,
             "max_runtime_s": runtime_limit,
+            "max_consecutive_errors": consecutive_error_limit,
             "stop_file": stop_path,
             "tasks_attempted": 0,
             "tasks_completed": 0,
@@ -943,6 +958,7 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
             "max_tasks": task_limit,
             "max_idle_polls": idle_limit,
             "max_runtime_s": runtime_limit,
+            "max_consecutive_errors": consecutive_error_limit,
             "stop_file": stop_path,
         })
         try:
@@ -966,13 +982,25 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
                 queue_path = pending[0]
                 tasks_attempted += 1
                 try:
-                    results.append(json.loads(run_queued_dispatch(queue_path)))
+                    result_item = json.loads(run_queued_dispatch(queue_path))
+                    results.append(result_item)
+                    if isinstance(result_item, dict) and result_item.get("status") == "queue_worker_error":
+                        consecutive_errors += 1
+                        error_count += 1
+                    else:
+                        consecutive_errors = 0
                 except Exception as e:
                     results.append({
                         "status": "queue_worker_error",
                         "summary": f"queued worker loop error: {type(e).__name__}: {e}",
                         "queue_path": queue_path,
                     })
+                    consecutive_errors += 1
+                    error_count += 1
+                if (consecutive_error_limit and
+                        consecutive_errors > consecutive_error_limit):
+                    stop_reason = "max_consecutive_errors"
+                    break
             if not stop_reason:
                 stop_reason = "max_tasks"
         finally:
@@ -983,6 +1011,7 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
                 "status": "finished",
                 "stop_reason": stop_reason or "unknown",
                 "tasks_attempted": tasks_attempted,
+                "error_count": error_count,
             })
             if fcntl is not None:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
@@ -1005,10 +1034,13 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
         "poll_interval_s": poll_interval,
         "max_idle_polls": idle_limit,
         "max_runtime_s": runtime_limit,
+        "max_consecutive_errors": consecutive_error_limit,
         "stop_file": stop_path,
         "lock_path": lock_path,
         "tasks_attempted": tasks_attempted,
         "tasks_completed": tasks_completed,
+        "consecutive_errors": consecutive_errors,
+        "error_count": error_count,
         "remaining_queue_tasks": remaining,
         "results": results,
     }, ensure_ascii=False, sort_keys=True)

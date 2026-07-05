@@ -1785,3 +1785,105 @@ def test_worker_token_usage_aggregated_in_structured_return(tmp_path, monkeypatc
     assert usage["total_tokens"] == 270
     saved = json.loads(Path(payload["transcript_path"]).read_text())
     assert saved["worker_token_usage"]["total_tokens"] == 270
+
+
+def test_worker_loop_stops_on_max_consecutive_errors(tmp_path, monkeypatch):
+    """The worker loop should stop early when too many consecutive tasks fail,
+    rather than burning through all max_tasks on a poisoned queue."""
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_QUEUE_ONLY", "1")
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_QUEUED_DISPATCHES", 8)
+    for i in range(5):
+        subagent.dispatch(f"failing task {i}", "write-file", "unit", max_turns=1)
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_a: (_ for _ in ()).throw(RuntimeError("simulated worker failure")),
+    )
+    monkeypatch.setattr(subagent.time, "sleep", lambda *_a: None)
+
+    result = json.loads(subagent.run_queued_worker_loop(
+        max_tasks=8, poll_interval_s=0, max_idle_polls=0, max_runtime_s=30,
+        max_consecutive_errors=2,
+    ))
+
+    assert result["status"] == "worker_drained"
+    assert result["stop_reason"] == "max_consecutive_errors"
+    assert result["consecutive_errors"] == 3
+    assert result["error_count"] == 3
+    assert result["tasks_attempted"] == 3
+    assert result["tasks_completed"] == 0
+    assert result["remaining_queue_tasks"] == 2
+    assert all(r["status"] == "queue_worker_error" for r in result["results"])
+
+
+def test_worker_loop_consecutive_errors_reset_on_success(tmp_path, monkeypatch):
+    """A successful task between failures should reset the consecutive error counter."""
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_QUEUE_ONLY", "1")
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_QUEUED_DISPATCHES", 8)
+    for i in range(5):
+        subagent.dispatch(f"task {i}", "write-file", "unit", max_turns=1)
+    calls = {"n": 0}
+
+    def worker_response(*_args):
+        calls["n"] += 1
+        if calls["n"] in (1, 3, 5):
+            raise RuntimeError("simulated worker failure")
+        return ('(emit "ok")', 1, 1)
+
+    monkeypatch.setattr(subagent, "_call_subagent_llm", worker_response)
+    monkeypatch.setattr(subagent.time, "sleep", lambda *_a: None)
+
+    result = json.loads(subagent.run_queued_worker_loop(
+        max_tasks=8, poll_interval_s=0, max_idle_polls=0, max_runtime_s=30,
+        max_consecutive_errors=2,
+    ))
+
+    assert result["stop_reason"] in ("max_tasks", "idle")
+    assert result["tasks_attempted"] == 5
+    assert result["error_count"] == 3
+    assert result["consecutive_errors"] == 1
+    statuses = [r.get("status") for r in result["results"]]
+    assert statuses.count("queue_worker_error") == 3
+    assert statuses.count("ok") == 2
+
+
+def test_worker_loop_max_consecutive_errors_disabled(tmp_path, monkeypatch):
+    """max_consecutive_errors=0 disables the consecutive-error limit."""
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_QUEUE_ONLY", "1")
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_QUEUED_DISPATCHES", 8)
+    for i in range(3):
+        subagent.dispatch(f"failing task {i}", "write-file", "unit", max_turns=1)
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_a: (_ for _ in ()).throw(RuntimeError("simulated worker failure")),
+    )
+    monkeypatch.setattr(subagent.time, "sleep", lambda *_a: None)
+
+    result = json.loads(subagent.run_queued_worker_loop(
+        max_tasks=5, poll_interval_s=0, max_idle_polls=0, max_runtime_s=30,
+        max_consecutive_errors=0,
+    ))
+
+    assert result["stop_reason"] in ("max_tasks", "idle")
+    assert result["tasks_attempted"] == 3
+    assert result["error_count"] == 3
+    assert result["consecutive_errors"] == 3
+    assert result["remaining_queue_tasks"] == 0
+
+
+def test_worker_loop_rejects_malformed_max_consecutive_errors(tmp_path, monkeypatch):
+    """Non-integer or fractional max_consecutive_errors should fail closed."""
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr(subagent.time, "sleep", lambda *_a: None)
+
+    for bad_val in (True, "3", 1.5, -1):
+        result = json.loads(subagent.run_queued_worker_loop(
+            max_tasks=1, poll_interval_s=0, max_idle_polls=0,
+            max_consecutive_errors=bad_val,
+        ))
+        assert result["status"] == "worker_config_invalid"
+        assert "max_consecutive_errors" in result["summary"]

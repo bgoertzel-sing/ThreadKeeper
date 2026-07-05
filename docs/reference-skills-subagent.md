@@ -111,7 +111,7 @@ records in oldest-first order and returns compact JSON metadata. It deliberately
 does not daemonize, sleep, poll forever, or auto-start from `dispatch`.
 `subagent.run_queued_worker_loop(...)` is the corresponding supervised async
 worker loop: it repeatedly claims pending queue records until an explicit bound
-is reached (`max_tasks`, `max_idle_polls`, `max_runtime_s`, or a `stop_file`).
+is reached (`max_tasks`, `max_idle_polls`, `max_runtime_s`, `max_consecutive_errors`, or a `stop_file`).
 The loop uses a best-effort local lock (`.async-worker.lock`) to avoid two local
 workers draining the same queue concurrently when `fcntl` is available. While
 held, the lock file contains compact JSON metadata (`pid`, `started_at`, bounds,
@@ -187,7 +187,7 @@ denial reason. Errors are never raised into the parent's MeTTa interpreter.
   index chain and transcript hashes.
   Queued tasks can be consumed one at a time by `run_queued_dispatch`, or in a
   small bounded batch by `drain_queued_dispatches(max_tasks=...)`, or by the
-  bounded async loop `run_queued_worker_loop(max_tasks=..., poll_interval_s=..., max_idle_polls=..., stop_file=..., max_runtime_s=...)`.
+  bounded async loop `run_queued_worker_loop(max_tasks=..., poll_interval_s=..., max_idle_polls=..., stop_file=..., max_runtime_s=..., max_consecutive_errors=...)`.
   These paths use atomic claim/finish filenames, validate queue-record
   shape/contracts, and preserve the queued task contract through the worker
   dispatch rather than trusting or dropping queue-record contents. The async loop
@@ -236,6 +236,7 @@ clamped instead of crashing the module or disabling guards accidentally.
 | `OMEGACLAW_SUBAGENT_ASYNC_WORKER_POLL_INTERVAL_S` | `2.0` | Default sleep interval between empty queue polls inside the supervised worker loop. |
 | `OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_RUNTIME_S` | `600.0` | Default wall-clock cap for one explicit worker-loop invocation; `0` disables the runtime cap. |
 | `OMEGACLAW_SUBAGENT_ASYNC_WORKER_STOP_FILE` | unset | Optional stop-token path; if it exists, `run_queued_worker_loop(...)` exits before claiming more work. Malformed explicit worker-loop bounds and NUL-containing or overlong stop-file values fail closed before the worker lock/queue claim. |
+| `OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_CONSECUTIVE_ERRORS` | `3` | Max consecutive `queue_worker_error` results before the worker loop exits early; `0` disables the consecutive-error limit. |
 | `OMEGACLAW_SUBAGENT_LLM_TIMEOUT_S` | `180` | Timeout for each worker LLM call. |
 | `OMEGACLAW_SUBAGENT_LLM_RETRIES` | `1` | Retry count after the first worker LLM attempt. |
 | `OMEGACLAW_SUBAGENT_LLM_BACKOFF_S` | `1.0` | Exponential backoff base between worker retries. |
@@ -282,6 +283,7 @@ end-to-end walkthrough.
 | Async worker loop sees malformed explicit bounds or an invalid stop-file path/config value | `run_queued_worker_loop(...)` returns JSON `status=worker_config_invalid`; no worker lock is acquired and no queue record is claimed. |
 | Async worker loop sees an existing worker lock | `run_queued_worker_loop(...)` returns JSON `status=worker_already_running` plus any compact `worker_lock` metadata readable from `.async-worker.lock`; no queue record is claimed. |
 | Async worker loop sees its stop-file token before claiming work | `run_queued_worker_loop(...)` returns JSON `status=worker_stopped`; pending queue records remain pending. |
+| Async worker loop exceeds `max_consecutive_errors` | `run_queued_worker_loop(...)` stops early with `stop_reason=max_consecutive_errors`; `consecutive_errors` and `error_count` in the structured return; remaining queue tasks stay pending. |
 | Escalation policy denies cloud delegation | Structured JSON `status=error`; `summary` contains `(escalation denied) ...`; transcript status `escalation_denied`. |
 | Subagent endpoint times out / errors | Structured JSON `status=error`; `summary` contains `(subagent LLM call failed: <ExceptionType>: <reason>)`; transcript status `llm_failed`. |
 | Worker mixes `emit` with other parsed calls or multiple emits | Structured JSON `status=error` and `EMIT_PROTOCOL_VIOLATION`; transcript status `emit_protocol_violation`. |
