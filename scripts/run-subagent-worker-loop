@@ -14,6 +14,26 @@ import re
 import sys
 
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_ENV_FILE_BLOCKED_KEYS = {
+    "BASH_ENV",
+    "ENV",
+    "HOME",
+    "IFS",
+    "PATH",
+    "PYTHONHOME",
+    "PYTHONPATH",
+    "SHELL",
+}
+_ENV_FILE_BLOCKED_PREFIXES = ("LD_", "DYLD_")
+
+
+def _validate_env_file_key(key: str, env_path: Path, lineno: int) -> None:
+    if not _ENV_KEY_RE.match(key):
+        raise ValueError(f"{env_path}:{lineno}: invalid environment key {key!r}")
+    if key in _ENV_FILE_BLOCKED_KEYS or any(key.startswith(prefix) for prefix in _ENV_FILE_BLOCKED_PREFIXES):
+        raise ValueError(
+            f"{env_path}:{lineno}: unsafe environment key {key!r} is not allowed in worker env files"
+        )
 
 
 def _load_env_file(path: str) -> None:
@@ -35,8 +55,7 @@ def _load_env_file(path: str) -> None:
             key, value = line.split("=", 1)
             key = key.strip()
             value = value.strip()
-            if not _ENV_KEY_RE.match(key):
-                raise ValueError(f"{env_path}:{lineno}: invalid environment key {key!r}")
+            _validate_env_file_key(key, env_path, lineno)
             if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
                 value = value[1:-1]
             os.environ[key] = value

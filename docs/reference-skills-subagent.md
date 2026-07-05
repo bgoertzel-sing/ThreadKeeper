@@ -124,7 +124,10 @@ operator entrypoint `scripts/run-subagent-worker-loop`, which imports `subagent`
 after loading optional `--env-file KEY=VALUE` operator config files and applying
 an optional `--run-dir`, invokes one bounded worker-loop run, and prints the
 structured JSON result. Env files are parsed without shell expansion, and
-malformed lines fail closed before import; `--max-tasks 0` is the intended
+malformed lines fail closed before import. Process-control keys that could
+change interpreter/subprocess loading behavior (`PATH`, `PYTHONPATH`,
+`PYTHONHOME`, `LD_*`, `DYLD_*`, `BASH_ENV`, `ENV`, `HOME`, `IFS`, `SHELL`) are
+rejected from runner env files before import; `--max-tasks 0` is the intended
 no-claim smoke for install/supervisor wiring checks.
 
 When a JSON task contract sets `"patch_proposal_only": true`, `write-file` and

@@ -1510,6 +1510,29 @@ def test_run_subagent_worker_loop_script_rejects_bad_env_file(tmp_path):
     assert "expected KEY=VALUE" in completed.stderr
 
 
+def test_run_subagent_worker_loop_script_rejects_unsafe_env_file_keys(tmp_path):
+    script = ROOT / "scripts" / "run-subagent-worker-loop"
+    cases = [
+        ("PYTHONPATH=/tmp/hijack\n", "PYTHONPATH"),
+        ("LD_PRELOAD=/tmp/libhack.so\n", "LD_PRELOAD"),
+        ("PATH=/tmp/fake-bin\n", "PATH"),
+    ]
+    for content, key in cases:
+        env_file = tmp_path / f"bad-{key}.env"
+        env_file.write_text(content, encoding="utf-8")
+
+        completed = subprocess.run(
+            [sys.executable, str(script), "--env-file", str(env_file), "--max-tasks", "0"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        assert completed.returncode != 0
+        assert "unsafe environment key" in completed.stderr
+        assert key in completed.stderr
+
+
 def test_artifact_local_worker_loop_one_task_smoke_script(tmp_path):
     script = ROOT / "Autotests" / "mock" / "run_worker_loop_one_task_smoke.py"
     completed = subprocess.run(
