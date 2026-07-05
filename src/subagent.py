@@ -310,6 +310,14 @@ _SUBAGENT_MAX_TRANSCRIPT_FIELD_CHARS = _env_int(
     "OMEGACLAW_SUBAGENT_MAX_TRANSCRIPT_FIELD_CHARS", 0, minimum=0,
 )
 
+# Queue task max age. When non-zero, a queued task older than this many seconds
+# is rejected before any worker LLM call, preventing stale/expired work from
+# being processed after a long supervisor outage or queue backlog. Set to 0 to
+# disable (default).
+_SUBAGENT_MAX_QUEUED_TASK_AGE_S = _env_float(
+    "OMEGACLAW_SUBAGENT_MAX_QUEUED_TASK_AGE_S", 0.0, minimum=0.0,
+)
+
 # Dispatch-level wall-clock timeout. Even if individual LLM calls are bounded,
 # a subagent making many fast calls could run for a very long time. This cap
 # is checked before each LLM call and tool execution in the dispatch loop.
@@ -1197,6 +1205,12 @@ def _validate_queued_dispatch_task(task):
         or queued_at < 0
     ):
         raise ValueError("queued dispatch task queued_at must be a finite non-negative number")
+    if _SUBAGENT_MAX_QUEUED_TASK_AGE_S and isinstance(queued_at, (int, float)) and not isinstance(queued_at, bool):
+        task_age = time.time() - float(queued_at)
+        if task_age > _SUBAGENT_MAX_QUEUED_TASK_AGE_S:
+            raise ValueError(
+                f"queued dispatch task expired: age {task_age:.1f}s exceeds max {_SUBAGENT_MAX_QUEUED_TASK_AGE_S}s"
+            )
     cancel_file = task.get("cancel_file", "")
     if not isinstance(cancel_file, str) or "\x00" in cancel_file or len(cancel_file) > _SUBAGENT_MAX_PATH_ARG_CHARS:
         raise ValueError("queued dispatch task cancel_file must be a bounded path string")
