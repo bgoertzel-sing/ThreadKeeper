@@ -1456,6 +1456,28 @@ def test_run_subagent_worker_loop_script_supports_no_claim_smoke(tmp_path):
     assert result["remaining_queue_tasks"] == 0
 
 
+def test_artifact_local_worker_loop_one_task_smoke_script(tmp_path):
+    script = ROOT / "Autotests" / "mock" / "run_worker_loop_one_task_smoke.py"
+    completed = subprocess.run(
+        [sys.executable, str(script), str(tmp_path / "artifact-smoke")],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    result = json.loads(completed.stdout)
+    worker = result["worker"]
+    queued = result["queued"]
+    assert result["status"] == "smoke_passed"
+    assert worker["status"] == "worker_drained"
+    assert worker["tasks_attempted"] == 1
+    assert worker["tasks_completed"] == 1
+    assert worker["remaining_queue_tasks"] == 0
+    assert queued["status"] == "queued"
+    assert Path(queued["queue_path"] + ".done").exists()
+    assert Path(queued["queue_path"] + ".done.result.json").exists()
+
+
 def test_queue_only_dispatch_backpressure_fails_before_worker_llm(tmp_path, monkeypatch):
     _write_unit_persona(tmp_path, monkeypatch)
     queue_dir = tmp_path / "runs" / "queue"
