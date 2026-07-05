@@ -1887,3 +1887,140 @@ def test_worker_loop_rejects_malformed_max_consecutive_errors(tmp_path, monkeypa
         ))
         assert result["status"] == "worker_config_invalid"
         assert "max_consecutive_errors" in result["summary"]
+
+
+def test_worker_loop_results_truncated(tmp_path, monkeypatch):
+    """When results exceed the cap, older entries are dropped and results_truncated is set."""
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr(subagent.time, "sleep", lambda *_a: None)
+    monkeypatch.setattr(subagent, "_SUBAGENT_ASYNC_WORKER_MAX_RESULTS", 2)
+
+    run_dir = tmp_path / "runs"
+    queue_dir = run_dir / "queue"
+    queue_dir.mkdir(parents=True)
+
+    for i in range(5):
+        task = {"run_id": f"r{i}", "persona_key": "p", "prompt": "hi",
+                "tool_subset": ["emit"], "max_turns": 1, "max_chars": 1000}
+        task_path = queue_dir / f"task{i}.json"
+        task_path.write_text(json.dumps(task))
+        sha_path = queue_dir / f"task{i}.sha256"
+        sha_path.write_text(subagent.hashlib.sha256(task_path.read_bytes()).hexdigest())
+
+    processed = set()
+
+    def fake_pending():
+        return sorted(p for p in queue_dir.glob("task[0-9].json")
+                       if p.name not in processed)
+
+    def fake_run_queued_dispatch(queue_path):
+        idx = int(Path(queue_path).stem.replace("task", ""))
+        processed.add(Path(queue_path).name)
+        return json.dumps({"status": "ok", "summary": f"task {idx}", "run_id": f"r{idx}"})
+
+    monkeypatch.setattr(subagent, "run_queued_dispatch", fake_run_queued_dispatch)
+    monkeypatch.setattr(subagent, "_pending_queued_dispatch_paths", fake_pending)
+
+    result = json.loads(subagent.run_queued_worker_loop(
+        max_tasks=5, poll_interval_s=0, max_idle_polls=0,
+    ))
+    assert result["status"] == "worker_drained"
+    assert result["tasks_attempted"] == 5
+    assert result["results_truncated"] == 3
+    assert len(result["results"]) == 2
+    assert result["results"][-1]["run_id"] == "r4"
+    assert result["results"][0]["run_id"] == "r3"
+
+
+def test_worker_loop_results_truncated_disabled(tmp_path, monkeypatch):
+    """When _SUBAGENT_ASYNC_WORKER_MAX_RESULTS is 0, no truncation occurs."""
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr(subagent.time, "sleep", lambda *_a: None)
+    monkeypatch.setattr(subagent, "_SUBAGENT_ASYNC_WORKER_MAX_RESULTS", 0)
+
+    run_dir = tmp_path / "runs"
+    queue_dir = run_dir / "queue"
+    queue_dir.mkdir(parents=True)
+
+    for i in range(3):
+        task = {"run_id": f"r{i}", "persona_key": "p", "prompt": "hi",
+                "tool_subset": ["emit"], "max_turns": 1, "max_chars": 1000}
+        task_path = queue_dir / f"task{i}.json"
+        task_path.write_text(json.dumps(task))
+        sha_path = queue_dir / f"task{i}.sha256"
+        sha_path.write_text(subagent.hashlib.sha256(task_path.read_bytes()).hexdigest())
+
+    processed = set()
+
+    def fake_pending():
+        return sorted(p for p in queue_dir.glob("task[0-9].json")
+                       if p.name not in processed)
+
+    def fake_run_queued_dispatch(queue_path):
+        idx = int(Path(queue_path).stem.replace("task", ""))
+        processed.add(Path(queue_path).name)
+        return json.dumps({"status": "ok", "summary": f"task {idx}", "run_id": f"r{idx}"})
+
+    monkeypatch.setattr(subagent, "run_queued_dispatch", fake_run_queued_dispatch)
+    monkeypatch.setattr(subagent, "_pending_queued_dispatch_paths", fake_pending)
+
+    result = json.loads(subagent.run_queued_worker_loop(
+        max_tasks=3, poll_interval_s=0, max_idle_polls=0,
+    ))
+    assert result["status"] == "worker_drained"
+    assert result["tasks_attempted"] == 3
+    assert result["results_truncated"] == 0
+    assert len(result["results"]) == 3
+
+
+def test_worker_loop_running_lock_metadata_has_live_counters(tmp_path, monkeypatch):
+    """Running lock metadata should include tasks_attempted, consecutive_errors, and error_count."""
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr(subagent.time, "sleep", lambda *_a: None)
+
+    run_dir = tmp_path / "runs"
+    queue_dir = run_dir / "queue"
+    queue_dir.mkdir(parents=True)
+
+    task = {"run_id": "r0", "persona_key": "p", "prompt": "hi",
+            "tool_subset": ["emit"], "max_turns": 1, "max_chars": 1000}
+    task_path = queue_dir / "task0.json"
+    task_path.write_text(json.dumps(task))
+    sha_path = queue_dir / "task0.sha256"
+    sha_path.write_text(subagent.hashlib.sha256(task_path.read_bytes()).hexdigest())
+
+    processed = set()
+
+    def fake_pending():
+        return sorted(p for p in queue_dir.glob("task[0-9].json")
+                       if p.name not in processed)
+
+    captured_metadata = []
+    original_write = subagent._write_worker_loop_lock_metadata
+
+    def capturing_write(lock, metadata):
+        captured_metadata.append(dict(metadata))
+        original_write(lock, metadata)
+
+    monkeypatch.setattr(subagent, "_write_worker_loop_lock_metadata", capturing_write)
+
+    def fake_run_queued_dispatch(queue_path):
+        processed.add(Path(queue_path).name)
+        return json.dumps({"status": "ok", "summary": "done", "run_id": "r0"})
+
+    monkeypatch.setattr(subagent, "run_queued_dispatch", fake_run_queued_dispatch)
+    monkeypatch.setattr(subagent, "_pending_queued_dispatch_paths", fake_pending)
+
+    result = json.loads(subagent.run_queued_worker_loop(
+        max_tasks=1, poll_interval_s=0, max_idle_polls=0,
+    ))
+    assert result["status"] == "worker_drained"
+
+    # Find the last "running" metadata entry (before "finished")
+    running_entries = [m for m in captured_metadata if m.get("status") == "running"]
+    assert len(running_entries) >= 2  # initial + after-task update
+    last_running = running_entries[-1]
+    assert last_running["tasks_attempted"] == 1
+    assert last_running["consecutive_errors"] == 0
+    assert last_running["error_count"] == 0
+    assert last_running["tasks_completed"] == 1

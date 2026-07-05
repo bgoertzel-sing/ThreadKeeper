@@ -237,6 +237,7 @@ clamped instead of crashing the module or disabling guards accidentally.
 | `OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_RUNTIME_S` | `600.0` | Default wall-clock cap for one explicit worker-loop invocation; `0` disables the runtime cap. |
 | `OMEGACLAW_SUBAGENT_ASYNC_WORKER_STOP_FILE` | unset | Optional stop-token path; if it exists, `run_queued_worker_loop(...)` exits before claiming more work. Malformed explicit worker-loop bounds and NUL-containing or overlong stop-file values fail closed before the worker lock/queue claim. |
 | `OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_CONSECUTIVE_ERRORS` | `3` | Max consecutive `queue_worker_error` results before the worker loop exits early; `0` disables the consecutive-error limit. |
+| `OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_RESULTS` | `16` | Max result entries kept in the worker-loop structured return; older entries are dropped and counted in `results_truncated`. `0` disables the cap. |
 | `OMEGACLAW_SUBAGENT_LLM_TIMEOUT_S` | `180` | Timeout for each worker LLM call. |
 | `OMEGACLAW_SUBAGENT_LLM_RETRIES` | `1` | Retry count after the first worker LLM attempt. |
 | `OMEGACLAW_SUBAGENT_LLM_BACKOFF_S` | `1.0` | Exponential backoff base between worker retries. |

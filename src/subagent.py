@@ -294,6 +294,9 @@ _SUBAGENT_ASYNC_WORKER_STOP_FILE = os.environ.get("OMEGACLAW_SUBAGENT_ASYNC_WORK
 _SUBAGENT_ASYNC_WORKER_MAX_CONSECUTIVE_ERRORS = _env_int(
     "OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_CONSECUTIVE_ERRORS", 3, minimum=0,
 )
+_SUBAGENT_ASYNC_WORKER_MAX_RESULTS = _env_int(
+    "OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_RESULTS", 16, minimum=0,
+)
 
 # Dispatch-level wall-clock timeout. Even if individual LLM calls are bounded,
 # a subagent making many fast calls could run for a very long time. This cap
@@ -907,6 +910,7 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
             "stop_file": "",
             "tasks_attempted": 0,
             "tasks_completed": 0,
+            "results_truncated": 0,
             "remaining_queue_tasks": len(_pending_queued_dispatch_paths()),
             "results": [],
         }, ensure_ascii=False, sort_keys=True)
@@ -930,6 +934,7 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
             "stop_file": stop_path,
             "tasks_attempted": 0,
             "tasks_completed": 0,
+            "results_truncated": 0,
             "remaining_queue_tasks": len(_pending_queued_dispatch_paths()),
             "results": [],
         }, ensure_ascii=False, sort_keys=True)
@@ -948,6 +953,7 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
                     "worker_lock": _read_worker_loop_lock_metadata(lock_path),
                     "tasks_attempted": 0,
                     "tasks_completed": 0,
+                    "results_truncated": 0,
                     "remaining_queue_tasks": len(_pending_queued_dispatch_paths()),
                 }, ensure_ascii=False, sort_keys=True)
         _write_worker_loop_lock_metadata(lock, {
@@ -960,6 +966,10 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
             "max_runtime_s": runtime_limit,
             "max_consecutive_errors": consecutive_error_limit,
             "stop_file": stop_path,
+            "tasks_attempted": 0,
+            "tasks_completed": 0,
+            "consecutive_errors": 0,
+            "error_count": 0,
         })
         try:
             while task_limit <= 0 or tasks_attempted < task_limit:
@@ -997,6 +1007,22 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
                     })
                     consecutive_errors += 1
                     error_count += 1
+                # Update running lock metadata for operator visibility.
+                _write_worker_loop_lock_metadata(lock, {
+                    "pid": os.getpid(),
+                    "started_at": started_at,
+                    "status": "running",
+                    "run_dir": SUBAGENT_RUN_DIR,
+                    "max_tasks": task_limit,
+                    "max_idle_polls": idle_limit,
+                    "max_runtime_s": runtime_limit,
+                    "max_consecutive_errors": consecutive_error_limit,
+                    "stop_file": stop_path,
+                    "tasks_attempted": tasks_attempted,
+                    "tasks_completed": sum(1 for item in results if item.get("status") not in ("queue_worker_error",)),
+                    "consecutive_errors": consecutive_errors,
+                    "error_count": error_count,
+                })
                 if (consecutive_error_limit and
                         consecutive_errors > consecutive_error_limit):
                     stop_reason = "max_consecutive_errors"
@@ -1018,6 +1044,10 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
 
     remaining = len(_pending_queued_dispatch_paths())
     tasks_completed = sum(1 for item in results if item.get("status") not in ("queue_worker_error",))
+    results_truncated = 0
+    if _SUBAGENT_ASYNC_WORKER_MAX_RESULTS and len(results) > _SUBAGENT_ASYNC_WORKER_MAX_RESULTS:
+        results_truncated = len(results) - _SUBAGENT_ASYNC_WORKER_MAX_RESULTS
+        results = results[-_SUBAGENT_ASYNC_WORKER_MAX_RESULTS:]
     if results:
         status = "worker_drained"
     elif stop_reason == "stop_file":
@@ -1041,6 +1071,7 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
         "tasks_completed": tasks_completed,
         "consecutive_errors": consecutive_errors,
         "error_count": error_count,
+        "results_truncated": results_truncated,
         "remaining_queue_tasks": remaining,
         "results": results,
     }, ensure_ascii=False, sort_keys=True)
