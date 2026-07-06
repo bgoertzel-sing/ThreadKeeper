@@ -1518,6 +1518,90 @@ def test_run_queued_worker_loop_rejects_malformed_explicit_bounds_before_lock(tm
     assert not (run_dir / ".async-worker.lock").exists()
 
 
+def test_run_queued_worker_loop_detects_stale_lock_from_crashed_worker(tmp_path, monkeypatch):
+    """When a new worker acquires a flock left by a crashed previous worker,
+    the structured return includes ``stale_lock`` audit metadata."""
+    run_dir = tmp_path / "runs"
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(run_dir))
+    monkeypatch.setattr(subagent.time, "sleep", lambda *_args: None)
+    lock_path = run_dir / ".async-worker.lock"
+    lock_path.parent.mkdir(parents=True)
+
+    # Simulate a crashed previous worker: write lock metadata with status=running
+    # but do NOT hold the flock (as if the process died and the OS released it).
+    stale_metadata = {
+        "pid": 99999,
+        "started_at": 1000.0,
+        "status": "running",
+        "run_dir": str(run_dir),
+        "max_tasks": 4,
+        "tasks_attempted": 2,
+        "tasks_completed": 1,
+        "consecutive_errors": 0,
+        "error_count": 0,
+    }
+    with lock_path.open("w", encoding="utf-8") as f:
+        f.write(json.dumps(stale_metadata, ensure_ascii=False, sort_keys=True))
+        f.write("\n")
+
+    result = json.loads(subagent.run_queued_worker_loop(
+        max_tasks=1, poll_interval_s=0, max_idle_polls=0,
+    ))
+
+    assert result["status"] == "worker_idle"
+    assert result["stale_lock"] is not None
+    assert result["stale_lock"]["pid"] == 99999
+    assert result["stale_lock"]["status"] == "running"
+    assert result["stale_lock"]["started_at"] == 1000.0
+
+    # The lock file should now show finished metadata from the new worker.
+    finished_metadata = json.loads(lock_path.read_text(encoding="utf-8"))
+    assert finished_metadata["status"] == "finished"
+    assert finished_metadata["pid"] != 99999
+
+
+def test_run_queued_worker_loop_no_stale_lock_on_fresh_start(tmp_path, monkeypatch):
+    """No ``stale_lock`` field when no previous lock file exists."""
+    run_dir = tmp_path / "runs"
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(run_dir))
+    monkeypatch.setattr(subagent.time, "sleep", lambda *_args: None)
+
+    result = json.loads(subagent.run_queued_worker_loop(
+        max_tasks=0, poll_interval_s=0, max_idle_polls=0,
+    ))
+
+    assert result["status"] == "worker_idle"
+    assert result["stale_lock"] is None
+
+
+def test_run_queued_worker_loop_no_stale_lock_after_clean_shutdown(tmp_path, monkeypatch):
+    """No ``stale_lock`` when the previous worker wrote status=finished."""
+    run_dir = tmp_path / "runs"
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(run_dir))
+    monkeypatch.setattr(subagent.time, "sleep", lambda *_args: None)
+    lock_path = run_dir / ".async-worker.lock"
+    lock_path.parent.mkdir(parents=True)
+
+    clean_metadata = {
+        "pid": 12345,
+        "started_at": 500.0,
+        "finished_at": 501.0,
+        "status": "finished",
+        "stop_reason": "idle",
+        "tasks_attempted": 0,
+    }
+    with lock_path.open("w", encoding="utf-8") as f:
+        f.write(json.dumps(clean_metadata, ensure_ascii=False, sort_keys=True))
+        f.write("\n")
+
+    result = json.loads(subagent.run_queued_worker_loop(
+        max_tasks=0, poll_interval_s=0, max_idle_polls=0,
+    ))
+
+    assert result["status"] == "worker_idle"
+    assert result["stale_lock"] is None
+
+
 def test_run_subagent_worker_loop_script_supports_no_claim_smoke(tmp_path):
     script = ROOT / "scripts" / "run-subagent-worker-loop"
     run_dir = tmp_path / "script-runs"

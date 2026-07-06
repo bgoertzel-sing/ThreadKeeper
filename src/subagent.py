@@ -970,6 +970,7 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
             "max_runtime_s": runtime_limit,
             "max_consecutive_errors": consecutive_error_limit,
             "stop_file": stop_path,
+            "stale_lock": None,
             "tasks_attempted": 0,
             "tasks_completed": 0,
             "results_truncated": 0,
@@ -978,6 +979,15 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
         }, ensure_ascii=False, sort_keys=True)
     stop_reason = ""
     lock_path = _worker_loop_lock_path()
+    stale_lock = None
+
+    # Read existing lock metadata before acquiring. If the file shows
+    # ``status=running`` but we can acquire the flock, the previous worker
+    # died without a clean shutdown (e.g. SIGKILL, OOM). Record this for
+    # operator/supervisor audit so crashed workers are visible.
+    pre_existing_lock = _read_worker_loop_lock_metadata(lock_path)
+    if pre_existing_lock.get("status") == "running":
+        stale_lock = pre_existing_lock
 
     with open(lock_path, "a+", encoding="utf-8") as lock:
         if fcntl is not None:
@@ -989,6 +999,7 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
                     "summary": "queued subagent async worker loop is already running",
                     "lock_path": lock_path,
                     "worker_lock": _read_worker_loop_lock_metadata(lock_path),
+                    "stale_lock": stale_lock,
                     "tasks_attempted": 0,
                     "tasks_completed": 0,
                     "results_truncated": 0,
@@ -1137,6 +1148,7 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
         "max_consecutive_errors": consecutive_error_limit,
         "stop_file": stop_path,
         "lock_path": lock_path,
+        "stale_lock": stale_lock,
         "tasks_attempted": tasks_attempted,
         "tasks_completed": tasks_completed,
         "consecutive_errors": consecutive_errors,
