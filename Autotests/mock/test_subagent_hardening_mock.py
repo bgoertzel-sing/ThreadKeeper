@@ -2270,3 +2270,77 @@ def test_dispatch_token_budget_not_exceeded_under_cap(tmp_path, monkeypatch):
 
     assert payload["status"] == "ok"
     assert payload.get("worker_token_usage", {}).get("total_tokens") == 270
+
+
+def test_tool_error_messages_sanitize_absolute_paths(tmp_path, monkeypatch):
+    """Tool error messages must not leak absolute filesystem paths to the worker LLM."""
+    _write_unit_persona(tmp_path, monkeypatch)
+    workspace = str(tmp_path / "workspace")
+    (tmp_path / "workspace").mkdir()
+
+    # read-file on a path that escapes workspace
+    result = subagent._tool_read_file("../../../../etc/passwd")
+    assert "read-file error" in result
+    assert workspace not in result
+    assert "/home/" not in result
+    assert tmp_path.as_posix() not in result
+
+    # write-file with path escape
+    result = subagent._tool_write_file("../../../etc/evil", "content")
+    assert "write-file error" in result
+    assert workspace not in result
+    assert tmp_path.as_posix() not in result
+
+    # append-file with path escape
+    result = subagent._tool_append_file("../../../tmp/evil", "content")
+    assert "append-file error" in result
+    assert workspace not in result
+    assert tmp_path.as_posix() not in result
+
+
+def test_resolve_workspace_path_error_does_not_leak_root(tmp_path, monkeypatch):
+    """_resolve_workspace_path error must not include the absolute workspace root."""
+    _write_unit_persona(tmp_path, monkeypatch)
+    try:
+        subagent._resolve_workspace_path("../../../../etc/passwd")
+        assert False, "should have raised"
+    except ValueError as e:
+        msg = str(e)
+        assert "escapes subagent workspace" in msg
+        # The absolute workspace root must not appear in the error
+        workspace = str(tmp_path / "workspace")
+        assert workspace not in msg
+        assert tmp_path.as_posix() not in msg
+
+
+def test_sanitize_error_msg_replaces_workspace_and_absolute_paths(tmp_path, monkeypatch):
+    """_sanitize_error_msg replaces workspace root and absolute paths with placeholders."""
+    _write_unit_persona(tmp_path, monkeypatch)
+    workspace = str(tmp_path / "workspace")
+
+    # Workspace root in message
+    msg = subagent._sanitize_error_msg(Exception(f"FileNotFoundError: {workspace}/missing.txt"))
+    assert workspace not in msg
+    assert "<workspace>" in msg
+
+    # Other absolute paths
+    msg2 = subagent._sanitize_error_msg(Exception("permission denied: /tmp/secret"))
+    assert "/tmp/secret" not in msg2
+    assert "<path>" in msg2
+
+    # No paths - unchanged
+    msg3 = subagent._sanitize_error_msg(Exception("invalid path"))
+    assert "invalid path" in msg3
+    assert "<" not in msg3
+
+
+def test_shell_error_does_not_leak_workspace_path(tmp_path, monkeypatch):
+    """Shell tool error for missing workspace must not leak the absolute path."""
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setattr(subagent, "_shell_enabled", lambda: True)
+    monkeypatch.setattr(subagent, "_shell_allowlist", lambda: {"echo"})
+    # Point workspace to a non-existent directory
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_WORKSPACE", str(tmp_path / "no_such_dir"))
+    result = subagent._tool_shell("echo hello")
+    assert "shell error" in result
+    assert str(tmp_path / "no_such_dir") not in result

@@ -380,9 +380,7 @@ def _resolve_workspace_path(path):
     candidate = raw if os.path.isabs(raw) else os.path.join(root, raw)
     resolved = os.path.realpath(os.path.abspath(candidate))
     if os.path.commonpath([root, resolved]) != root:
-        raise ValueError(
-            f"path escapes subagent workspace ({root}): {path}"
-        )
+        raise ValueError("path escapes subagent workspace")
     return resolved
 
 
@@ -2434,6 +2432,24 @@ def _find_close_quote(s, start):
 # Tool execution
 # ----------------------------------------------------------------------
 
+def _sanitize_error_msg(e):
+    """Strip absolute paths from error messages before returning to worker LLM.
+
+    Tool error strings are visible to the worker LLM and persisted in
+    transcripts. Raw exception messages often include absolute filesystem
+    paths (e.g. FileNotFoundError with the full resolved path), which could
+    leak the host filesystem layout to the model or to a parent agent
+    receiving a structured digest.
+    """
+    msg = str(e)
+    root = _subagent_workspace_root()
+    if root and root in msg:
+        msg = msg.replace(root, "<workspace>")
+    # Strip any remaining absolute Unix paths (e.g. /tmp, /home, /etc)
+    msg = re.sub(r"(?<![\w./-])/(?:[\w.-]+/)+[\w.-]+", "<path>", msg)
+    return msg
+
+
 def _tool_read_file(path):
     try:
         resolved = _resolve_workspace_path(path)
@@ -2444,7 +2460,7 @@ def _tool_read_file(path):
             return text[:limit] + f"\n...(read-file truncated at {limit} chars)..."
         return text
     except Exception as e:
-        return f"(read-file error: {e})"
+        return f"(read-file error: {_sanitize_error_msg(e)})"
 
 
 def _tool_write_file(path, content):
@@ -2454,7 +2470,7 @@ def _tool_write_file(path, content):
             _atomic_replace_text(resolved, content)
         return "WRITE-FILE-SUCCESS"
     except Exception as e:
-        return f"(write-file error: {e})"
+        return f"(write-file error: {_sanitize_error_msg(e)})"
 
 
 def _tool_append_file(path, content):
@@ -2472,7 +2488,7 @@ def _tool_append_file(path, content):
             _atomic_replace_text(resolved, new_content)
         return "APPEND-FILE-SUCCESS"
     except Exception as e:
-        return f"(append-file error: {e})"
+        return f"(append-file error: {_sanitize_error_msg(e)})"
 
 
 def _shell_safe_path_env(workspace):
@@ -2543,7 +2559,7 @@ def _tool_shell(cmd):
         return f"(shell error: executable '{exe}' is not allowlisted)"
     workspace = _subagent_workspace_root()
     if not os.path.isdir(workspace):
-        return f"(shell error: subagent workspace does not exist: {workspace})"
+        return "(shell error: subagent workspace does not exist)"
     env = _shell_safe_env(workspace)
     try:
         out = subprocess.run(
@@ -2563,7 +2579,7 @@ def _tool_shell(cmd):
     except subprocess.TimeoutExpired:
         return f"(shell error: timed out after {_SHELL_TIMEOUT_S}s)"
     except Exception as e:
-        return f"(shell error: {e})"
+        return f"(shell error: {_sanitize_error_msg(e)})"
 
 
 def _validate_tool_args(name, args):
@@ -2687,10 +2703,10 @@ def run_tools(calls, allowed_names, record=None, quota=None, task_contract=None)
         try:
             result = fn(*args)
         except TypeError as e:
-            out_parts.append(f"(SKILL_ARG_ERROR: {name}: {e})")
+            out_parts.append(f"(SKILL_ARG_ERROR: {name}: {_sanitize_error_msg(e)})")
             continue
         except Exception as e:
-            out_parts.append(f"(SKILL_RUNTIME_ERROR: {name}: {e})")
+            out_parts.append(f"(SKILL_RUNTIME_ERROR: {name}: {_sanitize_error_msg(e)})")
             continue
         if record is not None and name in ("write-file", "append-file") and str(result).endswith("SUCCESS"):
             record.setdefault("files_changed", []).append(str(args[0]))
