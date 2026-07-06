@@ -2723,6 +2723,8 @@ def _validate_tool_args(name, args):
         return "path argument must not be empty"
     if name in ("read-file", "write-file", "append-file") and len(str(args[0])) > _SUBAGENT_MAX_PATH_ARG_CHARS:
         return f"path argument exceeds {_SUBAGENT_MAX_PATH_ARG_CHARS} characters"
+    if name in ("search", "tavily-search", "technical-analysis") and not str(args[0]).strip():
+        return "query argument must not be empty or whitespace-only"
     if name == "shell" and not str(args[0]).strip():
         return "shell command must not be empty or whitespace-only"
     too_long = [i + 1 for i, arg in enumerate(args) if len(str(arg)) > _SUBAGENT_MAX_TOOL_ARG_CHARS]

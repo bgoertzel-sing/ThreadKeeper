@@ -2884,6 +2884,26 @@ def test_validate_tool_args_shell_accepts_nonempty_command():
 
 
 # ------------------------------------------------------------------
+# Search/tavily-search/technical-analysis empty query validation
+# ------------------------------------------------------------------
+
+def test_validate_tool_args_search_rejects_empty_query():
+    """Empty or whitespace-only search/tavily-search/technical-analysis
+    queries are rejected by arg validation, preventing wasted external calls."""
+    for tool in ("search", "tavily-search", "technical-analysis"):
+        assert subagent._validate_tool_args(tool, [""]) == "query argument must not be empty or whitespace-only"
+        assert subagent._validate_tool_args(tool, ["   "]) == "query argument must not be empty or whitespace-only"
+        assert subagent._validate_tool_args(tool, ["\t\n"]) == "query argument must not be empty or whitespace-only"
+
+
+def test_validate_tool_args_search_accepts_nonempty_query():
+    """Non-empty search/tavily-search/technical-analysis queries pass validation."""
+    assert subagent._validate_tool_args("search", ["latest AI news"]) is None
+    assert subagent._validate_tool_args("tavily-search", ["quantum computing breakthroughs"]) is None
+    assert subagent._validate_tool_args("technical-analysis", ["RSI analysis of AAPL"]) is None
+
+
+# ------------------------------------------------------------------
 # Run index entry bounding / rotation
 # ------------------------------------------------------------------
 
