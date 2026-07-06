@@ -1019,6 +1019,8 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
             "tasks_completed": 0,
             "consecutive_errors": 0,
             "error_count": 0,
+            "current_task_started_at": None,
+            "current_task_queue_path": None,
         })
         # Register graceful signal handlers so supervisors can stop
         # the loop via SIGTERM/SIGINT without orphaning a claimed task or
@@ -1060,6 +1062,27 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
                 idle_polls = 0
                 queue_path = pending[0]
                 tasks_attempted += 1
+                task_started_at = time.time()
+                # Write lock metadata before starting the task so operators
+                # and stale-lock diagnostics can see what was being
+                # processed when (if) the worker crashes mid-task.
+                _write_worker_loop_lock_metadata(lock, {
+                    "pid": os.getpid(),
+                    "started_at": started_at,
+                    "status": "running",
+                    "run_dir": SUBAGENT_RUN_DIR,
+                    "max_tasks": task_limit,
+                    "max_idle_polls": idle_limit,
+                    "max_runtime_s": runtime_limit,
+                    "max_consecutive_errors": consecutive_error_limit,
+                    "stop_file": stop_path,
+                    "tasks_attempted": tasks_attempted,
+                    "tasks_completed": sum(1 for item in results if item.get("status") not in ("queue_worker_error",)),
+                    "consecutive_errors": consecutive_errors,
+                    "error_count": error_count,
+                    "current_task_started_at": task_started_at,
+                    "current_task_queue_path": queue_path,
+                })
                 try:
                     result_item = json.loads(run_queued_dispatch(queue_path))
                     results.append(result_item)
@@ -1077,6 +1100,7 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
                     consecutive_errors += 1
                     error_count += 1
                 # Update running lock metadata for operator visibility.
+                # Clear current_task_* fields since the task is done.
                 _write_worker_loop_lock_metadata(lock, {
                     "pid": os.getpid(),
                     "started_at": started_at,
@@ -1091,6 +1115,8 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
                     "tasks_completed": sum(1 for item in results if item.get("status") not in ("queue_worker_error",)),
                     "consecutive_errors": consecutive_errors,
                     "error_count": error_count,
+                    "current_task_started_at": None,
+                    "current_task_queue_path": None,
                 })
                 if (consecutive_error_limit and
                         consecutive_errors > consecutive_error_limit):
@@ -1107,6 +1133,8 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
                 "stop_reason": stop_reason or "unknown",
                 "tasks_attempted": tasks_attempted,
                 "error_count": error_count,
+                "current_task_started_at": None,
+                "current_task_queue_path": None,
             })
             # Restore prior signal handlers so the worker loop does not
             # leak its signal handler into the caller's context.

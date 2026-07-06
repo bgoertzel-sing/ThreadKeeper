@@ -1602,6 +1602,123 @@ def test_run_queued_worker_loop_no_stale_lock_after_clean_shutdown(tmp_path, mon
     assert result["stale_lock"] is None
 
 
+def test_run_queued_worker_loop_lock_has_current_task_during_execution(tmp_path, monkeypatch):
+    """The lock metadata should include current_task_started_at and
+    current_task_queue_path while a task is being processed, then clear
+    them after the task completes."""
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_QUEUE_ONLY", "1")
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_QUEUED_DISPATCHES", 4)
+
+    queued = json.loads(subagent.dispatch("track current task", "write-file", "unit", max_turns=2))
+    queue_path = queued["queue_path"]
+
+    lock_path = Path(subagent.SUBAGENT_RUN_DIR) / ".async-worker.lock"
+    captured = {}
+
+    original_dispatch = subagent.run_queued_dispatch
+
+    def spy_dispatch(qp):
+        # While dispatch is running, read the lock metadata
+        meta = subagent._read_worker_loop_lock_metadata(str(lock_path))
+        captured["during"] = meta
+        return original_dispatch(qp)
+
+    monkeypatch.setattr(subagent, "run_queued_dispatch", spy_dispatch)
+    monkeypatch.setattr(subagent.time, "sleep", lambda *_args: None)
+
+    calls = {"n": 0}
+
+    def worker_response(*_args):
+        calls["n"] += 1
+        label = calls["n"]
+        return (f'(emit "current-task test done {label}")', 1, 1)
+
+    monkeypatch.setattr(subagent, "_call_subagent_llm", worker_response)
+
+    result = json.loads(subagent.run_queued_worker_loop(
+        max_tasks=1, poll_interval_s=0, max_idle_polls=0, max_runtime_s=30,
+    ))
+
+    assert result["status"] == "worker_drained"
+    assert result["tasks_attempted"] == 1
+    assert result["tasks_completed"] == 1
+
+    # During task execution, the lock should show current task info
+    assert captured["during"]["status"] == "running"
+    assert captured["during"]["current_task_started_at"] is not None
+    assert captured["during"]["current_task_queue_path"] == queue_path
+    assert captured["during"]["tasks_attempted"] == 1
+
+    # After completion, the lock file should show finished with cleared fields
+    finished_meta = json.loads(lock_path.read_text(encoding="utf-8"))
+    assert finished_meta["status"] == "finished"
+    assert finished_meta["current_task_started_at"] is None
+    assert finished_meta["current_task_queue_path"] is None
+
+
+def test_run_queued_worker_loop_stale_lock_includes_current_task_fields(tmp_path, monkeypatch):
+    """When a stale lock is detected from a crashed worker, the stale_lock
+    metadata should include current_task_started_at and current_task_queue_path
+    if the crash happened mid-task."""
+    run_dir = tmp_path / "runs"
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(run_dir))
+    monkeypatch.setattr(subagent.time, "sleep", lambda *_args: None)
+    lock_path = run_dir / ".async-worker.lock"
+    lock_path.parent.mkdir(parents=True)
+
+    # Simulate a crashed worker that was mid-task
+    stale_metadata = {
+        "pid": 99999,
+        "started_at": 1000.0,
+        "status": "running",
+        "run_dir": str(run_dir),
+        "max_tasks": 4,
+        "tasks_attempted": 3,
+        "tasks_completed": 2,
+        "consecutive_errors": 0,
+        "error_count": 0,
+        "current_task_started_at": 1500.0,
+        "current_task_queue_path": str(run_dir / "queue" / "task-003.json"),
+    }
+    with lock_path.open("w", encoding="utf-8") as f:
+        f.write(json.dumps(stale_metadata, ensure_ascii=False, sort_keys=True))
+        f.write("\n")
+
+    # Use max_tasks=1 so the lock detection code path is exercised
+    result = json.loads(subagent.run_queued_worker_loop(
+        max_tasks=1, poll_interval_s=0, max_idle_polls=0,
+    ))
+
+    assert result["status"] == "worker_idle"
+    assert result["stale_lock"] is not None
+    assert result["stale_lock"]["pid"] == 99999
+    assert result["stale_lock"]["current_task_started_at"] == 1500.0
+    assert result["stale_lock"]["current_task_queue_path"] == str(run_dir / "queue" / "task-003.json")
+
+
+def test_run_queued_worker_loop_initial_lock_has_null_current_task(tmp_path, monkeypatch):
+    """The finished lock metadata should have current_task_started_at=None
+    and current_task_queue_path=None after a clean worker_idle exit."""
+    run_dir = tmp_path / "runs"
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(run_dir))
+    monkeypatch.setattr(subagent.time, "sleep", lambda *_args: None)
+    lock_path = run_dir / ".async-worker.lock"
+    lock_path.parent.mkdir(parents=True)
+
+    # Use max_tasks=1, max_idle_polls=0 so the loop enters the lock block,
+    # finds no pending tasks, and exits as worker_idle.
+    result = json.loads(subagent.run_queued_worker_loop(
+        max_tasks=1, poll_interval_s=0, max_idle_polls=0,
+    ))
+
+    assert result["status"] == "worker_idle"
+    finished_meta = json.loads(lock_path.read_text(encoding="utf-8"))
+    assert finished_meta["status"] == "finished"
+    assert finished_meta["current_task_started_at"] is None
+    assert finished_meta["current_task_queue_path"] is None
+
+
 def test_run_subagent_worker_loop_script_supports_no_claim_smoke(tmp_path):
     script = ROOT / "scripts" / "run-subagent-worker-loop"
     run_dir = tmp_path / "script-runs"
