@@ -1080,6 +1080,7 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
                     "tasks_completed": sum(1 for item in results if item.get("status") not in ("queue_worker_error",)),
                     "consecutive_errors": consecutive_errors,
                     "error_count": error_count,
+                    "remaining_queue_tasks": len(_pending_queued_dispatch_paths()),
                     "current_task_started_at": task_started_at,
                     "current_task_queue_path": queue_path,
                 })
@@ -1115,6 +1116,7 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
                     "tasks_completed": sum(1 for item in results if item.get("status") not in ("queue_worker_error",)),
                     "consecutive_errors": consecutive_errors,
                     "error_count": error_count,
+                    "remaining_queue_tasks": len(_pending_queued_dispatch_paths()),
                     "current_task_started_at": None,
                     "current_task_queue_path": None,
                 })
@@ -1132,7 +1134,10 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
                 "status": "finished",
                 "stop_reason": stop_reason or "unknown",
                 "tasks_attempted": tasks_attempted,
+                "tasks_completed": sum(1 for item in results if item.get("status") not in ("queue_worker_error",)),
+                "consecutive_errors": consecutive_errors,
                 "error_count": error_count,
+                "remaining_queue_tasks": len(_pending_queued_dispatch_paths()),
                 "current_task_started_at": None,
                 "current_task_queue_path": None,
             })

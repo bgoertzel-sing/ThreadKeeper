@@ -2545,3 +2545,126 @@ def test_shell_error_does_not_leak_workspace_path(tmp_path, monkeypatch):
     result = subagent._tool_shell("echo hello")
     assert "shell error" in result
     assert str(tmp_path / "no_such_dir") not in result
+
+
+def test_finished_lock_metadata_includes_completion_fields(tmp_path, monkeypatch):
+    """The finished lock metadata should include tasks_completed, consecutive_errors,
+    and remaining_queue_tasks for operator audit after the worker exits."""
+    run_dir = tmp_path / "runs"
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(run_dir))
+    monkeypatch.setattr(subagent.time, "sleep", lambda *_args: None)
+    lock_path = run_dir / ".async-worker.lock"
+    lock_path.parent.mkdir(parents=True)
+
+    # Use max_tasks=1, max_idle_polls=0 so the loop enters the lock block,
+    # finds no pending tasks, and exits as worker_idle.
+    result = json.loads(subagent.run_queued_worker_loop(
+        max_tasks=1, poll_interval_s=0, max_idle_polls=0,
+    ))
+
+    assert result["status"] == "worker_idle"
+    finished_meta = json.loads(lock_path.read_text(encoding="utf-8"))
+    assert finished_meta["status"] == "finished"
+    assert finished_meta["tasks_attempted"] == 0
+    assert finished_meta["tasks_completed"] == 0
+    assert finished_meta["consecutive_errors"] == 0
+    assert "remaining_queue_tasks" in finished_meta
+    assert finished_meta["remaining_queue_tasks"] == 0
+    assert finished_meta["current_task_started_at"] is None
+    assert finished_meta["current_task_queue_path"] is None
+
+
+def test_running_lock_metadata_includes_remaining_queue_tasks(tmp_path, monkeypatch):
+    """The running lock metadata should include remaining_queue_tasks so
+    operators can see queue depth while the worker is actively processing."""
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_QUEUE_ONLY", "1")
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_QUEUED_DISPATCHES", 4)
+
+    # Queue 3 tasks so there is measurable queue depth during processing.
+    for i in range(3):
+        subagent.dispatch(f"task {i}", "write-file", "unit", max_turns=2)
+
+    lock_path = Path(subagent.SUBAGENT_RUN_DIR) / ".async-worker.lock"
+    captured = []
+
+    original_dispatch = subagent.run_queued_dispatch
+
+    def spy_dispatch(qp):
+        meta = subagent._read_worker_loop_lock_metadata(str(lock_path))
+        captured.append(meta)
+        return original_dispatch(qp)
+
+    monkeypatch.setattr(subagent, "run_queued_dispatch", spy_dispatch)
+    monkeypatch.setattr(subagent.time, "sleep", lambda *_args: None)
+
+    calls = {"n": 0}
+
+    def worker_response(*_args):
+        calls["n"] += 1
+        n = calls["n"]
+        return (f'(emit "done {n}")', 1, 1)
+
+    monkeypatch.setattr(subagent, "_call_subagent_llm", worker_response)
+
+    result = json.loads(subagent.run_queued_worker_loop(
+        max_tasks=3, poll_interval_s=0, max_idle_polls=0, max_runtime_s=60,
+    ))
+
+    assert result["status"] == "worker_drained"
+    assert result["tasks_attempted"] == 3
+    assert result["tasks_completed"] == 3
+
+    # During the first task execution, the pre-task lock metadata should
+    # show all 3 pending tasks (including the one about to be processed).
+    # The spy reads the metadata before the original dispatch claims the task.
+    assert len(captured) == 3
+    assert captured[0]["status"] == "running"
+    assert captured[0]["remaining_queue_tasks"] == 3
+    # Subsequent calls should show decreasing queue depth.
+    assert captured[1]["remaining_queue_tasks"] == 2
+    assert captured[2]["remaining_queue_tasks"] == 1
+
+    # After completion, finished lock should show 0 remaining.
+    finished_meta = json.loads(lock_path.read_text(encoding="utf-8"))
+    assert finished_meta["status"] == "finished"
+    assert finished_meta["remaining_queue_tasks"] == 0
+    assert finished_meta["tasks_completed"] == 3
+    assert finished_meta["consecutive_errors"] == 0
+
+
+def test_finished_lock_metadata_shows_errors_after_failures(tmp_path, monkeypatch):
+    """The finished lock metadata should reflect consecutive_errors and error_count
+    when the worker exits after task failures."""
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_QUEUE_ONLY", "1")
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_QUEUED_DISPATCHES", 4)
+
+    # Queue 2 tasks.
+    for i in range(2):
+        subagent.dispatch(f"task {i}", "write-file", "unit", max_turns=2)
+
+    monkeypatch.setattr(subagent.time, "sleep", lambda *_args: None)
+
+    # Make every worker LLM call raise so all tasks fail.
+    def failing_worker(*_args):
+        raise RuntimeError("simulated worker failure")
+
+    monkeypatch.setattr(subagent, "_call_subagent_llm", failing_worker)
+
+    result = json.loads(subagent.run_queued_worker_loop(
+        max_tasks=2, poll_interval_s=0, max_idle_polls=0, max_runtime_s=60,
+        max_consecutive_errors=5,
+    ))
+
+    assert result["tasks_attempted"] == 2
+    assert result["error_count"] == 2
+    assert result["consecutive_errors"] == 2
+
+    lock_path = Path(result["lock_path"])
+    finished_meta = json.loads(lock_path.read_text(encoding="utf-8"))
+    assert finished_meta["status"] == "finished"
+    assert finished_meta["tasks_completed"] == 0
+    assert finished_meta["consecutive_errors"] == 2
+    assert finished_meta["error_count"] == 2
+    assert finished_meta["remaining_queue_tasks"] == 0
