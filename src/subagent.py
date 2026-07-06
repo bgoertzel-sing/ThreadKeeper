@@ -324,6 +324,14 @@ _SUBAGENT_MAX_QUEUED_TASK_AGE_S = _env_float(
 # Set to 0 to disable.
 _SUBAGENT_DISPATCH_TIMEOUT_S = _env_float("OMEGACLAW_SUBAGENT_DISPATCH_TIMEOUT_S", 600.0, minimum=0.0)
 
+# Dispatch-level token budget cap. While worker_token_usage tracks tokens for
+# accounting, this optional cap stops a runaway dispatch from consuming
+# unbounded tokens across many turns. Set to 0 to disable. When non-zero, the
+# dispatch loop checks total accumulated tokens (input + output) after each
+# worker LLM call and returns a structured token_budget_exceeded record if the
+# cap is exceeded.
+_SUBAGENT_MAX_TOKENS_PER_DISPATCH = _env_int("OMEGACLAW_SUBAGENT_MAX_TOKENS_PER_DISPATCH", 0, minimum=0)
+
 # Persistent local run records. Full worker prompts/responses/tool results are
 # kept out of the parent context; the parent receives only a bounded structured
 # digest plus the local transcript path for audit/debug.
@@ -2903,6 +2911,19 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
         raw, in_tok, out_tok = _call_subagent_llm(provider_handle, prompt, max_out_tok)
         total_in_tokens += in_tok
         total_out_tokens += out_tok
+        if _SUBAGENT_MAX_TOKENS_PER_DISPATCH and (total_in_tokens + total_out_tokens) > _SUBAGENT_MAX_TOKENS_PER_DISPATCH:
+            budget_msg = (
+                f"(subagent: dispatch token budget "
+                f"({_SUBAGENT_MAX_TOKENS_PER_DISPATCH}) exceeded at turn {turn + 1} "
+                f"with {total_in_tokens + total_out_tokens} total tokens)"
+            )
+            _stamp_token_usage()
+            _finish_run_record(run_record, "token_budget_exceeded", budget_msg)
+            return _structured_return(
+                budget_msg, run_record, status="error", uncertainty="high",
+                next_action="dispatch a narrower task or raise OMEGACLAW_SUBAGENT_MAX_TOKENS_PER_DISPATCH",
+                max_chars=bounded_chars,
+            )
         turn_record = {"turn": turn + 1, "prompt": prompt, "raw_response": raw, "tool_calls": []}
         # If the call failed catastrophically, _call_subagent_llm
         # already returned a (subagent ...) string; surface as digest.

@@ -256,6 +256,7 @@ clamped instead of crashing the module or disabling guards accidentally.
 | `OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEM_CHARS` | `512` | Maximum length of each task-contract list item. |
 | `OMEGACLAW_SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS` | `4000` | Maximum task-contract objective length. |
 | `OMEGACLAW_SUBAGENT_DISPATCH_TIMEOUT_S` | `600` | Dispatch-level wall-clock timeout in seconds; checked before each LLM call and tool execution. `0` disables. |
+| `OMEGACLAW_SUBAGENT_MAX_TOKENS_PER_DISPATCH` | `0` (disabled) | Dispatch-level token budget cap. When non-zero, the dispatch loop checks total accumulated tokens (input + output) after each worker LLM call and returns a structured `token_budget_exceeded` record if the cap is exceeded. `0` disables. |
 | `OMEGACLAW_SUBAGENT_MAX_TRANSCRIPT_TURNS` | `0` (disabled) | Maximum turns retained in the local transcript file. `0` disables the cap. Older turns are dropped when exceeded. |
 | `OMEGACLAW_SUBAGENT_MAX_TRANSCRIPT_FIELD_CHARS` | `0` (disabled) | Maximum per-field string size (prompt, raw_response, tool_results) in each transcript turn entry. `0` disables the cap. |
 | `OMEGACLAW_SUBAGENT_WORKSPACE` | current working directory | Sandbox root for subagent file tools. |
@@ -295,3 +296,4 @@ end-to-end walkthrough.
 | `read-file` target is larger than `OMEGACLAW_SUBAGENT_MAX_READ_FILE_CHARS` | Tool result is truncated in the worker context with an explicit `(read-file truncated at <N> chars)` marker. |
 | Loop exceeds `max_turns` without `emit` | Structured JSON `status=incomplete`; `summary` contains `(subagent: max_turns (<N>) reached without emit; last_results: <clip>)`; transcript status `max_turns`. |
 | Dispatch exceeds `OMEGACLAW_SUBAGENT_DISPATCH_TIMEOUT_S` wall-clock limit | Structured JSON `status=error`; `summary` contains `(subagent: dispatch wall-clock timeout (<N>s) exceeded at turn <T>)`; transcript status `dispatch_timeout`. |
+| Dispatch exceeds `OMEGACLAW_SUBAGENT_MAX_TOKENS_PER_DISPATCH` token budget | Structured JSON `status=error`; `summary` contains `(subagent: dispatch token budget (<N>) exceeded at turn <T> with <N> total tokens)`; transcript status `token_budget_exceeded`. |

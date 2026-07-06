@@ -2175,3 +2175,55 @@ def test_retry_backoff_has_jitter(monkeypatch):
     # Base delays: 1.0 and 2.0, jitter adds up to 25% of each
     assert 1.0 <= delays[0] <= 1.25
     assert 2.0 <= delays[1] <= 2.5
+
+
+def test_dispatch_token_budget_exceeded_stops_after_llm(tmp_path, monkeypatch):
+    """When OMEGACLAW_SUBAGENT_MAX_TOKENS_PER_DISPATCH is set, dispatch should stop
+    after a worker LLM call pushes total tokens past the cap."""
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_TOKENS_PER_DISPATCH", 200)
+    responses = iter([
+        ('(write-file "out.txt" "hello")', 100, 50),   # total=150, under cap
+        ('(emit "done")', 80, 40),                         # total=270, over cap
+    ])
+    monkeypatch.setattr(subagent, "_call_subagent_llm", lambda *_a: next(responses))
+
+    payload = json.loads(subagent.dispatch("budget test", "write-file", "unit", max_turns=3))
+
+    assert payload["status"] == "error"
+    assert "token budget" in payload["summary"]
+    assert payload.get("worker_token_usage", {}).get("total_tokens") == 270
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["status"] == "token_budget_exceeded"
+
+
+def test_dispatch_token_budget_disabled_when_zero(tmp_path, monkeypatch):
+    """When OMEGACLAW_SUBAGENT_MAX_TOKENS_PER_DISPATCH=0 (default), no cap is enforced."""
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_TOKENS_PER_DISPATCH", 0)
+    responses = iter([
+        ('(write-file "out.txt" "hello")', 10000, 5000),
+        ('(emit "done")', 10000, 5000),
+    ])
+    monkeypatch.setattr(subagent, "_call_subagent_llm", lambda *_a: next(responses))
+
+    payload = json.loads(subagent.dispatch("no budget cap", "write-file", "unit", max_turns=3))
+
+    assert payload["status"] == "ok"
+    assert payload.get("worker_token_usage", {}).get("total_tokens") == 30000
+
+
+def test_dispatch_token_budget_not_exceeded_under_cap(tmp_path, monkeypatch):
+    """Dispatch should proceed normally when tokens stay under the cap."""
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_TOKENS_PER_DISPATCH", 1000)
+    responses = iter([
+        ('(write-file "out.txt" "hello")', 100, 50),
+        ('(emit "done")', 80, 40),
+    ])
+    monkeypatch.setattr(subagent, "_call_subagent_llm", lambda *_a: next(responses))
+
+    payload = json.loads(subagent.dispatch("under cap", "write-file", "unit", max_turns=3))
+
+    assert payload["status"] == "ok"
+    assert payload.get("worker_token_usage", {}).get("total_tokens") == 270
