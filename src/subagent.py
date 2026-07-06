@@ -321,6 +321,9 @@ _SUBAGENT_MAX_TRANSCRIPT_TURNS = _env_int(
 _SUBAGENT_MAX_TRANSCRIPT_FIELD_CHARS = _env_int(
     "OMEGACLAW_SUBAGENT_MAX_TRANSCRIPT_FIELD_CHARS", 0, minimum=0,
 )
+_SUBAGENT_MAX_TRANSCRIPT_SUMMARY_CHARS = _env_int(
+    "OMEGACLAW_SUBAGENT_MAX_TRANSCRIPT_SUMMARY_CHARS", 0, minimum=0,
+)
 
 # Queue task max age. When non-zero, a queued task older than this many seconds
 # is rejected before any worker LLM call, preventing stale/expired work from
@@ -1691,7 +1694,11 @@ def _finish_run_record(record, status, summary=None):
     if not record:
         return ""
     record["status"] = status
-    record["summary"] = summary or ""
+    raw_summary = summary or ""
+    cap_summary = _SUBAGENT_MAX_TRANSCRIPT_SUMMARY_CHARS
+    if cap_summary > 0 and len(raw_summary) > cap_summary:
+        raw_summary = raw_summary[:cap_summary] + f"\n[...summary truncated at {cap_summary} chars...]"
+    record["summary"] = raw_summary
     record["finished_at"] = time.time()
     _bound_transcript_turns(record)
     try:
@@ -2659,6 +2666,8 @@ def _validate_tool_args(name, args):
         return "path argument must not be empty"
     if name in ("read-file", "write-file", "append-file") and len(str(args[0])) > _SUBAGENT_MAX_PATH_ARG_CHARS:
         return f"path argument exceeds {_SUBAGENT_MAX_PATH_ARG_CHARS} characters"
+    if name == "shell" and not str(args[0]).strip():
+        return "shell command must not be empty or whitespace-only"
     too_long = [i + 1 for i, arg in enumerate(args) if len(str(arg)) > _SUBAGENT_MAX_TOOL_ARG_CHARS]
     if too_long:
         return f"argument(s) {too_long} exceed {_SUBAGENT_MAX_TOOL_ARG_CHARS} characters"

@@ -2805,3 +2805,79 @@ def test_worker_loop_already_running_includes_total_runtime_s(tmp_path, monkeypa
     ))
     assert result["status"] == "worker_idle"
     assert "total_runtime_s" in result
+
+
+# ------------------------------------------------------------------
+# Transcript summary bounding via OMEGACLAW_SUBAGENT_MAX_TRANSCRIPT_SUMMARY_CHARS
+# ------------------------------------------------------------------
+
+def test_transcript_summary_bounding_caps_long_summary(monkeypatch, tmp_path):
+    """When OMEGACLAW_SUBAGENT_MAX_TRANSCRIPT_SUMMARY_CHARS is non-zero, the
+    transcript record's summary field is capped with a truncation marker."""
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_TRANSCRIPT_SUMMARY_CHARS", 100)
+    run_dir = tmp_path / "runs"
+    run_dir.mkdir()
+    transcript_path = run_dir / "test_summary.json"
+    record = {
+        "turns": [],
+        "transcript_path": str(transcript_path),
+        "status": "running",
+    }
+    long_summary = "x" * 500
+    subagent._finish_run_record(record, "ok", long_summary)
+    written = json.loads(transcript_path.read_text())
+    assert len(written["summary"]) <= 100 + len("\n[...summary truncated at 100 chars...]")
+    assert "summary truncated at 100 chars" in written["summary"]
+    assert written["summary"].startswith("x" * 100)
+
+
+def test_transcript_summary_bounding_disabled_when_zero(monkeypatch, tmp_path):
+    """When OMEGACLAW_SUBAGENT_MAX_TRANSCRIPT_SUMMARY_CHARS is 0 (default),
+    the summary is stored as-is without truncation."""
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_TRANSCRIPT_SUMMARY_CHARS", 0)
+    run_dir = tmp_path / "runs"
+    run_dir.mkdir()
+    transcript_path = run_dir / "test_summary2.json"
+    record = {
+        "turns": [],
+        "transcript_path": str(transcript_path),
+        "status": "running",
+    }
+    long_summary = "y" * 5000
+    subagent._finish_run_record(record, "ok", long_summary)
+    written = json.loads(transcript_path.read_text())
+    assert written["summary"] == "y" * 5000
+
+
+def test_transcript_summary_bounding_preserves_short_summary(monkeypatch, tmp_path):
+    """Short summaries are not truncated even when the cap is enabled."""
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_TRANSCRIPT_SUMMARY_CHARS", 200)
+    run_dir = tmp_path / "runs"
+    run_dir.mkdir()
+    transcript_path = run_dir / "test_summary3.json"
+    record = {
+        "turns": [],
+        "transcript_path": str(transcript_path),
+        "status": "running",
+    }
+    short_summary = "All tests passed."
+    subagent._finish_run_record(record, "ok", short_summary)
+    written = json.loads(transcript_path.read_text())
+    assert written["summary"] == "All tests passed."
+
+
+# ------------------------------------------------------------------
+# Shell command non-empty validation
+# ------------------------------------------------------------------
+
+def test_validate_tool_args_shell_rejects_empty_command():
+    """Empty or whitespace-only shell commands are rejected by arg validation."""
+    assert subagent._validate_tool_args("shell", [""]) == "shell command must not be empty or whitespace-only"
+    assert subagent._validate_tool_args("shell", ["   "]) == "shell command must not be empty or whitespace-only"
+    assert subagent._validate_tool_args("shell", ["\t\n"]) == "shell command must not be empty or whitespace-only"
+
+
+def test_validate_tool_args_shell_accepts_nonempty_command():
+    """Non-empty shell commands pass validation."""
+    assert subagent._validate_tool_args("shell", ["echo hello"]) is None
+    assert subagent._validate_tool_args("shell", ["ls -la"]) is None
