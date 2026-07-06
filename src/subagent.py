@@ -940,6 +940,7 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
             "summary": f"queued subagent async worker loop config invalid: {type(e).__name__}: {e}",
             "started_at": started_at,
             "finished_at": time.time(),
+            "total_runtime_s": round(time.time() - started_at, 3),
             "max_tasks": task_limit,
             "poll_interval_s": poll_interval,
             "max_idle_polls": idle_limit,
@@ -958,12 +959,14 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
     consecutive_errors = 0
     error_count = 0
     if task_limit == 0:
+        finished_early = time.time()
         return json.dumps({
             "status": "worker_idle",
             "summary": "queued subagent async worker loop completed bounded run",
             "stop_reason": "max_tasks",
             "started_at": started_at,
-            "finished_at": time.time(),
+            "finished_at": finished_early,
+            "total_runtime_s": round(finished_early - started_at, 3),
             "max_tasks": task_limit,
             "poll_interval_s": poll_interval,
             "max_idle_polls": idle_limit,
@@ -1000,6 +1003,9 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
                     "lock_path": lock_path,
                     "worker_lock": _read_worker_loop_lock_metadata(lock_path),
                     "stale_lock": stale_lock,
+                    "started_at": started_at,
+                    "finished_at": time.time(),
+                    "total_runtime_s": round(time.time() - started_at, 3),
                     "tasks_attempted": 0,
                     "tasks_completed": 0,
                     "results_truncated": 0,
@@ -1086,6 +1092,8 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
                 })
                 try:
                     result_item = json.loads(run_queued_dispatch(queue_path))
+                    if isinstance(result_item, dict):
+                        result_item["task_duration_s"] = round(time.time() - task_started_at, 3)
                     results.append(result_item)
                     if isinstance(result_item, dict) and result_item.get("status") == "queue_worker_error":
                         consecutive_errors += 1
@@ -1097,6 +1105,7 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
                         "status": "queue_worker_error",
                         "summary": f"queued worker loop error: {type(e).__name__}: {e}",
                         "queue_path": queue_path,
+                        "task_duration_s": round(time.time() - task_started_at, 3),
                     })
                     consecutive_errors += 1
                     error_count += 1
@@ -1168,12 +1177,14 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
         status = "worker_stopped"
     else:
         status = "worker_idle"
+    finished_at = time.time()
     return json.dumps({
         "status": status,
         "summary": "queued subagent async worker loop completed bounded run",
         "stop_reason": stop_reason,
         "started_at": started_at,
-        "finished_at": time.time(),
+        "finished_at": finished_at,
+        "total_runtime_s": round(finished_at - started_at, 3),
         "max_tasks": task_limit,
         "poll_interval_s": poll_interval,
         "max_idle_polls": idle_limit,
