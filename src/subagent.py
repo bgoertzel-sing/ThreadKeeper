@@ -347,6 +347,15 @@ _SUBAGENT_DISPATCH_TIMEOUT_S = _env_float("OMEGACLAW_SUBAGENT_DISPATCH_TIMEOUT_S
 # cap is exceeded.
 _SUBAGENT_MAX_TOKENS_PER_DISPATCH = _env_int("OMEGACLAW_SUBAGENT_MAX_TOKENS_PER_DISPATCH", 0, minimum=0)
 
+# Run index entry cap. When non-zero, the compact audit index (index.jsonl) is
+# rotated after each append to keep at most the most recent N entries. This
+# prevents unbounded index growth in long-running deployments. The hash chain
+# is recomputed for retained entries so audit verification still works on the
+# retained portion. Set to 0 to disable (default).
+_SUBAGENT_MAX_INDEX_ENTRIES = _env_int(
+    "OMEGACLAW_SUBAGENT_MAX_INDEX_ENTRIES", 0, minimum=0,
+)
+
 # Persistent local run records. Full worker prompts/responses/tool results are
 # kept out of the parent context; the parent receives only a bounded structured
 # digest plus the local transcript path for audit/debug.
@@ -488,6 +497,48 @@ def _last_index_entry_hash(index_path):
         return hashlib.sha256(lines[-1] + b"\n").hexdigest()
 
 
+def _rotate_run_index_if_needed(index_path, lock):
+    """Bound the run index by keeping only the most recent entries.
+
+    Reads all current entries, and if the count exceeds the configured cap,
+    rewrites the file with only the most recent N entries. The hash chain is
+    recomputed for retained entries: the first retained entry gets
+n    ``previous_entry_sha256 = ""`` (as if it were the first entry) and each
+    subsequent entry's ``previous_entry_sha256`` links to the prior retained
+    entry's recomputed ``entry_sha256``.
+
+    This is called under the index lock so concurrent appenders are safe.
+    """
+    try:
+        with open(index_path, "rb") as f:
+            lines = [line for line in f.read().splitlines() if line.strip()]
+        if len(lines) <= _SUBAGENT_MAX_INDEX_ENTRIES:
+            return
+        keep = lines[-_SUBAGENT_MAX_INDEX_ENTRIES:]
+        # Parse retained entries and recompute the hash chain.
+        rebuilt = []
+        prev_hash = ""
+        for raw_line in keep:
+            entry = json.loads(raw_line.decode("utf-8"))
+            entry["previous_entry_sha256"] = prev_hash
+            new_hash = _index_entry_hash(entry)
+            entry["entry_sha256"] = new_hash
+            rebuilt.append(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
+            prev_hash = new_hash
+        # Atomic rewrite via temp file + os.replace.
+        tmp_path = f"{index_path}.tmp.{os.getpid()}"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            for line in rebuilt:
+                f.write(line)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, index_path)
+    except Exception:
+        # Rotation failure should not crash the append path; the index
+        # remains append-only and unbounded, which is the safe default.
+        pass
+
+
 def _append_run_index(record):
     """Append a compact audit index entry for a finished subagent run.
 
@@ -523,6 +574,12 @@ def _append_run_index(record):
                 f.write(line)
                 f.flush()
                 os.fsync(f.fileno())
+            # Bound the index file by retaining only the most recent
+            # entries when a cap is configured. The hash chain is
+            # recomputed for retained entries so verify_subagent_run_index
+            # still passes on the retained portion.
+            if _SUBAGENT_MAX_INDEX_ENTRIES and _SUBAGENT_MAX_INDEX_ENTRIES > 0:
+                _rotate_run_index_if_needed(index_path, lock)
         finally:
             if fcntl is not None:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)

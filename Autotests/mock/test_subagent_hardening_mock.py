@@ -2881,3 +2881,120 @@ def test_validate_tool_args_shell_accepts_nonempty_command():
     """Non-empty shell commands pass validation."""
     assert subagent._validate_tool_args("shell", ["echo hello"]) is None
     assert subagent._validate_tool_args("shell", ["ls -la"]) is None
+
+
+# ------------------------------------------------------------------
+# Run index entry bounding / rotation
+# ------------------------------------------------------------------
+
+def test_run_index_rotation_truncates_old_entries(tmp_path, monkeypatch):
+    """When _SUBAGENT_MAX_INDEX_ENTRIES is set, the index is rotated to keep
+    only the most recent N entries after each append."""
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_INDEX_ENTRIES", 3)
+    for i in range(5):
+        subagent._append_run_index({
+            "run_id": f"run-{i}",
+            "status": "ok",
+            "transcript_path": f"run-{i}.json",
+            "transcript_sha256": "a" * 64,
+        })
+    index_path = tmp_path / "runs" / "index.jsonl"
+    lines = [line for line in index_path.read_text().splitlines() if line.strip()]
+    assert len(lines) == 3
+    entries = [json.loads(line) for line in lines]
+    # The retained entries should be the last 3: run-2, run-3, run-4
+    assert entries[0]["run_id"] == "run-2"
+    assert entries[1]["run_id"] == "run-3"
+    assert entries[2]["run_id"] == "run-4"
+    # First retained entry has empty previous_entry_sha256 (as if first)
+    assert entries[0]["previous_entry_sha256"] == ""
+    # Hash chain is intact among retained entries
+    assert entries[0]["entry_sha256"] == subagent._index_entry_hash(entries[0])
+    assert entries[1]["previous_entry_sha256"] == entries[0]["entry_sha256"]
+    assert entries[1]["entry_sha256"] == subagent._index_entry_hash(entries[1])
+    assert entries[2]["previous_entry_sha256"] == entries[1]["entry_sha256"]
+    assert entries[2]["entry_sha256"] == subagent._index_entry_hash(entries[2])
+
+
+def test_run_index_rotation_disabled_when_zero(tmp_path, monkeypatch):
+    """When _SUBAGENT_MAX_INDEX_ENTRIES is 0 (default), no rotation occurs."""
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_INDEX_ENTRIES", 0)
+    for i in range(5):
+        subagent._append_run_index({
+            "run_id": f"run-{i}",
+            "status": "ok",
+            "transcript_path": f"run-{i}.json",
+            "transcript_sha256": "a" * 64,
+        })
+    index_path = tmp_path / "runs" / "index.jsonl"
+    lines = [line for line in index_path.read_text().splitlines() if line.strip()]
+    assert len(lines) == 5
+
+
+def test_run_index_rotation_not_triggered_under_cap(tmp_path, monkeypatch):
+    """When entry count is at or below the cap, no rotation occurs."""
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_INDEX_ENTRIES", 4)
+    for i in range(4):
+        subagent._append_run_index({
+            "run_id": f"run-{i}",
+            "status": "ok",
+            "transcript_path": f"run-{i}.json",
+            "transcript_sha256": "a" * 64,
+        })
+    index_path = tmp_path / "runs" / "index.jsonl"
+    lines = [line for line in index_path.read_text().splitlines() if line.strip()]
+    assert len(lines) == 4
+    entries = [json.loads(line) for line in lines]
+    # Original chain is preserved (no rotation)
+    assert entries[0]["previous_entry_sha256"] == ""
+    assert entries[0]["run_id"] == "run-0"
+    assert entries[3]["run_id"] == "run-3"
+
+
+def test_run_index_rotation_preserves_verify(tmp_path, monkeypatch):
+    """After rotation, verify_subagent_run_index should pass on the retained portion."""
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_INDEX_ENTRIES", 2)
+    runs = Path(subagent.SUBAGENT_RUN_DIR)
+    runs.mkdir(parents=True, exist_ok=True)
+    # Create transcripts with matching SHA-256 sidecars.
+    for i in range(4):
+        transcript = runs / f"run-{i}.json"
+        digest = subagent._json_atomic_write(str(transcript), {"status": "ok", "run_id": f"run-{i}"})
+        subagent._append_run_index({
+            "run_id": f"run-{i}",
+            "status": "ok",
+            "transcript_path": str(transcript),
+            "transcript_sha256": digest,
+        })
+    # After 4 appends with cap=2, only the last 2 entries should remain.
+    audit = json.loads(subagent.verify_subagent_run_index())
+    assert audit["status"] == "index_verified"
+    assert audit["entries_checked"] == 2
+    assert audit["issue_count"] == 0
+    entries = [json.loads(line) for line in (tmp_path / "runs" / "index.jsonl").read_text().splitlines() if line.strip()]
+    assert entries[0]["run_id"] == "run-2"
+    assert entries[1]["run_id"] == "run-3"
+
+
+def test_run_index_rotation_handles_single_entry_cap(tmp_path, monkeypatch):
+    """A cap of 1 keeps only the most recent entry after each append."""
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_INDEX_ENTRIES", 1)
+    for i in range(3):
+        subagent._append_run_index({
+            "run_id": f"run-{i}",
+            "status": "ok",
+            "transcript_path": f"run-{i}.json",
+            "transcript_sha256": "a" * 64,
+        })
+    index_path = tmp_path / "runs" / "index.jsonl"
+    lines = [line for line in index_path.read_text().splitlines() if line.strip()]
+    assert len(lines) == 1
+    entry = json.loads(lines[0])
+    assert entry["run_id"] == "run-2"
+    assert entry["previous_entry_sha256"] == ""
+    assert entry["entry_sha256"] == subagent._index_entry_hash(entry)
