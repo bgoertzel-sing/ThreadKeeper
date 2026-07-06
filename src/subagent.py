@@ -278,6 +278,12 @@ _SHELL_OUTPUT_CAP = _env_int("OMEGACLAW_SUBAGENT_SHELL_OUTPUT_CAP", 4000, minimu
 _SHELL_TIMEOUT_S = _env_float("OMEGACLAW_SUBAGENT_SHELL_TIMEOUT_S", 30.0, minimum=1.0)
 _SHELL_MAX_ARGV = _env_int("OMEGACLAW_SUBAGENT_SHELL_MAX_ARGV", 32, minimum=1)
 
+# External tool output cap. Search/tavily-search/technical-analysis return
+# arbitrary external API responses. Cap at the tool level (before run_tools
+# clips to 2000 chars for the prompt) as defense-in-depth against very large
+# in-memory responses from external services.
+_SUBAGENT_MAX_SEARCH_OUTPUT_CHARS = _env_int("OMEGACLAW_SUBAGENT_MAX_SEARCH_OUTPUT_CHARS", 4000, minimum=1)
+
 # Subagent LLM call reliability controls. Keep defaults bounded so a stuck
 # worker endpoint cannot hang the parent loop indefinitely.
 _SUBAGENT_LLM_TIMEOUT_S = _env_int("OMEGACLAW_SUBAGENT_LLM_TIMEOUT_S", 180, minimum=1)
@@ -1970,6 +1976,17 @@ _V1_EXCLUDED = frozenset([
 ])
 
 
+def _bound_tool_output(result, cap=None):
+    """Cap external tool output size as defense-in-depth against large
+    API responses. Returns (result_string, truncated_bool)."""
+    if cap is None:
+        cap = _SUBAGENT_MAX_SEARCH_OUTPUT_CHARS
+    text = str(result)
+    if cap > 0 and len(text) > cap:
+        return text[:cap] + f"\n...(tool output truncated at {cap} chars)..."
+    return text
+
+
 def _build_tool_registry():
     """Construct the per-process tool registry once. Imports are inline
     so that import failures don't break dispatch — instead the affected
@@ -1991,7 +2008,7 @@ def _build_tool_registry():
         ))
         import websearch
         registry["search"] = (
-            lambda q: websearch.search(q),
+            lambda q: _bound_tool_output(websearch.search(q)),
             "endpoint_independent",
         )
     except Exception as e:
@@ -2003,11 +2020,11 @@ def _build_tool_registry():
     try:
         import agentverse
         registry["tavily-search"] = (
-            lambda q: agentverse.tavily_search(q),
+            lambda q: _bound_tool_output(agentverse.tavily_search(q)),
             "endpoint_independent",
         )
         registry["technical-analysis"] = (
-            lambda t: agentverse.technical_analysis(t),
+            lambda t: _bound_tool_output(agentverse.technical_analysis(t)),
             "endpoint_independent",
         )
     except Exception:

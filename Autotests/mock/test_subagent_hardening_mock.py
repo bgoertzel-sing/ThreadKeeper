@@ -3018,3 +3018,90 @@ def test_run_index_rotation_handles_single_entry_cap(tmp_path, monkeypatch):
     assert entry["run_id"] == "run-2"
     assert entry["previous_entry_sha256"] == ""
     assert entry["entry_sha256"] == subagent._index_entry_hash(entry)
+
+
+# ------------------------------------------------------------------
+# External tool output bounding (search/tavily-search/technical-analysis)
+# ------------------------------------------------------------------
+
+def test_bound_tool_output_truncates_large_result(monkeypatch):
+    """Large external tool output is truncated with a marker."""
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_SEARCH_OUTPUT_CHARS", 100)
+    big = "x" * 500
+    result = subagent._bound_tool_output(big)
+    assert len(result) < 500
+    assert "truncated at 100 chars" in result
+    assert result.startswith("x" * 100)
+
+
+def test_bound_tool_output_preserves_small_result(monkeypatch):
+    """Small external tool output passes through unchanged."""
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_SEARCH_OUTPUT_CHARS", 4000)
+    result = subagent._bound_tool_output("short result")
+    assert result == "short result"
+
+
+def test_bound_tool_output_disabled_when_zero(monkeypatch):
+    """When cap is 0, no truncation occurs (defense-in-depth disabled)."""
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_SEARCH_OUTPUT_CHARS", 0)
+    big = "x" * 10000
+    result = subagent._bound_tool_output(big)
+    assert result == big
+
+
+def test_bound_tool_output_handles_non_string_result(monkeypatch):
+    """Non-string results (e.g. lists/dicts from search) are str()'d and bounded."""
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_SEARCH_OUTPUT_CHARS", 50)
+    result = subagent._bound_tool_output([{"title": "a" * 200}])
+    assert len(result) < 200
+    assert "truncated at 50 chars" in result
+
+
+def test_build_tool_registry_wraps_search_with_bound(monkeypatch):
+    """The search tool in the registry should be wrapped with _bound_tool_output."""
+    # Verify the wrapper is applied by checking that a large result gets truncated
+    import types
+
+    class FakeWebsearch:
+        @staticmethod
+        def search(q):
+            return "x" * 10000
+
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_SEARCH_OUTPUT_CHARS", 100)
+    monkeypatch.setitem(sys.modules, "websearch", FakeWebsearch)
+    # Force rebuild
+    monkeypatch.setattr(subagent, "_TOOL_REGISTRY", None)
+    reg = subagent._tool_registry()
+    assert "search" in reg
+    fn, _ = reg["search"]
+    result = fn("test query")
+    assert len(result) < 200
+    assert "truncated at 100 chars" in result
+
+
+def test_build_tool_registry_wraps_tavily_with_bound(monkeypatch):
+    """The tavily-search tool in the registry should be wrapped with _bound_tool_output."""
+
+    class FakeAgentverse:
+        @staticmethod
+        def tavily_search(q):
+            return "y" * 10000
+
+        @staticmethod
+        def technical_analysis(t):
+            return "z" * 10000
+
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_SEARCH_OUTPUT_CHARS", 100)
+    monkeypatch.setitem(sys.modules, "agentverse", FakeAgentverse)
+    monkeypatch.setattr(subagent, "_TOOL_REGISTRY", None)
+    reg = subagent._tool_registry()
+    assert "tavily-search" in reg
+    assert "technical-analysis" in reg
+    fn_t, _ = reg["tavily-search"]
+    result_t = fn_t("test")
+    assert len(result_t) < 200
+    assert "truncated at 100 chars" in result_t
+    fn_a, _ = reg["technical-analysis"]
+    result_a = fn_a("AAPL")
+    assert len(result_a) < 200
+    assert "truncated at 100 chars" in result_a
