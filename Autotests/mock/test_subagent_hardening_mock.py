@@ -1441,6 +1441,49 @@ def test_run_queued_worker_loop_writes_finished_lock_metadata(tmp_path, monkeypa
     assert metadata["tasks_attempted"] == 0
 
 
+def test_run_queued_worker_loop_graceful_signal_shutdown(tmp_path, monkeypatch):
+    """SIGTERM/SIGINT during worker loop causes graceful exit, not crash."""
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr(subagent.time, "sleep", lambda *_args: None)
+    # Simulate a signal arriving before the first iteration check.
+    subagent._worker_signal_state["stop_requested"] = True
+    try:
+        result = json.loads(subagent.run_queued_worker_loop(
+            max_tasks=4, poll_interval_s=0, max_idle_polls=0,
+        ))
+    finally:
+        subagent._worker_signal_state["stop_requested"] = False
+
+    assert result["status"] == "worker_stopped"
+    assert result["stop_reason"] == "signal"
+    assert result["tasks_attempted"] == 0
+    lock_path = Path(result["lock_path"])
+    metadata = json.loads(lock_path.read_text(encoding="utf-8"))
+    assert metadata["status"] == "finished"
+    assert metadata["stop_reason"] == "signal"
+
+
+def test_run_queued_worker_loop_restores_signal_handlers(tmp_path, monkeypatch):
+    """Signal handlers are restored after the worker loop exits."""
+    import signal as _sig
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr(subagent.time, "sleep", lambda *_args: None)
+    # Ensure no stale signal flag from prior tests.
+    subagent._worker_signal_state["stop_requested"] = False
+    # Record the pre-loop handler so we can verify restoration.
+    original = _sig.signal(_sig.SIGTERM, _sig.SIG_DFL)
+    try:
+        result = json.loads(subagent.run_queued_worker_loop(
+            max_tasks=0, poll_interval_s=0, max_idle_polls=0,
+        ))
+        # After the loop exits, SIGTERM handler should be restored to SIG_DFL.
+        current = _sig.getsignal(_sig.SIGTERM)
+        assert current == _sig.SIG_DFL
+    finally:
+        _sig.signal(_sig.SIGTERM, original)
+        subagent._worker_signal_state["stop_requested"] = False
+
+
 def test_run_queued_worker_loop_rejects_invalid_stop_file_before_lock(tmp_path, monkeypatch):
     run_dir = tmp_path / "runs"
     monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(run_dir))

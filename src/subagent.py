@@ -47,10 +47,22 @@ import hashlib
 import contextlib
 import math
 import random
+import signal as _signal_module
 try:
     import fcntl
 except Exception:  # pragma: no cover - non-Unix fallback
     fcntl = None
+
+# Module-level flag for graceful signal-based worker-loop shutdown.
+# When a supervisor sends SIGTERM/SIGINT, the handler sets this flag
+# instead of raising, so the current task can finish and the loop
+# exits cleanly at the next iteration check.
+_worker_signal_state = {"stop_requested": False}
+
+
+def _worker_signal_handler(signum, frame):
+    """Signal handler for graceful worker-loop shutdown."""
+    _worker_signal_state["stop_requested"] = True
 
 # Worker-call usage log — SAME file the parent loop + dashboard read, so
 # delegated work shows up on the ThreadKeeper mesh's Local Worker tile.
@@ -999,8 +1011,28 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
             "consecutive_errors": 0,
             "error_count": 0,
         })
+        # Register graceful signal handlers so supervisors can stop
+        # the loop via SIGTERM/SIGINT without orphaning a claimed task or
+        # leaving the lock file in "running" state. The handler only sets
+        # a flag; the current task finishes normally and the loop exits at
+        # the next iteration check.
+        _prev_sigterm = None
+        _prev_sigint = None
+        try:
+            _prev_sigterm = _signal_module.signal(
+                _signal_module.SIGTERM, _worker_signal_handler
+            )
+            _prev_sigint = _signal_module.signal(
+                _signal_module.SIGINT, _worker_signal_handler
+            )
+        except (ValueError, OSError):
+            # Not in main thread or signals not supported; skip gracefully.
+            pass
         try:
             while task_limit <= 0 or tasks_attempted < task_limit:
+                if _worker_signal_state["stop_requested"]:
+                    stop_reason = "signal"
+                    break
                 if _worker_stop_requested(stop_path):
                     stop_reason = "stop_file"
                     break
@@ -1067,6 +1099,18 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
                 "tasks_attempted": tasks_attempted,
                 "error_count": error_count,
             })
+            # Restore prior signal handlers so the worker loop does not
+            # leak its signal handler into the caller's context.
+            if _prev_sigterm is not None:
+                try:
+                    _signal_module.signal(_signal_module.SIGTERM, _prev_sigterm)
+                except (ValueError, OSError):
+                    pass
+            if _prev_sigint is not None:
+                try:
+                    _signal_module.signal(_signal_module.SIGINT, _prev_sigint)
+                except (ValueError, OSError):
+                    pass
             if fcntl is not None:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
@@ -1078,7 +1122,7 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
         results = results[-_SUBAGENT_ASYNC_WORKER_MAX_RESULTS:]
     if results:
         status = "worker_drained"
-    elif stop_reason == "stop_file":
+    elif stop_reason in ("stop_file", "signal"):
         status = "worker_stopped"
     else:
         status = "worker_idle"
