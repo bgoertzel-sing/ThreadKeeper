@@ -38,6 +38,7 @@ import json
 import os
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import time
@@ -809,6 +810,45 @@ def _queued_dispatch_paths(run_id):
     return queue_dir, os.path.join(queue_dir, f"{_safe_slug(run_id, max_len=80)}.json")
 
 
+def _resolve_run_control_file_path(value, label):
+    """Validate a bounded stop/cancel token path under ``SUBAGENT_RUN_DIR``.
+
+    Worker stop files and dispatch cancellation files are control-plane inputs.
+    Keep them inside the local subagent run directory so queued task records or
+    operator arguments cannot probe arbitrary host paths by checking whether a
+    token "exists" elsewhere on the filesystem. Relative values are interpreted
+    relative to ``SUBAGENT_RUN_DIR`` for convenience.
+    """
+    if not value:
+        return ""
+    raw = str(value).strip()
+    if not raw:
+        return ""
+    if "\x00" in raw or len(raw) > _SUBAGENT_MAX_PATH_ARG_CHARS:
+        raise ValueError(
+            f"{label} must be a bounded path string (max {_SUBAGENT_MAX_PATH_ARG_CHARS} chars)"
+        )
+    base = os.path.realpath(os.path.abspath(SUBAGENT_RUN_DIR))
+    candidate = raw if os.path.isabs(raw) else os.path.join(base, raw)
+    candidate_abs = os.path.abspath(candidate)
+    resolved = os.path.realpath(candidate_abs)
+    if os.path.commonpath([base, resolved]) != base:
+        raise ValueError(f"{label} must stay under subagent run dir ({base})")
+    return candidate_abs
+
+
+def _run_control_token_present(path):
+    if not path:
+        return False
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return False
+    return stat.S_ISREG(st.st_mode) and not stat.S_ISLNK(st.st_mode)
+
+
 def _is_pending_queue_task_name(name):
     """Return True only for live ``queue/*.json`` task records.
 
@@ -872,7 +912,7 @@ def _enqueue_dispatch_record(record, tool_names, max_turns, max_chars):
         "max_turns": max_turns,
         "max_chars": max_chars,
         "task_contract": dict(record.get("task_contract") or {}),
-        "cancel_file": _SUBAGENT_CANCEL_FILE,
+        "cancel_file": _resolve_run_control_file_path(_SUBAGENT_CANCEL_FILE, "cancel_file"),
     }
     queue_digest = _json_atomic_write(queue_path, task)
     queue_sidecar = _write_transcript_integrity_sidecar(queue_path, queue_digest)
@@ -1052,25 +1092,11 @@ def _validate_worker_float_arg(value, default, name, minimum=0.0):
 
 
 def _validate_worker_stop_file(stop_file):
-    if not stop_file:
-        return ""
-    value = str(stop_file).strip()
-    if not value:
-        return ""
-    if "\x00" in value or len(value) > _SUBAGENT_MAX_PATH_ARG_CHARS:
-        raise ValueError(
-            f"worker stop_file must be a bounded path string (max {_SUBAGENT_MAX_PATH_ARG_CHARS} chars)"
-        )
-    return value
+    return _resolve_run_control_file_path(stop_file, "worker stop_file")
 
 
 def _worker_stop_requested(stop_file):
-    if not stop_file:
-        return False
-    try:
-        return os.path.exists(stop_file)
-    except Exception:
-        return False
+    return _run_control_token_present(stop_file)
 
 
 def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=None,
@@ -1511,8 +1537,9 @@ def _validate_queued_dispatch_task(task):
                 f"queued dispatch task expired: age {task_age:.1f}s exceeds max {_SUBAGENT_MAX_QUEUED_TASK_AGE_S}s"
             )
     cancel_file = task.get("cancel_file", "")
-    if not isinstance(cancel_file, str) or "\x00" in cancel_file or len(cancel_file) > _SUBAGENT_MAX_PATH_ARG_CHARS:
-        raise ValueError("queued dispatch task cancel_file must be a bounded path string")
+    if not isinstance(cancel_file, str):
+        raise ValueError("queued dispatch task cancel_file must be a string")
+    cancel_file = _resolve_run_control_file_path(cancel_file, "queued dispatch task cancel_file")
     goal = task.get("goal")
     persona_key = task.get("persona_key")
     tool_subset = task.get("tool_subset")
@@ -2917,8 +2944,11 @@ def _validate_tool_args(name, args):
 
 
 def _cancel_requested():
-    path = (_SUBAGENT_CANCEL_FILE or "").strip()
-    return bool(path and os.path.exists(path))
+    try:
+        path = _resolve_run_control_file_path(_SUBAGENT_CANCEL_FILE, "cancel_file")
+    except ValueError:
+        return True
+    return _run_control_token_present(path)
 
 
 def _dispatch_timeout_exceeded(start_time):

@@ -112,6 +112,10 @@ does not daemonize, sleep, poll forever, or auto-start from `dispatch`.
 `subagent.run_queued_worker_loop(...)` is the corresponding supervised async
 worker loop: it repeatedly claims pending queue records until an explicit bound
 is reached (`max_tasks`, `max_idle_polls`, `max_runtime_s`, `max_consecutive_errors`, or a `stop_file`).
+Worker stop-token and queued dispatch cancellation-token paths are resolved under
+`OMEGACLAW_SUBAGENT_RUN_DIR` (relative values are interpreted there, absolute
+values must remain there), and token checks only honor regular non-symlink files
+so queued records/operator arguments cannot probe arbitrary host paths.
 The loop uses a best-effort local lock (`.async-worker.lock`) to avoid two local
 workers draining the same queue concurrently when `fcntl` is available. While
 held, the lock file contains compact JSON metadata (`pid`, `started_at`, bounds,
@@ -238,7 +242,7 @@ accidentally.
 | `OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_IDLE_POLLS` | `3` | Default number of empty queue polls before an explicit worker-loop invocation exits idle. |
 | `OMEGACLAW_SUBAGENT_ASYNC_WORKER_POLL_INTERVAL_S` | `2.0` | Default sleep interval between empty queue polls inside the supervised worker loop. |
 | `OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_RUNTIME_S` | `600.0` | Default wall-clock cap for one explicit worker-loop invocation; `0` disables the runtime cap. |
-| `OMEGACLAW_SUBAGENT_ASYNC_WORKER_STOP_FILE` | unset | Optional stop-token path; if it exists, `run_queued_worker_loop(...)` exits before claiming more work. Malformed explicit worker-loop bounds and NUL-containing or overlong stop-file values fail closed before the worker lock/queue claim. |
+| `OMEGACLAW_SUBAGENT_ASYNC_WORKER_STOP_FILE` | unset | Optional stop-token path under `OMEGACLAW_SUBAGENT_RUN_DIR`; relative values are interpreted there, absolute values must stay there, and only regular non-symlink files count as present. Malformed explicit worker-loop bounds and invalid stop-file values fail closed before the worker lock/queue claim. |
 | `OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_CONSECUTIVE_ERRORS` | `3` | Max consecutive `queue_worker_error` results before the worker loop exits early; `0` disables the consecutive-error limit. |
 | `OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_RESULTS` | `16` | Max result entries kept in the worker-loop structured return; older entries are dropped and counted in `results_truncated`. `0` disables the cap. |
 | `OMEGACLAW_SUBAGENT_LLM_TIMEOUT_S` | `180` | Timeout for each worker LLM call. |

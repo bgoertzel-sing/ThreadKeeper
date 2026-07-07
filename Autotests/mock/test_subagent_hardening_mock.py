@@ -1407,7 +1407,8 @@ def test_run_queued_dispatch_rejects_missing_checksum_sidecar_before_worker_llm(
 
 def test_run_queued_dispatch_preserves_task_cancel_file_before_worker_llm(tmp_path, monkeypatch):
     _write_unit_persona(tmp_path, monkeypatch)
-    cancel_file = tmp_path / "cancel.token"
+    cancel_file = Path(subagent.SUBAGENT_RUN_DIR) / "cancel.token"
+    cancel_file.parent.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("OMEGACLAW_SUBAGENT_QUEUE_ONLY", "1")
     monkeypatch.setattr(subagent, "_SUBAGENT_CANCEL_FILE", str(cancel_file))
     monkeypatch.setattr(subagent, "_SUBAGENT_MAX_QUEUED_DISPATCHES", 4)
@@ -1431,6 +1432,31 @@ def test_run_queued_dispatch_preserves_task_cancel_file_before_worker_llm(tmp_pa
     assert subagent._SUBAGENT_CANCEL_FILE == ""
     assert not queue_path.exists()
     assert Path(str(queue_path) + ".done").exists()
+
+
+def test_run_queued_dispatch_rejects_cancel_file_escape_before_worker_llm(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_QUEUE_ONLY", "1")
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_QUEUED_DISPATCHES", 4)
+    payload = json.loads(subagent.dispatch("queue unsafe cancel", "write-file", "unit", max_turns=2))
+    queue_path = Path(payload["queue_path"])
+    queued = json.loads(queue_path.read_text())
+    queued["cancel_file"] = str(tmp_path / "outside.cancel")
+    digest = subagent._json_atomic_write(str(queue_path), queued)
+    subagent._write_transcript_integrity_sidecar(str(queue_path), digest)
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")),
+    )
+
+    result = json.loads(subagent.run_queued_dispatch(str(queue_path)))
+
+    assert result["status"] == "queue_worker_error"
+    assert "cancel_file" in result["summary"]
+    assert "run dir" in result["summary"]
+    assert not queue_path.exists()
+    assert Path(str(queue_path) + ".failed").exists()
 
 
 def test_run_queued_dispatch_rejects_expired_task_age_before_worker_llm(tmp_path, monkeypatch):
@@ -1630,7 +1656,8 @@ def test_run_queued_worker_loop_records_worker_error_and_continues(tmp_path, mon
 
 def test_run_queued_worker_loop_honors_stop_file_before_worker_llm(tmp_path, monkeypatch):
     _write_unit_persona(tmp_path, monkeypatch)
-    stop_file = tmp_path / "stop.worker"
+    stop_file = Path(subagent.SUBAGENT_RUN_DIR) / "stop.worker"
+    stop_file.parent.mkdir(parents=True, exist_ok=True)
     stop_file.write_text("stop", encoding="utf-8")
     monkeypatch.setenv("OMEGACLAW_SUBAGENT_QUEUE_ONLY", "1")
     monkeypatch.setattr(subagent, "_SUBAGENT_MAX_QUEUED_DISPATCHES", 4)
@@ -1752,6 +1779,39 @@ def test_run_queued_worker_loop_rejects_invalid_stop_file_before_lock(tmp_path, 
     assert result["tasks_attempted"] == 0
     assert "stop_file" in result["summary"]
     assert not (run_dir / ".async-worker.lock").exists()
+
+
+def test_run_queued_worker_loop_rejects_stop_file_escape_before_lock(tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs"
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(run_dir))
+
+    result = json.loads(subagent.run_queued_worker_loop(
+        max_tasks=1, poll_interval_s=0, max_idle_polls=0,
+        stop_file=str(tmp_path / "outside.stop"),
+    ))
+
+    assert result["status"] == "worker_config_invalid"
+    assert result["tasks_attempted"] == 0
+    assert "stop_file" in result["summary"]
+    assert "run dir" in result["summary"]
+    assert not (run_dir / ".async-worker.lock").exists()
+
+
+def test_run_control_symlink_tokens_are_ignored(tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs"
+    real_token = run_dir / "real.stop"
+    token = run_dir / "stop.link"
+    run_dir.mkdir(parents=True)
+    real_token.write_text("stop", encoding="utf-8")
+    token.symlink_to(real_token)
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(run_dir))
+
+    result = json.loads(subagent.run_queued_worker_loop(
+        max_tasks=1, poll_interval_s=0, max_idle_polls=0, stop_file=str(token),
+    ))
+
+    assert result["status"] == "worker_idle"
+    assert result["stop_reason"] == "idle"
 
 
 def test_run_queued_worker_loop_rejects_malformed_explicit_bounds_before_lock(tmp_path, monkeypatch):
