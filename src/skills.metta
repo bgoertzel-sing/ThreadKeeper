@@ -5,6 +5,7 @@
     "- Episodes searches history for episodes around a time stamp, time format is same as in TIME: episodes time_string"
     "- Pin a certain string as short-term working memory item to keep track of task state: pin string"
     "- Request exactly one more autonomous continuation turn after this command batch: continue-thinking reason"
+    "- Show status of late-loaded extensions (deontic, directive, etc.): extension-status"
     ;SHELL AND FILE I/O:
     "- Execute shell command without apostrophe in string, it returns the command output to you: shell string"
     "- Read file to string: read-file filename"
@@ -27,7 +28,17 @@
     "You can also use PLN:"
     "metta (|~ ((Implication (Inheritance $1 (IntSet Feathered))"
     "           (Inheritance $1 Bird)) (stv 1.0 0.9))"
-    "          ((Inheritance Pingu (IntSet Feathered)) (stv 1.0 0.9)))"))
+    "          ((Inheritance Pingu (IntSet Feathered)) (stv 1.0 0.9)))"
+    ;; >>> omegaclaw-deontic (managed; do not edit by hand) >>>
+    "- Defeasible + deontic reasoning over a theory file (tagged conclusions): deontic-conclude path"
+    "- Conclusions under Standard Deontic Logic closure (O/P/F, F p = O not p): deontic-norms path"
+    "- Detect unresolved deontic dilemmas (O p and O not p both applicable): deontic-conflicts path"
+    "- Next actionable tasks in a directive plan file: directive-next path"
+    "- Task status groups (ready/blocked/claimed/done) of a plan file: directive-status path"
+    "- Kanban board view of a directive plan file: directive-board path"
+    "- One-line progress summary of a directive plan file: directive-summary path"
+    ;; <<< omegaclaw-deontic <<<
+))
 
 
 (= (read-file $file)

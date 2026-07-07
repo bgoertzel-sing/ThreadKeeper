@@ -19,6 +19,7 @@ _api_base = ""
 _chat_id = ""
 _allowed_chat_ids = set()
 _reply_chat_id = ""
+_pending_messages = []
 _poll_timeout = 20
 _offset = None
 _connected = False
@@ -102,9 +103,10 @@ def _set_reply_chat(chat_id):
         return
     with _state_lock:
         _reply_chat_id = chat_id
-def _set_last(msg):
-    global _last_message
+def _set_last(msg, chat_id=""):
+    global _last_message, _pending_messages
     with _msg_lock:
+        _pending_messages.append((msg, chat_id))
         if _last_message == "":
             _last_message = msg
         else:
@@ -112,10 +114,18 @@ def _set_last(msg):
 
 
 def getLastMessage():
-    global _last_message
+    global _last_message, _reply_chat_id
     if _sync_poll and _running:
         _poll_once()
     with _msg_lock:
+        if _pending_messages:
+            msg, cid = _pending_messages.pop(0)
+            _last_message = ""
+            if cid:
+                with _state_lock:
+                    _reply_chat_id = cid
+            return msg
+        # Fallback for any remaining accumulated message
         tmp = _last_message
         _last_message = ""
         return tmp
@@ -613,7 +623,7 @@ def _handle_updates(updates):
         display_name = _display_name(user, chat)
         if state == "allow":
             _set_reply_chat(chat_id)
-            _set_last(f"{display_name}: {msg}")
+            _set_last(f"{display_name}: {msg}", chat_id)
             _maybe_send_preack(display_name, auth_text or msg)
         elif state == "auth_bound":
             _set_reply_chat(chat_id)

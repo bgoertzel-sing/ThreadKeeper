@@ -196,6 +196,21 @@ class OpenAIProvider(AIProvider):
 class OpenClawProvider(AIProvider):
     """OpenClaw Gateway provider using the local OpenAI-compatible chat endpoint."""
 
+    # Context-overflow detection patterns (matched against stderr/error text)
+    _OVERFLOW_PATTERNS = [
+        "context length",
+        "maximum context",
+        "context window",
+        "token limit",
+        "too many tokens",
+        "prompt is too long",
+        "context_length_exceeded",
+        "reduce the length",
+        "HTTP Error 400",
+        "HTTP Error 413",
+        "Payload Too Large",
+    ]
+
     def __init__(self, name: str = "OpenClaw"):
         super().__init__(
             name=name,
@@ -203,6 +218,17 @@ class OpenClawProvider(AIProvider):
             model_name=os.environ.get("OPENCLAW_MODEL", "openclaw/default"),
             base_url=os.environ.get("OPENCLAW_GATEWAY_BASE_URL", "http://127.0.0.1:18789/v1"),
         )
+        self._triage_pending = False  # True when ack sent, waiting for full call
+        self._triage_model = os.environ.get("OPENCLAW_TRIAGE_MODEL", "openrouter/z-ai/glm-5.2")
+        self._triage_enabled = os.environ.get("OPENCLAW_TRIAGE", "1").lower() not in {"0", "false", "no", "off"}
+        # Escalation model for context-overflow recovery
+        self._escalation_model = os.environ.get("OPENCLAW_ESCALATION_MODEL", "openai/gpt-5.5")
+        # Approximate char threshold above which we pre-emptively escalate (avoid waiting for a 400)
+        # Default: 100K chars (~25K tokens). Set to 0 to disable pre-emptive escalation.
+        self._preemptive_escalation_chars = int(os.environ.get("OPENCLAW_PREEMPTIVE_ESCALATION_CHARS", "100000"))
+        # Chunk size for chunking fallback (in chars of user message content)
+        self._chunk_size = int(os.environ.get("OPENCLAW_CHUNK_SIZE", "20000"))
+        self._max_chunks = int(os.environ.get("OPENCLAW_MAX_CHUNKS", "8"))
 
     def _create_client(self) -> Optional[openai.OpenAI]:
         token = os.environ.get(self._var_name)
@@ -226,21 +252,116 @@ class OpenClawProvider(AIProvider):
         text += "\nZeroBot/OpenClaw should inspect logs or retry with a longer/health-checked backend call."
         return f"(send {json.dumps(text)})"
 
-    def _chat_subprocess(self, messages, max_tokens: int) -> str:
-        """Call OpenClaw from a child Python process.
+    def _is_context_overflow(self, error_text: str) -> bool:
+        """Check whether an error indicates context-length overflow."""
+        error_lower = error_text.lower()
+        return any(pat.lower() in error_lower for pat in self._OVERFLOW_PATTERNS)
 
-        SWI-Prolog/Janus has repeatedly segfaulted around the embedded Python
-        OpenAI SDK call path.  Keeping the HTTP client in a short-lived child
-        process leaves Janus with only subprocess I/O and a plain string result.
+    def _total_content_chars(self, messages) -> int:
+        """Sum content length across all messages."""
+        return sum(len(str(m.get("content", ""))) for m in messages)
+
+    def _summarize_and_merge(self, messages, max_tokens: int) -> str:
+        """Chunking fallback: split large user message content into chunks, summarize each,
+        then send the merged summary as the user message.
+
+        This is used when both the primary and escalation models fail on context size.
+        It processes the last user message in chunks, asks the model to summarize each
+        chunk, then sends the combined summaries as the new user message.
+        """
+        if not messages:
+            return self._failure_response("No messages to process after chunking fallback.")
+
+        # Find the last user message — that's where the big content usually is
+        user_idx = None
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i].get("role") == "user":
+                user_idx = i
+                break
+        if user_idx is None:
+            return self._failure_response("No user message found for chunking fallback.")
+
+        user_content = messages[user_idx].get("content", "")
+        if len(user_content) <= self._chunk_size:
+            # Content isn't that large; the overflow is from total history
+            # Truncate older history, keeping only system + last user message
+            truncated = [m for i, m in enumerate(messages) if m.get("role") == "system" or i == user_idx]
+            print(f"[lib_llm_ext.OpenClawProvider._summarize_and_merge] history truncated to {len(truncated)} messages", flush=True)
+            return self._subprocess_call(truncated, max_tokens, model=self._escalation_model, label="main-escalated")
+
+        # Split user content into chunks
+        chunks = [user_content[i:i + self._chunk_size] for i in range(0, len(user_content), self._chunk_size)]
+        if len(chunks) > self._max_chunks:
+            # Too many chunks — keep first and last, summarize middle
+            print(f"[lib_llm_ext.OpenClawProvider._summarize_and_merge] {len(chunks)} chunks exceeds max {self._max_chunks}; condensing", flush=True)
+            first = chunks[0]
+            last = chunks[-1]
+            middle = "\n".join(chunks[1:-1])
+            middle_summary = self._summarize_chunk(middle, max_tokens=500)
+            combined = f"[Beginning of document]\n{first}\n\n[...middle section summary...]\n{middle_summary}\n\n[End of document]\n{last}"
+        else:
+            # Summarize each chunk and merge
+            summaries = []
+            for i, chunk in enumerate(chunks):
+                print(f"[lib_llm_ext.OpenClawProvider._summarize_and_merge] summarizing chunk {i+1}/{len(chunks)} ({len(chunk)} chars)", flush=True)
+                summary = self._summarize_chunk(chunk, max_tokens=800)
+                if summary:
+                    summaries.append(summary)
+            combined = "\n\n---\n\n".join(summaries)
+
+        # Build new messages: keep system prompt, replace user content with merged summaries
+        new_messages = [m for i, m in enumerate(messages) if m.get("role") == "system"]
+        new_messages.append({"role": "user", "content": combined})
+        # Add a note about any prior user messages that were condensed
+        print(f"[lib_llm_ext.OpenClawProvider._summarize_and_merge] combined summaries: {len(combined)} chars, calling escalation model", flush=True)
+        return self._subprocess_call(new_messages, max_tokens, model=self._escalation_model, label="main-chunked")
+
+    def _summarize_chunk(self, chunk: str, max_tokens: int = 800) -> str:
+        """Summarize a single chunk using the escalation model."""
+        summarize_prompt = (
+            "Summarize the following text, preserving all key technical content, "
+            "arguments, recommendations, and specific claims. Do not omit numbered items or specific suggestions.\n\n"
+            f"Text:\n{chunk}"
+        )
+        result = self._subprocess_call(
+            [{"role": "user", "content": summarize_prompt}],
+            max_tokens=max_tokens,
+            model=self._escalation_model,
+            label="chunk-summarize",
+        )
+        return result.strip() if result else ""
+
+    def _subprocess_call(self, messages, max_tokens: int, model: str = None, label: str = "main") -> str:
+        """Generic subprocess call to OpenClaw Gateway with optional model override.
+
+        Includes context-overflow detection: if the primary model fails with a
+        context-length error, automatically retries with the escalation model.
+        If the escalation model also fails, falls back to chunking.
         """
         session_user = os.environ.get("OPENCLAW_SESSION_USER", "omegaclaw-local")
         if os.environ.get("OPENCLAW_SESSION_PER_CALL", "0").lower() in {"1", "true", "yes", "on"}:
-            # OmegaClaw already supplies its own prompt/history. Reusing one
-            # Gateway `user` session caused OpenClaw context to balloon far
-            # beyond the model window, making later calls slow or empty.
             session_user = f"{session_user}-{int(time.time() * 1000)}"
+        # Check for pre-emptive escalation: if total content is very large, skip
+        # the primary model and go straight to escalation model to avoid a
+        # guaranteed-to-fail 400 on smaller-context models.
+        total_chars = self._total_content_chars(messages)
+        should_preempt = (
+            self._preemptive_escalation_chars > 0
+            and total_chars > self._preemptive_escalation_chars
+            and model is None  # only for default model calls, not explicit overrides
+            and label == "main"
+        )
+        if should_preempt:
+            print(
+                f"[lib_llm_ext.OpenClawProvider._subprocess_call:{label}] pre-emptive escalation: "
+                f"{total_chars} chars > {self._preemptive_escalation_chars} threshold, using {self._escalation_model}",
+                flush=True,
+            )
+            model = self._escalation_model
+
+        use_model = model or os.environ.get("OPENCLAW_MODEL", self._model_name)
         payload = {
-            "model": os.environ.get("OPENCLAW_MODEL", self._model_name),
+            "model": use_model,
             "user": session_user,
             "messages": messages,
             "max_tokens": max_tokens,
@@ -267,9 +388,12 @@ sys.stdout.write(content)
 '''
         python_exe = os.environ.get("OPENCLAW_SUBPROCESS_PYTHON") or shutil.which("python3") or sys.executable
         timeout = int(os.environ.get("OPENCLAW_SUBPROCESS_TIMEOUT", "240"))
+        # Shorter timeout for triage calls
+        if label == "triage":
+            timeout = min(timeout, 30)
         print(
-            f"[lib_llm_ext.OpenClawProvider._chat_subprocess] start python={python_exe} "
-            f"messages={len(messages)} chars={sum(len(str(m.get('content', ''))) for m in messages)} "
+            f"[lib_llm_ext.OpenClawProvider._subprocess_call:{label}] start python={python_exe} "
+            f"model={use_model} messages={len(messages)} chars={sum(len(str(m.get('content', ''))) for m in messages)} "
             f"max_tokens={max_tokens} timeout={timeout}",
             flush=True,
         )
@@ -283,19 +407,76 @@ sys.stdout.write(content)
                 check=False,
             )
         except subprocess.TimeoutExpired:
-            print(f"[lib_llm_ext.OpenClawProvider._chat_subprocess] child timed out after {timeout}s", flush=True)
-            return self._failure_response(f"The OpenClaw child process exceeded its {timeout}s timeout.")
+            print(f"[lib_llm_ext.OpenClawProvider._subprocess_call:{label}] child timed out after {timeout}s", flush=True)
+            return "" if label == "triage" else self._failure_response(f"The OpenClaw child process exceeded its {timeout}s timeout.")
         except Exception as e:
-            print(f"[lib_llm_ext.OpenClawProvider._chat_subprocess] child launch failed: {e}", flush=True)
-            return self._failure_response("The OpenClaw child process could not be launched.", str(e))
+            print(f"[lib_llm_ext.OpenClawProvider._subprocess_call:{label}] child launch failed: {e}", flush=True)
+            return "" if label == "triage" else self._failure_response("The OpenClaw child process could not be launched.", str(e))
         if completed.returncode != 0:
             stderr = (completed.stderr or "").strip()
-            print(f"[lib_llm_ext.OpenClawProvider._chat_subprocess] child failed rc={completed.returncode}: {stderr[:1200]}", flush=True)
-            return self._failure_response(f"The OpenClaw HTTP child exited with rc={completed.returncode}.", stderr)
-        print(f"[lib_llm_ext.OpenClawProvider._chat_subprocess] child ok chars={len(completed.stdout or '')}", flush=True)
+            print(f"[lib_llm_ext.OpenClawProvider._subprocess_call:{label}] child failed rc={completed.returncode}: {stderr[:1200]}", flush=True)
+            # Context-overflow detection: try escalation model, then chunking
+            if label == "main" and self._is_context_overflow(stderr):
+                print(f"[lib_llm_ext.OpenClawProvider._subprocess_call:{label}] context overflow detected; escalating to {self._escalation_model}", flush=True)
+                escalated_result = self._subprocess_call(messages, max_tokens, model=self._escalation_model, label="main-escalated")
+                if escalated_result.strip():
+                    return escalated_result
+                # Escalation model also failed — try chunking fallback
+                print(f"[lib_llm_ext.OpenClawProvider._subprocess_call:{label}] escalation model also failed; trying chunking fallback", flush=True)
+                return self._summarize_and_merge(messages, max_tokens)
+            return "" if label == "triage" else self._failure_response(f"The OpenClaw HTTP child exited with rc={completed.returncode}.", stderr)
+        print(f"[lib_llm_ext.OpenClawProvider._subprocess_call:{label}] child ok chars={len(completed.stdout or '')}", flush=True)
         if not (completed.stdout or "").strip():
-            return self._failure_response("The OpenClaw gateway returned an empty assistant message.")
+            return "" if label == "triage" else self._failure_response("The OpenClaw gateway returned an empty assistant message.")
         return completed.stdout or ""
+
+    def _triage(self, messages) -> str:
+        """Quick GLM call to classify message complexity.
+
+        Returns:
+          - 'SIMPLE' if the message can be answered in 1-2 sentences
+          - 'COMPLEX: <ack text>' if it needs a substantive response
+          - '' on any error (caller proceeds with full call)
+        """
+        if not self._triage_enabled:
+            return ""
+        # Extract last user message
+        last_user = ""
+        for m in reversed(messages):
+            if m.get("role") == "user":
+                last_user = m.get("content", "")
+                break
+        # Skip triage for very short messages (likely operational)
+        if len(last_user) < 60:
+            return "SIMPLE"
+        # Extract the actual user message from the OmegaClaw prompt format
+        # The content often contains HUMAN-MSG: near the end
+        human_marker = "HUMAN-MSG:"
+        if human_marker in last_user:
+            last_user = last_user.rsplit(human_marker, 1)[-1].strip()[:800]
+        else:
+            last_user = last_user[-800:]
+        triage_prompt = (
+            "You are a triage assistant for a research chatbot. Classify this incoming message.\n\n"
+            "If it can be answered in 1-2 sentences (simple operational question, greeting, quick confirmation), "
+            "reply exactly: SIMPLE\n\n"
+            "If it needs a substantive response (3+ sentences, analysis, code, research, or deep thought), "
+            "reply exactly: COMPLEX: <one-line ack that specifically references the topic>\n\n"
+            "Do not use generic acks. Make the ack specific to what is being asked.\n\n"
+            f"Message: {last_user}"
+        )
+        triage_messages = [{"role": "user", "content": triage_prompt}]
+        result = self._subprocess_call(triage_messages, max_tokens=100, model=self._triage_model, label="triage")
+        return result.strip() if result else ""
+
+    def _chat_subprocess(self, messages, max_tokens: int) -> str:
+        """Call OpenClaw from a child Python process.
+
+        SWI-Prolog/Janus has repeatedly segfaulted around the embedded Python
+        OpenAI SDK call path.  Keeping the HTTP client in a short-lived child
+        process leaves Janus with only subprocess I/O and a plain string result.
+        """
+        return self._subprocess_call(messages, max_tokens, label="main")
 
     def chat(self, content: str, max_tokens: int = 6000, reasoning: str = "medium", **kwargs) -> str:
         if ":-:-:-:" in content:
@@ -305,6 +486,26 @@ sys.stdout.write(content)
             messages = [{"role": "user", "content": content}]
 
         if os.environ.get("OPENCLAW_SUBPROCESS", "0").lower() in {"1", "true", "yes", "on"}:
+            # Triage step: if we're not in a continuation, classify the message
+            if not self._triage_pending:
+                triage = self._triage(messages)
+                if triage.startswith("COMPLEX:"):
+                    ack = triage[len("COMPLEX:"):].strip()
+                    if not ack:
+                        ack = "On it — preparing a fuller response."
+                    self._triage_pending = True
+                    _log_raw(self._name + ":triage", self._triage_model, f"COMPLEX -> ack: {ack}")
+                    # Return ack + continue-thinking so OmegaClaw sends the ack
+                    # and then calls chat() again for the full response
+                    return f'(send {json.dumps(ack)}) (continue-thinking "preparing fuller response")'
+                elif triage.startswith("SIMPLE"):
+                    _log_raw(self._name + ":triage", self._triage_model, "SIMPLE -> full call")
+                    # Fall through to full call
+                # If triage failed (empty), fall through to full call
+            else:
+                _log_raw(self._name + ":triage", self._triage_model, "skipped (continuation)")
+
+            self._triage_pending = False  # Reset after full call
             raw = self._chat_subprocess(messages, max_tokens)
             _log_raw(self._name, os.environ.get("OPENCLAW_MODEL", self._model_name), raw)
             return self._clean_text(raw)
