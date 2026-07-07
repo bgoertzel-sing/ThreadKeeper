@@ -41,6 +41,7 @@ def test_env_numeric_knobs_fallback_and_clamp_on_reload(monkeypatch):
         "OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEM_CHARS": "0",
         "OMEGACLAW_SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS": "0",
         "OMEGACLAW_SUBAGENT_MAX_EMIT_CHARS": "0",
+        "OMEGACLAW_SUBAGENT_MAX_RESPONSE_CHARS": "0",
         "OMEGACLAW_SUBAGENT_MAX_QUEUED_DISPATCHES": "-4",
         "OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_TASKS": "-4",
         "OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_IDLE_POLLS": "-1",
@@ -72,6 +73,7 @@ def test_env_numeric_knobs_fallback_and_clamp_on_reload(monkeypatch):
     assert reloaded._SUBAGENT_MAX_CONTRACT_ITEM_CHARS == 1
     assert reloaded._SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS == 1
     assert reloaded._SUBAGENT_MAX_EMIT_CHARS == 1
+    assert reloaded._SUBAGENT_MAX_RESPONSE_CHARS == 1
     assert reloaded._SUBAGENT_MAX_QUEUED_DISPATCHES == 0
     assert reloaded._SUBAGENT_ASYNC_WORKER_MAX_TASKS == 0
     assert reloaded._SUBAGENT_ASYNC_WORKER_MAX_IDLE_POLLS == 0
@@ -627,6 +629,28 @@ def test_dispatch_rejects_oversized_emit_before_success(tmp_path, monkeypatch):
     saved = json.loads(Path(payload["transcript_path"]).read_text())
     assert saved["status"] == "emit_protocol_violation"
     assert saved["summary"].startswith("EMIT_PROTOCOL_VIOLATION")
+
+
+def test_dispatch_rejects_oversized_worker_response_before_parsing(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_RESPONSE_CHARS", 24)
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_a: ('(write-file "hidden.txt" "nope")\n' + ("x" * 200), 12, 34),
+    )
+
+    payload = json.loads(subagent.dispatch("bound raw worker response", "write-file", "unit", max_turns=1))
+
+    assert payload["status"] == "error"
+    assert "OMEGACLAW_SUBAGENT_MAX_RESPONSE_CHARS=24" in payload["summary"]
+    assert not (tmp_path / "workspace" / "hidden.txt").exists()
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["status"] == "response_too_large"
+    assert saved["worker_token_usage"] == {"input_tokens": 12, "output_tokens": 34, "total_tokens": 46}
+    assert saved["turns"][0]["tool_calls"] == []
+    assert len(saved["turns"][0]["raw_response"]) < 80
+    assert saved["turns"][0]["raw_response"].startswith('(write-file "hidden')
 
 
 def test_tool_quota_stops_dispatch_with_structured_error(tmp_path, monkeypatch):

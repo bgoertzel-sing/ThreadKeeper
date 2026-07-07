@@ -348,6 +348,12 @@ _SUBAGENT_MAX_TRANSCRIPT_SUMMARY_CHARS = _env_int(
 _SUBAGENT_MAX_EMIT_CHARS = _env_int(
     "OMEGACLAW_SUBAGENT_MAX_EMIT_CHARS", 20000, minimum=1,
 )
+# Cap worker response text before parsing/persisting tool calls. The provider has
+# already returned bytes by this point, but this prevents a single oversized
+# response from expanding transcript files or driving unbounded parser work.
+_SUBAGENT_MAX_RESPONSE_CHARS = _env_int(
+    "OMEGACLAW_SUBAGENT_MAX_RESPONSE_CHARS", 50000, minimum=1,
+)
 
 # Queue task max age. When non-zero, a queued task older than this many seconds
 # is rejected before any worker LLM call, preventing stale/expired work from
@@ -3201,6 +3207,23 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
             return _structured_return(
                 raw, run_record, status="error", uncertainty="high",
                 next_action="inspect transcript_path or retry later", max_chars=bounded_chars,
+            )
+
+        if len(str(raw)) > _SUBAGENT_MAX_RESPONSE_CHARS:
+            response_msg = (
+                "(subagent: worker response exceeded "
+                f"OMEGACLAW_SUBAGENT_MAX_RESPONSE_CHARS={_SUBAGENT_MAX_RESPONSE_CHARS}; "
+                "refusing to parse or execute it)"
+            )
+            turn_record["raw_response"] = cap(str(raw), _SUBAGENT_MAX_RESPONSE_CHARS)
+            turn_record["tool_results"] = response_msg
+            run_record.setdefault("turns", []).append(turn_record)
+            _stamp_token_usage()
+            _finish_run_record(run_record, "response_too_large", response_msg)
+            return _structured_return(
+                response_msg, run_record, status="error", uncertainty="high",
+                next_action="dispatch a narrower task or raise OMEGACLAW_SUBAGENT_MAX_RESPONSE_CHARS",
+                max_chars=bounded_chars,
             )
 
         calls = parse_calls(raw)
