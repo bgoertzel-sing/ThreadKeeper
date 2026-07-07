@@ -681,6 +681,12 @@ def _handle_updates(updates):
         if not chat_id:
             continue
 
+        # Skip messages from other bot accounts in group chats.
+        # Bot-bot discussion happens via scheduled crons, not real-time ingestion.
+        # This prevents identity confusion when another bot's messages pollute history.
+        if chat_type != "private" and user.get("is_bot"):
+            continue
+
         state = _is_allowed_message(chat_id, user_id, auth_text, chat_type)
         display_name = _display_name(user, chat)
         if state == "allow":
@@ -778,6 +784,9 @@ def _send_message_to(text, target_chat):
 
     if not _connected or not target_chat:
         print(f"[TELEGRAM] Send skipped: connected={_connected} chat_id={'set' if target_chat else 'unset'}")
+        return
+
+    if _is_duplicate_send(text, target_chat):
         return
 
     max_len = 3900
