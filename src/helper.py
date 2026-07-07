@@ -248,6 +248,60 @@ def normalize_string(x):
         return str(x)
 
 
+def _read_balanced_block(text, start):
+    depth = 0
+    in_string = False
+    escaped = False
+    for idx in range(start, len(text)):
+        ch = text[idx]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return text[start:idx + 1], idx + 1
+    return text[start:], len(text)
+
+
+def compact_skill_results(value):
+    """Remove duplicate COMMAND_RETURN blocks before feeding results back.
+
+    PeTTa/MeTTa evaluation can produce duplicate alternatives for a single
+    side-effecting skill call.  The side-effect is already deduped at the skill
+    boundary where possible, but echoing dozens of identical COMMAND_RETURNs in
+    LAST_SKILL_USE_RESULTS pollutes the next prompt and can induce stale-output
+    loops.  Preserve first occurrences and all non-duplicate diagnostics.
+    """
+    text = normalize_string(value)
+    marker = "(COMMAND_RETURN:"
+    out = []
+    seen = set()
+    idx = 0
+    while idx < len(text):
+        pos = text.find(marker, idx)
+        if pos < 0:
+            out.append(text[idx:])
+            break
+        out.append(text[idx:pos])
+        block, end = _read_balanced_block(text, pos)
+        key = re.sub(r"\s+", " ", block).strip()
+        if key not in seen:
+            seen.add(key)
+            out.append(block)
+        idx = end
+    return "".join(out)
+
+
 def test_balance_parenthesis():
     assert balance_parentheses('(write-file test.txt hello world)') == '((write-file "test.txt" "hello world"))'
     assert balance_parentheses('(append-file test.txt hello world)') == '((append-file "test.txt" "hello world"))'

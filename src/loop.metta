@@ -80,12 +80,13 @@
                                        ($_ (HandleError MULTI_COMMAND_FAILURE_NOTHING_WAS_DONE_PLEASE_CORRECT_PARENTHESES_AND_USE_QUOTES_AND_RETRY $response $sexpr))
                                        ($_ (println! (RESPONSE: $sexpr)))
                                        ($results (RESULTS: (collapse (let $s (superpose $sexpr) (COMMAND_RETURN: ($s (HandleError SINGLE_COMMAND_FORMAT_ERROR_NOTHING_WAS_DONE_PLEASE_FIX_AND_RETRY $s (catch (let $R (eval $s) (py-call (helper.normalize_string $R)))))))))))
-                                       ($_ (println! $results)))
+                                       ($compactResults (py-call (helper.compact_skill_results (repr $results))))
+                                       ($_ (println! $compactResults)))
                                       (progn (if (or $msgnew  (not (== $sexpr ()))) (addToHistory $msg $response $sexpr $msgnew) _)
                                              ; Continue only when the model explicitly calls continue-thinking.
                                              ; Otherwise, stop this burst and wait for a fresh message or wake.
                                              (if (get-state &continueRequested) _ (change-state! &loops 0))
-                                             (change-state! &lastresults (string-safe (repr $results)))))
+                                             (change-state! &lastresults (string-safe $compactResults))))
                                 (if (and (> (maxWakeLoops) 0) (> (get_time) (get-state &nextWakeAt)))
                                     (change-state! &loops (maxWakeLoops)) _)))
                       (sleep (sleepInterval))

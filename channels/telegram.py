@@ -19,6 +19,7 @@ _api_base = ""
 _chat_id = ""
 _allowed_chat_ids = set()
 _reply_chat_id = ""
+_active_chat_id = ""
 _pending_messages = []
 _poll_timeout = 20
 _offset = None
@@ -36,6 +37,9 @@ _attachment_max_chars = 20000
 
 _last_preack_key = ""
 _last_preack_time = 0.0
+_last_sent_key = ""
+_last_sent_time = 0.0
+_last_sent_lock = threading.Lock()
 
 
 def _looks_like_long_request(msg):
@@ -76,7 +80,7 @@ def _looks_like_long_request(msg):
     return False
 
 
-def _maybe_send_preack(display_name, msg):
+def _maybe_send_preack(display_name, msg, chat_id=""):
     global _last_preack_key, _last_preack_time
 
     if not _parse_bool_env("TG_PREACK_LONG_REQUESTS", False):
@@ -93,7 +97,11 @@ def _maybe_send_preack(display_name, msg):
     _last_preack_key = key
     _last_preack_time = now
 
-    send_message(f"{display_name}: Got it — I’m reading this and will answer substantively.")
+    target_chat = str(chat_id or "").strip()
+    if target_chat:
+        _send_message_to(f"{display_name}: Got it — I’m reading this and will answer substantively.", target_chat)
+    else:
+        send_message(f"{display_name}: Got it — I’m reading this and will answer substantively.")
 
 
 def _set_reply_chat(chat_id):
@@ -102,6 +110,24 @@ def _set_reply_chat(chat_id):
     if not chat_id:
         return
     with _state_lock:
+        _reply_chat_id = chat_id
+
+
+def _set_active_chat(chat_id):
+    """Bind ordinary `(send ...)` replies to the dequeued inbound message.
+
+    The Telegram poller may accept updates from several configured chats before
+    the OmegaClaw loop asks for the next message.  `_reply_chat_id` tracks the
+    latest accepted chat for backward compatibility, but user-facing replies
+    should target the chat of the message actually handed to the LLM until the
+    next message is dequeued.
+    """
+    global _active_chat_id, _reply_chat_id
+    chat_id = str(chat_id or "").strip()
+    if not chat_id:
+        return
+    with _state_lock:
+        _active_chat_id = chat_id
         _reply_chat_id = chat_id
 def _set_last(msg, chat_id=""):
     global _last_message, _pending_messages
@@ -122,8 +148,7 @@ def getLastMessage():
             msg, cid = _pending_messages.pop(0)
             _last_message = ""
             if cid:
-                with _state_lock:
-                    _reply_chat_id = cid
+                _set_active_chat(cid)
             return msg
         # Fallback for any remaining accumulated message
         tmp = _last_message
@@ -495,6 +520,42 @@ def _parse_bool_env(name, default=False):
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _send_dedupe_window_s():
+    try:
+        value = float(os.environ.get("TG_SEND_DEDUPE_WINDOW_S", "10"))
+    except Exception:
+        return 10.0
+    if value < 0:
+        return 0.0
+    return value
+
+
+def _is_duplicate_send(text, target_chat):
+    """Suppress immediate duplicate sends caused by MeTTa nondeterminism.
+
+    Some skill evaluations can yield repeated identical `(send ...)` alternatives
+    from one LLM response. The channel layer is the final side-effect boundary,
+    so make it idempotent for the same target/text over a short window while
+    still allowing an intentional repeated message later.
+    """
+    global _last_sent_key, _last_sent_time
+
+    window_s = _send_dedupe_window_s()
+    if window_s <= 0:
+        return False
+
+    normalized_text = re.sub(r"\s+", " ", str(text or "").strip())
+    key = f"{target_chat}\0{normalized_text}"
+    now = time.time()
+    with _last_sent_lock:
+        if key and key == _last_sent_key and (now - _last_sent_time) < window_s:
+            print(f"[TELEGRAM] Suppressed duplicate send within {window_s:g}s window chat_id={target_chat}")
+            return True
+        _last_sent_key = key
+        _last_sent_time = now
+    return False
+
+
 def _parse_csv_values(raw):
     values = []
     seen = set()
@@ -515,10 +576,10 @@ def _configure_chat_targets(chat_id):
 
     `chat_id` and legacy `TG_CHAT_ID` can still name one target.  New
     comma-separated `TG_CHAT_IDS` / `TG_ALLOWED_CHAT_ID(S)` values let the same
-    bot observe more than one chat.  Outbound replies go to the most recent
-    accepted inbound chat, falling back to the first configured chat.
+    bot observe more than one chat.  Outbound replies go to the active dequeued
+    inbound chat, falling back to the first configured chat.
     """
-    global _chat_id, _allowed_chat_ids, _reply_chat_id
+    global _chat_id, _allowed_chat_ids, _reply_chat_id, _active_chat_id
 
     ordered = []
     for raw in (
@@ -535,6 +596,7 @@ def _configure_chat_targets(chat_id):
     _allowed_chat_ids = set(ordered)
     _chat_id = ordered[0] if ordered else ""
     _reply_chat_id = _chat_id
+    _active_chat_id = ""
 
 
 def _skip_initial_offset():
@@ -624,7 +686,7 @@ def _handle_updates(updates):
         if state == "allow":
             _set_reply_chat(chat_id)
             _set_last(f"{display_name}: {msg}", chat_id)
-            _maybe_send_preack(display_name, auth_text or msg)
+            _maybe_send_preack(display_name, auth_text or msg, chat_id=chat_id)
         elif state == "auth_bound":
             _set_reply_chat(chat_id)
             send_message(f"Authentication successful for {display_name}.")
@@ -708,13 +770,11 @@ def stop_telegram():
     _running = False
 
 
-def send_message(text):
+def _send_message_to(text, target_chat):
     text = str(text).replace("\\n", "\n").replace("\r", "")
+    target_chat = str(target_chat or "").strip()
     if not text:
         return
-
-    with _state_lock:
-        target_chat = _reply_chat_id or _chat_id
 
     if not _connected or not target_chat:
         print(f"[TELEGRAM] Send skipped: connected={_connected} chat_id={'set' if target_chat else 'unset'}")
@@ -736,3 +796,9 @@ def send_message(text):
         except Exception as exc:
             print(f"[TELEGRAM] Send failed: {exc}")
             return
+
+
+def send_message(text):
+    with _state_lock:
+        target_chat = _active_chat_id or _reply_chat_id or _chat_id
+    return _send_message_to(text, target_chat)
