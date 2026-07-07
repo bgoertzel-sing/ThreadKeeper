@@ -284,6 +284,13 @@ _SHELL_MAX_ARGV = _env_int("OMEGACLAW_SUBAGENT_SHELL_MAX_ARGV", 32, minimum=1)
 # in-memory responses from external services.
 _SUBAGENT_MAX_SEARCH_OUTPUT_CHARS = _env_int("OMEGACLAW_SUBAGENT_MAX_SEARCH_OUTPUT_CHARS", 4000, minimum=1)
 
+# JSON audit/task read cap. Queue records and reviewable transcript records are
+# checksum-verified, but a malformed or adversarial local file should not be
+# read into memory unbounded before schema/status validation. Keep the default
+# comfortably above normal task/transcript sidecars while allowing operators to
+# lower it for constrained deployments/tests.
+_SUBAGENT_MAX_JSON_FILE_BYTES = _env_int("OMEGACLAW_SUBAGENT_MAX_JSON_FILE_BYTES", 262144, minimum=1024)
+
 # Subagent LLM call reliability controls. Keep defaults bounded so a stuck
 # worker endpoint cannot hang the parent loop indefinitely.
 _SUBAGENT_LLM_TIMEOUT_S = _env_int("OMEGACLAW_SUBAGENT_LLM_TIMEOUT_S", 180, minimum=1)
@@ -772,11 +779,13 @@ def _enqueue_dispatch_record(record, tool_names, max_turns, max_chars):
     )
 
 
-def _read_json_file(path, max_bytes=262144):
+def _read_json_file(path, max_bytes=None):
+    if max_bytes is None:
+        max_bytes = _SUBAGENT_MAX_JSON_FILE_BYTES
     with open(path, "rb") as f:
         payload = f.read(max_bytes + 1)
     if len(payload) > max_bytes:
-        raise ValueError(f"JSON file exceeds {max_bytes} byte limit: {path}")
+        raise ValueError(f"JSON file exceeds {max_bytes} byte limit")
     return json.loads(payload.decode("utf-8")), hashlib.sha256(payload).hexdigest()
 
 

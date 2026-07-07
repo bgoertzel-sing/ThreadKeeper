@@ -36,6 +36,7 @@ def test_env_numeric_knobs_fallback_and_clamp_on_reload(monkeypatch):
         "OMEGACLAW_SUBAGENT_SHELL_OUTPUT_CAP": "0",
         "OMEGACLAW_SUBAGENT_SHELL_TIMEOUT_S": "bad-float",
         "OMEGACLAW_SUBAGENT_MAX_READ_FILE_CHARS": "0",
+        "OMEGACLAW_SUBAGENT_MAX_JSON_FILE_BYTES": "12",
         "OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEMS": "-2",
         "OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEM_CHARS": "0",
         "OMEGACLAW_SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS": "0",
@@ -65,6 +66,7 @@ def test_env_numeric_knobs_fallback_and_clamp_on_reload(monkeypatch):
     assert reloaded._SHELL_OUTPUT_CAP == 1
     assert reloaded._SHELL_TIMEOUT_S == 30.0
     assert reloaded._SUBAGENT_MAX_READ_FILE_CHARS == 1
+    assert reloaded._SUBAGENT_MAX_JSON_FILE_BYTES == 1024
     assert reloaded._SUBAGENT_MAX_CONTRACT_ITEMS == 0
     assert reloaded._SUBAGENT_MAX_CONTRACT_ITEM_CHARS == 1
     assert reloaded._SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS == 1
@@ -3186,3 +3188,27 @@ def test_append_file_max_size_disabled_when_zero(tmp_path, monkeypatch):
     result = subagent._tool_append_file("big.txt", "more")
     assert result == "APPEND-FILE-SUCCESS"
     assert "more" in target.read_text()
+
+
+def test_read_json_file_uses_configured_size_cap(monkeypatch, tmp_path):
+    path = tmp_path / "large.json"
+    path.write_text(json.dumps({"payload": "x" * 2048}), encoding="utf-8")
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_JSON_FILE_BYTES", 128)
+
+    try:
+        subagent._read_json_file(str(path))
+    except ValueError as exc:
+        assert "JSON file exceeds 128 byte limit" in str(exc)
+        assert str(tmp_path) not in str(exc)
+    else:
+        raise AssertionError("expected oversized JSON file to be rejected")
+
+
+def test_read_json_file_explicit_size_cap_still_supported(tmp_path):
+    path = tmp_path / "small.json"
+    path.write_text('{"ok": true}', encoding="utf-8")
+
+    parsed, digest = subagent._read_json_file(str(path), max_bytes=64)
+
+    assert parsed == {"ok": True}
+    assert digest == hashlib.sha256(b'{"ok": true}').hexdigest()
