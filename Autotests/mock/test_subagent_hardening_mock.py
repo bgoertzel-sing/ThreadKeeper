@@ -42,6 +42,7 @@ def test_env_numeric_knobs_fallback_and_clamp_on_reload(monkeypatch):
         "OMEGACLAW_SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS": "0",
         "OMEGACLAW_SUBAGENT_MAX_EMIT_CHARS": "0",
         "OMEGACLAW_SUBAGENT_MAX_RESPONSE_CHARS": "0",
+        "OMEGACLAW_SUBAGENT_MAX_LLM_HTTP_RESPONSE_BYTES": "-1",
         "OMEGACLAW_SUBAGENT_MAX_INDEX_AUDIT_BYTES": "-1",
         "OMEGACLAW_SUBAGENT_MAX_QUEUED_DISPATCHES": "-4",
         "OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_TASKS": "-4",
@@ -75,6 +76,7 @@ def test_env_numeric_knobs_fallback_and_clamp_on_reload(monkeypatch):
     assert reloaded._SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS == 1
     assert reloaded._SUBAGENT_MAX_EMIT_CHARS == 1
     assert reloaded._SUBAGENT_MAX_RESPONSE_CHARS == 1
+    assert reloaded._SUBAGENT_MAX_LLM_HTTP_RESPONSE_BYTES == 0
     assert reloaded._SUBAGENT_MAX_INDEX_AUDIT_BYTES == 0
     assert reloaded._SUBAGENT_MAX_QUEUED_DISPATCHES == 0
     assert reloaded._SUBAGENT_ASYNC_WORKER_MAX_TASKS == 0
@@ -501,6 +503,72 @@ def test_endpoint_kind_controls_llm_transport_without_base_url_heuristic(monkeyp
     }
     assert subagent._call_subagent_llm(handle, "prompt", 12) == ('(emit "cloud")', 0, 0)
     assert seen["called"]["timeout"] == subagent._SUBAGENT_LLM_TIMEOUT_S
+
+
+class _FakeHTTPResponse:
+    def __init__(self, body):
+        self._body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def read(self, size=-1):
+        if size is None or size < 0:
+            return self._body
+        return self._body[:size]
+
+
+def test_ollama_native_http_response_body_is_bounded(monkeypatch):
+    import urllib.request as urllib_request
+
+    monkeypatch.setattr(subagent, "_SUBAGENT_LLM_RETRIES", 0)
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_LLM_HTTP_RESPONSE_BYTES", 16)
+    monkeypatch.setattr(
+        urllib_request,
+        "urlopen",
+        lambda *_args, **_kwargs: _FakeHTTPResponse(b"x" * 17),
+    )
+
+    handle = {
+        "provider": "ollama",
+        "model": "unit-model",
+        "base_url": "http://localhost:11434",
+        "endpoint_kind": "ollama_native",
+    }
+
+    text, in_tokens, out_tokens = subagent._call_subagent_llm(handle, "prompt", 12)
+    assert "OMEGACLAW_SUBAGENT_MAX_LLM_HTTP_RESPONSE_BYTES=16" in text
+    assert in_tokens == 0
+    assert out_tokens == 0
+
+
+def test_ollama_native_http_response_body_under_cap_decodes(monkeypatch):
+    import urllib.request as urllib_request
+
+    body = json.dumps({
+        "message": {"content": '(emit "native")'},
+        "prompt_eval_count": 4,
+        "eval_count": 2,
+    }).encode()
+    monkeypatch.setattr(subagent, "_SUBAGENT_LLM_RETRIES", 0)
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_LLM_HTTP_RESPONSE_BYTES", len(body))
+    monkeypatch.setattr(
+        urllib_request,
+        "urlopen",
+        lambda *_args, **_kwargs: _FakeHTTPResponse(body),
+    )
+
+    handle = {
+        "provider": "ollama",
+        "model": "unit-model",
+        "base_url": "http://localhost:11434/v1",
+        "endpoint_kind": "ollama_native",
+    }
+
+    assert subagent._call_subagent_llm(handle, "prompt", 12) == ('(emit "native")', 4, 2)
 
 
 def test_dispatch_returns_structured_digest_and_persists_transcript(tmp_path, monkeypatch):

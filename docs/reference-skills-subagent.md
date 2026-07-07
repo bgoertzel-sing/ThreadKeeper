@@ -263,6 +263,7 @@ accidentally.
 | `OMEGACLAW_SUBAGENT_MAX_TRANSCRIPT_FIELD_CHARS` | `0` (disabled) | Maximum per-field string size (prompt, raw_response, tool_results) in each transcript turn entry. `0` disables the cap. |
 | `OMEGACLAW_SUBAGENT_MAX_EMIT_CHARS` | `20000` | Maximum final `emit` argument length accepted as successful worker output; oversized emits return `EMIT_PROTOCOL_VIOLATION` before becoming a transcript summary/adjudication candidate. |
 | `OMEGACLAW_SUBAGENT_MAX_RESPONSE_CHARS` | `50000` | Maximum raw worker response length parsed/persisted for one turn; oversized responses return `response_too_large` before tool parsing/execution. |
+| `OMEGACLAW_SUBAGENT_MAX_LLM_HTTP_RESPONSE_BYTES` | `1048576` | Maximum raw HTTP response body read from the native Ollama-compatible worker transport before JSON decoding. `0` disables. OpenAI-compatible SDK calls remain bounded after parsed content return by `OMEGACLAW_SUBAGENT_MAX_RESPONSE_CHARS`. |
 | `OMEGACLAW_SUBAGENT_WORKSPACE` | current working directory | Sandbox root for subagent file tools. |
 | `OMEGACLAW_ESCALATION_METTA_SHA256` | unset | Optional SHA-256 pin for `escalation.metta`; mismatch denies cloud delegation. |
 

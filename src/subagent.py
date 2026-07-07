@@ -354,6 +354,12 @@ _SUBAGENT_MAX_EMIT_CHARS = _env_int(
 _SUBAGENT_MAX_RESPONSE_CHARS = _env_int(
     "OMEGACLAW_SUBAGENT_MAX_RESPONSE_CHARS", 50000, minimum=1,
 )
+# Native Ollama-compatible calls use urllib directly, so bound the raw HTTP body
+# before JSON decoding. OpenAI-compatible calls are still bounded at the parsed
+# worker-response layer above because the SDK owns transport/body buffering.
+_SUBAGENT_MAX_LLM_HTTP_RESPONSE_BYTES = _env_int(
+    "OMEGACLAW_SUBAGENT_MAX_LLM_HTTP_RESPONSE_BYTES", 1048576, minimum=0,
+)
 
 # Queue task max age. When non-zero, a queued task older than this many seconds
 # is rejected before any worker LLM call, preventing stale/expired work from
@@ -2244,7 +2250,17 @@ def _call_subagent_llm(provider_handle, content, max_tokens):
             req = _u.Request(root + "/api/chat", data=body,
                              headers={"Content-Type": "application/json"})
             with _u.urlopen(req, timeout=_SUBAGENT_LLM_TIMEOUT_S) as r:
-                data = _json.loads(r.read().decode("utf-8", errors="replace"))
+                if _SUBAGENT_MAX_LLM_HTTP_RESPONSE_BYTES:
+                    raw = r.read(_SUBAGENT_MAX_LLM_HTTP_RESPONSE_BYTES + 1)
+                    if len(raw) > _SUBAGENT_MAX_LLM_HTTP_RESPONSE_BYTES:
+                        return (
+                            "(subagent error: native provider HTTP response exceeds "
+                            "OMEGACLAW_SUBAGENT_MAX_LLM_HTTP_RESPONSE_BYTES="
+                            f"{_SUBAGENT_MAX_LLM_HTTP_RESPONSE_BYTES})"
+                        )
+                else:
+                    raw = r.read()
+                data = _json.loads(raw.decode("utf-8", errors="replace"))
             _log_worker_usage(model, data.get("prompt_eval_count", 0),
                               data.get("eval_count", 0))
             in_tok = data.get("prompt_eval_count", 0) or 0
