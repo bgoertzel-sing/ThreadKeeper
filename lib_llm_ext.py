@@ -261,6 +261,27 @@ class OpenClawProvider(AIProvider):
         """Sum content length across all messages."""
         return sum(len(str(m.get("content", ""))) for m in messages)
 
+    def _gateway_model_fields(self, requested_model: str) -> tuple[str, Optional[str]]:
+        """Return (agent_target_model, backend_model_override) for Gateway HTTP calls.
+
+        OpenClaw's OpenAI-compatible /v1/chat/completions endpoint treats the
+        JSON `model` field as an agent target (`openclaw/default`,
+        `openclaw/<agent>`, etc.). Raw provider models such as
+        `openrouter/z-ai/glm-5.2` must be sent in the `x-openclaw-model` header.
+        Sending raw provider ids in the JSON `model` field produces 400 errors
+        on newer Gateway builds.
+        """
+        requested_model = (requested_model or "").strip() or self._model_name
+        if (
+            requested_model == "openclaw"
+            or requested_model.startswith("openclaw/")
+            or requested_model.startswith("openclaw:")
+            or requested_model.startswith("agent:")
+        ):
+            return requested_model, None
+        agent_target = os.environ.get("OPENCLAW_AGENT_MODEL", "openclaw/default")
+        return agent_target, requested_model
+
     def _summarize_and_merge(self, messages, max_tokens: int) -> str:
         """Chunking fallback: split large user message content into chunks, summarize each,
         then send the merged summary as the user message.
@@ -360,24 +381,31 @@ class OpenClawProvider(AIProvider):
             model = self._escalation_model
 
         use_model = model or os.environ.get("OPENCLAW_MODEL", self._model_name)
+        request_model, model_override = self._gateway_model_fields(use_model)
         payload = {
-            "model": use_model,
+            "model": request_model,
             "user": session_user,
             "messages": messages,
             "max_tokens": max_tokens,
         }
+        if model_override:
+            payload["_openclaw_model_override"] = model_override
         child_code = r'''
 import json, os, sys, urllib.request
 base = os.environ.get("OPENCLAW_GATEWAY_BASE_URL", "http://127.0.0.1:18789/v1").rstrip("/")
 token = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")
 payload = json.loads(sys.stdin.read())
+model_override = payload.pop("_openclaw_model_override", "")
+headers = {
+    "Authorization": "Bearer " + token,
+    "Content-Type": "application/json",
+}
+if model_override:
+    headers["x-openclaw-model"] = model_override
 req = urllib.request.Request(
     base + "/chat/completions",
     data=json.dumps(payload).encode("utf-8"),
-    headers={
-        "Authorization": "Bearer " + token,
-        "Content-Type": "application/json",
-    },
+    headers=headers,
     method="POST",
 )
 timeout = int(os.environ.get("OPENCLAW_HTTP_TIMEOUT", "180"))
@@ -393,7 +421,8 @@ sys.stdout.write(content)
             timeout = min(timeout, 30)
         print(
             f"[lib_llm_ext.OpenClawProvider._subprocess_call:{label}] start python={python_exe} "
-            f"model={use_model} messages={len(messages)} chars={sum(len(str(m.get('content', ''))) for m in messages)} "
+            f"model={request_model} override={model_override or '-'} messages={len(messages)} "
+            f"chars={sum(len(str(m.get('content', ''))) for m in messages)} "
             f"max_tokens={max_tokens} timeout={timeout}",
             flush=True,
         )
@@ -446,9 +475,6 @@ sys.stdout.write(content)
             if m.get("role") == "user":
                 last_user = m.get("content", "")
                 break
-        # Skip triage for very short messages (likely operational)
-        if len(last_user) < 60:
-            return "SIMPLE"
         # Extract the actual user message from the OmegaClaw prompt format
         # The content often contains HUMAN-MSG: near the end
         human_marker = "HUMAN-MSG:"
@@ -456,13 +482,22 @@ sys.stdout.write(content)
             last_user = last_user.rsplit(human_marker, 1)[-1].strip()[:800]
         else:
             last_user = last_user[-800:]
+        # Very short trivial messages skip triage (e.g. "ok", "thanks", "yes")
+        stripped = last_user.strip().rstrip('.!?')
+        if len(stripped) < 20 and stripped.lower() in {
+            'ok', 'thanks', 'thank you', 'yes', 'no', 'sure', 'got it',
+            'cool', 'nice', 'great', 'agreed', 'sounds good', 'done',
+            'hello', 'hi', 'hey', 'ping', 'test', 'yo',
+        }:
+            return "SIMPLE"
         triage_prompt = (
-            "You are a triage assistant for a research chatbot. Classify this incoming message.\n\n"
-            "If it can be answered in 1-2 sentences (simple operational question, greeting, quick confirmation), "
-            "reply exactly: SIMPLE\n\n"
-            "If it needs a substantive response (3+ sentences, analysis, code, research, or deep thought), "
-            "reply exactly: COMPLEX: <one-line ack that specifically references the topic>\n\n"
-            "Do not use generic acks. Make the ack specific to what is being asked.\n\n"
+            "You are a triage assistant for a research chatbot named ProtomegaTron.\n\n"
+            "Classify the incoming message from Ben (the user).\n\n"
+            "Reply SIMPLE only if it is a trivial acknowledgment, greeting, or one-word answer.\n\n"
+            "Reply COMPLEX: <one-line ack> for ANY question, request, discussion topic, "
+            "project update, technical observation, or anything requiring more than a trivial reply. "
+            "When in doubt, prefer COMPLEX.\n\n"
+            "The ack must specifically reference the topic. Do not use generic acks.\n\n"
             f"Message: {last_user}"
         )
         triage_messages = [{"role": "user", "content": triage_prompt}]
