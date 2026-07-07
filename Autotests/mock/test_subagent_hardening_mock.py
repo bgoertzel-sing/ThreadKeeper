@@ -3110,6 +3110,22 @@ def test_validate_tool_args_shell_accepts_nonempty_command():
     assert subagent._validate_tool_args("shell", ["ls -la"]) is None
 
 
+def test_validate_tool_args_rejects_non_string_arguments():
+    """Tool calls must use strongly typed string arguments, not JSON arrays,
+    objects, booleans, or numbers coerced with str()."""
+    cases = [
+        ("read-file", [123]),
+        ("write-file", ["out.txt", {"content": "bad"}]),
+        ("append-file", ["out.txt", ["bad"]]),
+        ("shell", [["echo", "bad"]]),
+        ("search", [{"query": "bad"}]),
+        ("tavily-search", [True]),
+        ("technical-analysis", [3.14]),
+    ]
+    for tool, args in cases:
+        assert subagent._validate_tool_args(tool, args) == "arguments must be strings"
+
+
 # ------------------------------------------------------------------
 # Search/tavily-search/technical-analysis empty query validation
 # ------------------------------------------------------------------

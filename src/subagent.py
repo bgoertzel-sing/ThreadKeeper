@@ -2898,6 +2898,8 @@ def _validate_tool_args(name, args):
         return f"expected {want} arg(s), got {len(args)}"
     if any(a is None for a in args):
         return "arguments must not be null"
+    if any(not isinstance(a, str) for a in args):
+        return "arguments must be strings"
     if name in ("read-file", "write-file", "append-file") and not str(args[0]).strip():
         return "path argument must not be empty"
     if name in ("read-file", "write-file", "append-file") and len(str(args[0])) > _SUBAGENT_MAX_PATH_ARG_CHARS:
