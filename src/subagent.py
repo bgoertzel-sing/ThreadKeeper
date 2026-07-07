@@ -252,6 +252,8 @@ def _env_float(name, default, minimum=0.0):
         value = float(str(raw).strip())
     except Exception:
         return default
+    if not math.isfinite(value):
+        return default
     if minimum is not None and value < minimum:
         return minimum
     return value

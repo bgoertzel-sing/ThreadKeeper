@@ -90,6 +90,30 @@ def _append_many_worker(workspace, worker_id, count):
             raise RuntimeError(result)
 
 
+def test_env_float_knobs_reject_non_finite_values(monkeypatch):
+    non_finite_values = {
+        "OMEGACLAW_SUBAGENT_LLM_BACKOFF_S": "nan",
+        "OMEGACLAW_SUBAGENT_SHELL_TIMEOUT_S": "inf",
+        "OMEGACLAW_SUBAGENT_ASYNC_WORKER_POLL_INTERVAL_S": "-inf",
+        "OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_RUNTIME_S": "NaN",
+        "OMEGACLAW_SUBAGENT_MAX_QUEUED_TASK_AGE_S": "Infinity",
+        "OMEGACLAW_SUBAGENT_DISPATCH_TIMEOUT_S": "-Infinity",
+    }
+    for name, value in non_finite_values.items():
+        monkeypatch.setenv(name, value)
+
+    reloaded = importlib.reload(subagent)
+    assert reloaded._SUBAGENT_LLM_BACKOFF_S == 1.0
+    assert reloaded._SHELL_TIMEOUT_S == 30.0
+    assert reloaded._SUBAGENT_ASYNC_WORKER_POLL_INTERVAL_S == 2.0
+    assert reloaded._SUBAGENT_ASYNC_WORKER_MAX_RUNTIME_S == 600.0
+    assert reloaded._SUBAGENT_MAX_QUEUED_TASK_AGE_S == 0.0
+    assert reloaded._SUBAGENT_DISPATCH_TIMEOUT_S == 600.0
+
+    monkeypatch.undo()
+    importlib.reload(subagent)
+
+
 def test_llm_retry_backoff_returns_success_after_transient_failure(monkeypatch):
     calls = {"n": 0}
     monkeypatch.setattr(subagent, "_SUBAGENT_LLM_RETRIES", 1)
