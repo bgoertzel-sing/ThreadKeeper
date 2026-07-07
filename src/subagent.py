@@ -408,6 +408,14 @@ _SUBAGENT_MAX_INDEX_AUDIT_BYTES = _env_int(
     "OMEGACLAW_SUBAGENT_MAX_INDEX_AUDIT_BYTES", 1048576, minimum=0,
 )
 
+# Transcript audit read cap. verify_subagent_run_index() validates transcript
+# hashes referenced by the compact index; cap each local transcript read so a
+# corrupt or adversarially large transcript cannot turn a read-only audit into
+# an unbounded memory read. Set to 0 to disable.
+_SUBAGENT_MAX_TRANSCRIPT_AUDIT_BYTES = _env_int(
+    "OMEGACLAW_SUBAGENT_MAX_TRANSCRIPT_AUDIT_BYTES", 1048576, minimum=0,
+)
+
 # Persistent local run records. Full worker prompts/responses/tool results are
 # kept out of the parent context; the parent receives only a bounded structured
 # digest plus the local transcript path for audit/debug.
@@ -710,6 +718,21 @@ def verify_subagent_run_index(index_path=None):
                 if transcript_path and expected_transcript_hash:
                     try:
                         resolved_transcript = _resolve_subagent_transcript_path(transcript_path)
+                        if _SUBAGENT_MAX_TRANSCRIPT_AUDIT_BYTES:
+                            try:
+                                transcript_size = os.path.getsize(resolved_transcript)
+                            except OSError as e:
+                                raise ValueError(f"transcript size check failed: {type(e).__name__}")
+                            if transcript_size > _SUBAGENT_MAX_TRANSCRIPT_AUDIT_BYTES:
+                                issues.append({
+                                    "line": line_no,
+                                    "run_id": entry.get("run_id", ""),
+                                    "issue": "transcript_too_large",
+                                    "transcript_size_bytes": transcript_size,
+                                    "max_transcript_audit_bytes": _SUBAGENT_MAX_TRANSCRIPT_AUDIT_BYTES,
+                                })
+                                previous_hash = recorded_entry_hash or actual_entry_hash
+                                continue
                         with open(resolved_transcript, "rb") as transcript:
                             actual_transcript_hash = hashlib.sha256(transcript.read()).hexdigest()
                         transcripts_checked += 1

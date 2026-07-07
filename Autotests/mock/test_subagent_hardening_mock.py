@@ -681,6 +681,51 @@ def test_verify_subagent_run_index_rejects_oversized_index_before_read(tmp_path,
     assert "OMEGACLAW_SUBAGENT_MAX_INDEX_AUDIT_BYTES=16" in audit["summary"]
 
 
+
+def test_verify_subagent_run_index_rejects_oversized_transcript_before_hash(tmp_path, monkeypatch):
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_TRANSCRIPT_AUDIT_BYTES", 16)
+    runs = Path(subagent.SUBAGENT_RUN_DIR)
+    runs.mkdir(parents=True)
+    transcript = runs / "one.json"
+    transcript.write_text("x" * 64, encoding="utf-8")
+    digest = hashlib.sha256(transcript.read_bytes()).hexdigest()
+    subagent._append_run_index({
+        "run_id": "one", "status": "ok",
+        "transcript_path": str(transcript), "transcript_sha256": digest,
+    })
+
+    audit = json.loads(subagent.verify_subagent_run_index())
+
+    assert audit["status"] == "index_tampered"
+    assert audit["entries_checked"] == 1
+    assert audit["transcripts_checked"] == 0
+    assert audit["issue_count"] == 1
+    assert audit["issues"][0]["issue"] == "transcript_too_large"
+    assert audit["issues"][0]["transcript_size_bytes"] == 64
+    assert audit["issues"][0]["max_transcript_audit_bytes"] == 16
+
+
+def test_verify_subagent_run_index_transcript_audit_cap_can_be_disabled(tmp_path, monkeypatch):
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_TRANSCRIPT_AUDIT_BYTES", 0)
+    runs = Path(subagent.SUBAGENT_RUN_DIR)
+    runs.mkdir(parents=True)
+    transcript = runs / "one.json"
+    transcript.write_text("x" * 64, encoding="utf-8")
+    digest = hashlib.sha256(transcript.read_bytes()).hexdigest()
+    subagent._append_run_index({
+        "run_id": "one", "status": "ok",
+        "transcript_path": str(transcript), "transcript_sha256": digest,
+    })
+
+    audit = json.loads(subagent.verify_subagent_run_index())
+
+    assert audit["status"] == "index_verified"
+    assert audit["entries_checked"] == 1
+    assert audit["transcripts_checked"] == 1
+    assert audit["issue_count"] == 0
+
 def test_verify_subagent_run_index_audit_cap_can_be_disabled(tmp_path, monkeypatch):
     monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
     monkeypatch.setattr(subagent, "_SUBAGENT_MAX_INDEX_AUDIT_BYTES", 0)
