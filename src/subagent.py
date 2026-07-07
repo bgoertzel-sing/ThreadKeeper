@@ -3050,9 +3050,11 @@ def _extract_final_emit(calls):
     _name, args = emit_calls[0]
     if len(args) != 1 or args[0] is None:
         return (None, "EMIT_PROTOCOL_VIOLATION: emit requires exactly one non-null argument")
-    if "\x00" in str(args[0]):
+    if not isinstance(args[0], str):
+        return (None, "EMIT_PROTOCOL_VIOLATION: emit argument must be a string")
+    if "\x00" in args[0]:
         return (None, "EMIT_PROTOCOL_VIOLATION: emit argument must not contain NUL bytes")
-    if len(str(args[0])) > _SUBAGENT_MAX_EMIT_CHARS:
+    if len(args[0]) > _SUBAGENT_MAX_EMIT_CHARS:
         return (
             None,
             "EMIT_PROTOCOL_VIOLATION: emit argument exceeds "

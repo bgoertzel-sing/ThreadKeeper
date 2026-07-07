@@ -297,6 +297,7 @@ end-to-end walkthrough.
 | Escalation policy denies cloud delegation | Structured JSON `status=error`; `summary` contains `(escalation denied) ...`; transcript status `escalation_denied`. |
 | Subagent endpoint times out / errors | Structured JSON `status=error`; `summary` contains `(subagent LLM call failed: <ExceptionType>: <reason>)`; transcript status `llm_failed`. |
 | Worker mixes `emit` with other parsed calls or multiple emits | Structured JSON `status=error` and `EMIT_PROTOCOL_VIOLATION`; transcript status `emit_protocol_violation`. |
+| Worker emits a non-string final digest argument | Structured JSON `status=error` and `EMIT_PROTOCOL_VIOLATION`; transcript status `emit_protocol_violation`; typed JSON/object/list values are not coerced into successful summaries/candidates. |
 | Worker emits an oversized final digest beyond `OMEGACLAW_SUBAGENT_MAX_EMIT_CHARS` | Structured JSON `status=error` and `EMIT_PROTOCOL_VIOLATION`; transcript status `emit_protocol_violation`; oversized text is not accepted as a successful summary/candidate. |
 | Worker raw response exceeds `OMEGACLAW_SUBAGENT_MAX_RESPONSE_CHARS` | Structured JSON `status=error`; transcript status `response_too_large`; the response is bounded in the transcript and no tool calls are parsed or executed. |
 | `verify_subagent_run_index()` sees an `index.jsonl` larger than `OMEGACLAW_SUBAGENT_MAX_INDEX_AUDIT_BYTES` | Structured JSON `status=index_audit_too_large`; no index entries or transcript files are read. |

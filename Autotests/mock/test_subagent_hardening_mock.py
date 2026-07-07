@@ -787,6 +787,35 @@ def test_dispatch_rejects_oversized_emit_before_success(tmp_path, monkeypatch):
     assert saved["summary"].startswith("EMIT_PROTOCOL_VIOLATION")
 
 
+def test_extract_final_emit_rejects_non_string_argument():
+    value, error = subagent._extract_final_emit([("emit", [{"summary": "bad"}])])
+
+    assert value is None
+    assert error == "EMIT_PROTOCOL_VIOLATION: emit argument must be a string"
+
+
+def test_dispatch_rejects_non_string_emit_before_success(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        subagent,
+        "parse_calls",
+        lambda _raw: [("emit", [{"summary": "bad"}])],
+    )
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_a: ('{"tool": "emit", "summary": "bad"}', 0, 0),
+    )
+
+    payload = json.loads(subagent.dispatch("reject typed emit", "read-file", "unit", max_turns=1))
+
+    assert payload["status"] == "error"
+    assert "EMIT_PROTOCOL_VIOLATION" in payload["summary"]
+    assert "emit argument must be a string" in payload["summary"]
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["status"] == "emit_protocol_violation"
+
+
 def test_dispatch_rejects_oversized_worker_response_before_parsing(tmp_path, monkeypatch):
     _write_unit_persona(tmp_path, monkeypatch)
     monkeypatch.setattr(subagent, "_SUBAGENT_MAX_RESPONSE_CHARS", 24)
