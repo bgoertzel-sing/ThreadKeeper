@@ -459,6 +459,38 @@ sys.stdout.write(content)
             return "" if label == "triage" else self._failure_response("The OpenClaw gateway returned an empty assistant message.")
         return completed.stdout or ""
 
+    def _compact_for_triage(self, text: str, limit: int = 1200) -> str:
+        """Return a bounded router view that preserves document presence.
+
+        GLM triage should know that large replied-to docs/attachments exist,
+        but should not receive their full bodies. This prevents router latency
+        and identity/context pollution from PDF/text attachment payloads.
+        """
+        import re
+        text = str(text or "").replace("\r", "")
+        large_markers = []
+
+        def _replace_block(pattern, label, s):
+            nonlocal large_markers
+            def repl(m):
+                body = m.group(1)
+                large_markers.append(f"{label}: omitted {len(body)} chars")
+                return f"[{label} omitted from triage; {len(body)} chars available in message context]"
+            return re.sub(pattern, repl, s, flags=re.DOTALL)
+
+        text = _replace_block(r"<<<ATTACHMENT[^>]*>>>\n(.*?)\n<<<END_ATTACHMENT[^>]*>>>", "attachment text", text)
+        text = _replace_block(
+            r"\[Telegram replied-to message(?: (?:content|summary))? follows\]\n(.*?)\n\[End Telegram replied-to message(?: (?:content|summary))?\]",
+            "replied-to context",
+            text,
+        )
+
+        if len(text) > limit:
+            text = text[:limit] + f"\n[... triage view truncated at {limit} chars; original had {len(str(text))} chars ...]"
+        if large_markers:
+            text += "\n[Large context present: " + "; ".join(large_markers[:5]) + "]"
+        return text
+
     def _triage(self, messages) -> str:
         """Quick GLM call to classify message complexity.
 
@@ -479,9 +511,10 @@ sys.stdout.write(content)
         # The content often contains HUMAN-MSG: near the end
         human_marker = "HUMAN-MSG:"
         if human_marker in last_user:
-            last_user = last_user.rsplit(human_marker, 1)[-1].strip()[:800]
+            last_user = last_user.rsplit(human_marker, 1)[-1].strip()
         else:
-            last_user = last_user[-800:]
+            last_user = last_user[-2000:]
+        last_user = self._compact_for_triage(last_user, limit=1200)
         # Very short trivial messages skip triage (e.g. "ok", "thanks", "yes")
         stripped = last_user.strip().rstrip('.!?')
         if len(stripped) < 20 and stripped.lower() in {

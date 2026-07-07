@@ -425,7 +425,7 @@ def _attachment_content(path, name, mime):
     return ""
 
 
-def _attachment_summary(kind, item):
+def _attachment_summary(kind, item, *, include_content=True):
     if not isinstance(item, dict):
         return ""
     file_id = str(item.get("file_id", "")).strip()
@@ -442,7 +442,10 @@ def _attachment_summary(kind, item):
     saved, error = _download_file(file_id, name or kind, size or 0)
     if saved:
         parts.append(f"saved_path={saved}")
-        content = _attachment_content(saved, name, mime)
+        if include_content:
+            content = _attachment_content(saved, name, mime)
+        else:
+            content = "\n[Attachment content omitted from reply-context; read saved_path explicitly if needed.]"
     elif file_id:
         parts.append("saved_path=<not_downloaded>")
         content = f"\n[Attachment not read: {error}]" if error else ""
@@ -451,7 +454,7 @@ def _attachment_summary(kind, item):
     return "[Telegram attachment: " + ", ".join(parts) + "]" + content
 
 
-def _message_text_and_attachments(message, *, _depth=0):
+def _message_text_and_attachments(message, *, _depth=0, include_reply_content=True):
     text = str(message.get("text") or message.get("caption") or "").strip()
     attachments = []
 
@@ -461,12 +464,17 @@ def _message_text_and_attachments(message, *, _depth=0):
 
     reply = message.get("reply_to_message")
     if isinstance(reply, dict) and _depth < 1:
-        reply_text, _ = _message_text_and_attachments(reply, _depth=_depth + 1)
+        # Include replied-to text and attachment metadata, but not extracted
+        # document/PDF bodies. Large quoted docs should be explicit context,
+        # not silently injected into router/main prompts.
+        reply_text, _ = _message_text_and_attachments(
+            reply, _depth=_depth + 1, include_reply_content=False
+        )
         if reply_text:
             attachments.append(
-                "[Telegram replied-to message content follows]\n"
+                "[Telegram replied-to message summary follows]\n"
                 f"{reply_text}\n"
-                "[End Telegram replied-to message]"
+                "[End Telegram replied-to message summary]"
             )
 
     photos = message.get("photo")
@@ -476,10 +484,10 @@ def _message_text_and_attachments(message, *, _depth=0):
                    key=lambda p: int(p.get("file_size") or p.get("width") or 0),
                    default=None)
         if best:
-            attachments.append(_attachment_summary("photo", best))
+            attachments.append(_attachment_summary("photo", best, include_content=include_reply_content))
 
     for kind in ("document", "animation", "audio", "voice", "video", "video_note", "sticker"):
-        summary = _attachment_summary(kind, message.get(kind))
+        summary = _attachment_summary(kind, message.get(kind), include_content=include_reply_content)
         if summary:
             attachments.append(summary)
 
