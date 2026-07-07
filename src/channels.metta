@@ -18,6 +18,10 @@
 (= (receive)
    (py-call (telegram.getLastMessage)))
 
+;Check whether the current message should be skipped (addressed to another bot):
+(= (shouldSkipResponse)
+   (py-call (telegram.should_skip_response)))
+
 ;Send a message to all communication channels:
 !(change-state! &lastsend "")
 (= (send $msg)

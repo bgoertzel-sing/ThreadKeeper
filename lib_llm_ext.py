@@ -521,6 +521,15 @@ sys.stdout.write(content)
             messages = [{"role": "user", "content": content}]
 
         if os.environ.get("OPENCLAW_SUBPROCESS", "0").lower() in {"1", "true", "yes", "on"}:
+            # Check if this message was addressed to another bot — skip response if so
+            try:
+                from telegram import should_skip_response
+                if should_skip_response():
+                    _log_raw(self._name + ":skip", "internal", "message addressed to another bot — no response")
+                    return ""  # Empty response = no-op for OmegaClaw loop
+            except Exception:
+                pass
+
             # Triage step: if we're not in a continuation, classify the message
             if not self._triage_pending:
                 triage = self._triage(messages)

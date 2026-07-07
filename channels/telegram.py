@@ -129,10 +129,12 @@ def _set_active_chat(chat_id):
     with _state_lock:
         _active_chat_id = chat_id
         _reply_chat_id = chat_id
-def _set_last(msg, chat_id=""):
-    global _last_message, _pending_messages
+_last_skip_response = False
+
+def _set_last(msg, chat_id="", skip_response=False):
+    global _last_message, _pending_messages, _last_skip_response
     with _msg_lock:
-        _pending_messages.append((msg, chat_id))
+        _pending_messages.append((msg, chat_id, skip_response))
         if _last_message == "":
             _last_message = msg
         else:
@@ -140,20 +142,27 @@ def _set_last(msg, chat_id=""):
 
 
 def getLastMessage():
-    global _last_message, _reply_chat_id
+    global _last_message, _reply_chat_id, _last_skip_response
     if _sync_poll and _running:
         _poll_once()
     with _msg_lock:
         if _pending_messages:
-            msg, cid = _pending_messages.pop(0)
+            msg, cid, skip = _pending_messages.pop(0)
             _last_message = ""
+            _last_skip_response = skip
             if cid:
                 _set_active_chat(cid)
             return msg
         # Fallback for any remaining accumulated message
         tmp = _last_message
         _last_message = ""
+        _last_skip_response = False
         return tmp
+
+
+def should_skip_response():
+    global _last_skip_response
+    return _last_skip_response
 
 
 def _parse_auth_candidate(msg):
@@ -681,18 +690,41 @@ def _handle_updates(updates):
         if not chat_id:
             continue
 
-        # Skip messages from other bot accounts in group chats.
-        # Bot-bot discussion happens via scheduled crons, not real-time ingestion.
-        # This prevents identity confusion when another bot's messages pollute history.
-        if chat_type != "private" and user.get("is_bot"):
-            continue
+        # In group chats, skip messages explicitly addressed to another bot.
+        # ProtoMegaBot should see all messages (for context/bot-bot discussion)
+        # but only respond to messages addressed to it, to Ben, or to nobody in particular.
+        # Messages starting with @OtherBot or replying to another bot are ignored.
+        if chat_type != "private":
+            msg_lower = msg.strip().lower()
+            # Check if message starts with an @mention of someone else
+            mentioned_bots = message.get("entities", []) or []
+            reply_to = message.get("reply_to_message") or {}
+            reply_to_user = (reply_to.get("from") or {}).get("is_bot", False)
+            reply_to_id = str((reply_to.get("from") or {}).get("id", ""))
+            # If this is a reply to another bot, or starts with @AnotherBot, skip responding
+            # (but still ingest for context — we just won't trigger triage/ack/response)
+            _skip_response = False
+            for ent in mentioned_bots:
+                if ent.get("type") == "mention":
+                    # Extract the mentioned handle
+                    start = ent.get("offset", 0)
+                    length = ent.get("length", 0)
+                    mentioned = msg[start:start+length].lstrip("@").lower()
+                    # If the mention is not @Protomegabot/@ProtomegaTron, skip responding
+                    if mentioned and not any(name in mentioned for name in ("protomega", "protom")):
+                        _skip_response = True
+                        break
+            if reply_to_user and reply_to_id:
+                # Reply to a bot that isn't us — skip responding
+                _skip_response = True
 
         state = _is_allowed_message(chat_id, user_id, auth_text, chat_type)
         display_name = _display_name(user, chat)
         if state == "allow":
             _set_reply_chat(chat_id)
-            _set_last(f"{display_name}: {msg}", chat_id)
-            _maybe_send_preack(display_name, auth_text or msg, chat_id=chat_id)
+            _set_last(f"{display_name}: {msg}", chat_id, skip_response=_skip_response if chat_type != "private" else False)
+            if not (_skip_response if chat_type != "private" else False):
+                _maybe_send_preack(display_name, auth_text or msg, chat_id=chat_id)
         elif state == "auth_bound":
             _set_reply_chat(chat_id)
             send_message(f"Authentication successful for {display_name}.")
