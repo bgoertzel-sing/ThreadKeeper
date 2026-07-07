@@ -338,6 +338,15 @@ _SUBAGENT_MAX_TRANSCRIPT_SUMMARY_CHARS = _env_int(
     "OMEGACLAW_SUBAGENT_MAX_TRANSCRIPT_SUMMARY_CHARS", 0, minimum=0,
 )
 
+# Final emit bounding. The parent receives only the structured digest cap, but
+# the raw emit also becomes the transcript summary/candidate output. Reject
+# oversized final emits at protocol level before treating them as successful
+# worker output, keeping transcripts and adjudication candidates bounded even
+# when transcript-summary capping is left disabled for compatibility.
+_SUBAGENT_MAX_EMIT_CHARS = _env_int(
+    "OMEGACLAW_SUBAGENT_MAX_EMIT_CHARS", 20000, minimum=1,
+)
+
 # Queue task max age. When non-zero, a queued task older than this many seconds
 # is rejected before any worker LLM call, preventing stale/expired work from
 # being processed after a long supervisor outage or queue backlog. Set to 0 to
@@ -2930,6 +2939,12 @@ def _extract_final_emit(calls):
         return (None, "EMIT_PROTOCOL_VIOLATION: emit requires exactly one non-null argument")
     if "\x00" in str(args[0]):
         return (None, "EMIT_PROTOCOL_VIOLATION: emit argument must not contain NUL bytes")
+    if len(str(args[0])) > _SUBAGENT_MAX_EMIT_CHARS:
+        return (
+            None,
+            "EMIT_PROTOCOL_VIOLATION: emit argument exceeds "
+            f"{_SUBAGENT_MAX_EMIT_CHARS} characters",
+        )
     return (args[0], "")
 
 

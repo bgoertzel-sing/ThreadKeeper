@@ -259,6 +259,7 @@ clamped instead of crashing the module or disabling guards accidentally.
 | `OMEGACLAW_SUBAGENT_MAX_TOKENS_PER_DISPATCH` | `0` (disabled) | Dispatch-level token budget cap. When non-zero, the dispatch loop checks total accumulated tokens (input + output) after each worker LLM call and returns a structured `token_budget_exceeded` record if the cap is exceeded. `0` disables. |
 | `OMEGACLAW_SUBAGENT_MAX_TRANSCRIPT_TURNS` | `0` (disabled) | Maximum turns retained in the local transcript file. `0` disables the cap. Older turns are dropped when exceeded. |
 | `OMEGACLAW_SUBAGENT_MAX_TRANSCRIPT_FIELD_CHARS` | `0` (disabled) | Maximum per-field string size (prompt, raw_response, tool_results) in each transcript turn entry. `0` disables the cap. |
+| `OMEGACLAW_SUBAGENT_MAX_EMIT_CHARS` | `20000` | Maximum final `emit` argument length accepted as successful worker output; oversized emits return `EMIT_PROTOCOL_VIOLATION` before becoming a transcript summary/adjudication candidate. |
 | `OMEGACLAW_SUBAGENT_WORKSPACE` | current working directory | Sandbox root for subagent file tools. |
 | `OMEGACLAW_ESCALATION_METTA_SHA256` | unset | Optional SHA-256 pin for `escalation.metta`; mismatch denies cloud delegation. |
 
@@ -291,6 +292,7 @@ end-to-end walkthrough.
 | Escalation policy denies cloud delegation | Structured JSON `status=error`; `summary` contains `(escalation denied) ...`; transcript status `escalation_denied`. |
 | Subagent endpoint times out / errors | Structured JSON `status=error`; `summary` contains `(subagent LLM call failed: <ExceptionType>: <reason>)`; transcript status `llm_failed`. |
 | Worker mixes `emit` with other parsed calls or multiple emits | Structured JSON `status=error` and `EMIT_PROTOCOL_VIOLATION`; transcript status `emit_protocol_violation`. |
+| Worker emits an oversized final digest beyond `OMEGACLAW_SUBAGENT_MAX_EMIT_CHARS` | Structured JSON `status=error` and `EMIT_PROTOCOL_VIOLATION`; transcript status `emit_protocol_violation`; oversized text is not accepted as a successful summary/candidate. |
 | Worker response exceeds the per-turn tool-call cap | Structured JSON `status=error`; `summary` contains `TURN_QUOTA_EXCEEDED`; transcript status `turn_quota_exceeded`. |
 | Optional `shell` output exceeds `OMEGACLAW_SUBAGENT_SHELL_OUTPUT_CAP` | Tool result is truncated in the worker context with an explicit `(shell output truncated at <N> chars)` marker. |
 | `read-file` target is larger than `OMEGACLAW_SUBAGENT_MAX_READ_FILE_CHARS` | Tool result is truncated in the worker context with an explicit `(read-file truncated at <N> chars)` marker. |
