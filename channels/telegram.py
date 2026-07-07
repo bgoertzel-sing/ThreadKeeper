@@ -810,11 +810,14 @@ def stop_telegram():
 
 def _send_message_to(text, target_chat):
     text = str(text).replace("\\n", "\n").replace("\r", "")
-    # Decode any literal \uXXXX escapes (e.g. from json.dumps of em dashes)
+    # Decode Unicode escape artifacts from the MeTTa/JSON path.
+    # Sometimes they arrive as literal "\\u2014"; sometimes MeTTa strips the
+    # backslash and leaves bare "u2014". Decode both forms for display.
     import re as _re
     def _decode_u_esc(m):
         return chr(int(m.group(1), 16))
     text = _re.sub(r'\\u([0-9a-fA-F]{4})', _decode_u_esc, text)
+    text = _re.sub(r'(?<![A-Za-z0-9_])u([0-9a-fA-F]{4})(?![A-Za-z0-9_])', _decode_u_esc, text)
     target_chat = str(target_chat or "").strip()
     if not text:
         return
