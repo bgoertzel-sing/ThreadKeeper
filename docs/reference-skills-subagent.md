@@ -230,7 +230,7 @@ accidentally.
 | `OMEGACLAW_SUBAGENT_MAX_TURNS` | `8` | Hard cap on iterations per dispatch. |
 | `OMEGACLAW_SUBAGENT_MAX_DIGEST_CHARS` | `2000` | Length cap on the JSON digest returned to the parent. |
 | `OMEGACLAW_SUBAGENT_RUN_DIR` | `memory/subagent-runs` | Directory for persistent JSON transcript/run records, `index.jsonl`, checksum sidecars, worker rate/concurrency state, and optional queued dispatch tasks. |
-| `OMEGACLAW_SUBAGENT_MAX_INDEX_AUDIT_BYTES` | `1048576` | Maximum `index.jsonl` bytes scanned by `verify_subagent_run_index()`; returns `index_audit_too_large` before reading oversized indexes. `0` disables the cap. |
+| `OMEGACLAW_SUBAGENT_MAX_INDEX_AUDIT_BYTES` | `1048576` | Maximum `index.jsonl` bytes scanned by `verify_subagent_run_index()`; returns `index_audit_too_large` before reading oversized indexes. Finished-run appends also read only a bounded tail of `index.jsonl` when linking/rotating the hash chain, so append cost does not scale with an intentionally unrotated index. `0` disables only the audit cap. |
 | `OMEGACLAW_SUBAGENT_MAX_TRANSCRIPT_AUDIT_BYTES` | `1048576` | Maximum bytes read from each transcript referenced by `verify_subagent_run_index()` while checking transcript SHA-256s; oversized transcripts are reported as `transcript_too_large` instead of read into memory. `0` disables the cap. |
 | `OMEGACLAW_SUBAGENT_QUEUE_ONLY` | unset/false | If true, validate and enqueue the dispatch under `OMEGACLAW_SUBAGENT_RUN_DIR/queue/` without calling the worker LLM. |
 | `OMEGACLAW_SUBAGENT_MAX_QUEUED_DISPATCHES` | `32` | Maximum pending queued dispatch task records before returning `queue_backpressure`; `0` means no pending queue capacity. |

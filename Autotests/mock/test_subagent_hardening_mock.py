@@ -3134,6 +3134,54 @@ def test_validate_tool_args_search_accepts_nonempty_query():
 # Run index entry bounding / rotation
 # ------------------------------------------------------------------
 
+def test_tail_index_lines_reads_recent_lines_with_bounded_tail(tmp_path):
+    index_path = tmp_path / "index.jsonl"
+    old_lines = [json.dumps({"run_id": f"old-{i}"}) for i in range(300)]
+    recent = [json.dumps({"run_id": "recent-1"}), json.dumps({"run_id": "recent-2"})]
+    index_path.write_text("\n".join(old_lines + recent) + "\n", encoding="utf-8")
+
+    lines, truncated = subagent._tail_index_lines(str(index_path), desired_count=2, max_bytes=256)
+    entries = [json.loads(line.decode("utf-8")) for line in lines]
+
+    assert truncated is True
+    assert [entry["run_id"] for entry in entries] == ["recent-1", "recent-2"]
+
+
+def test_append_run_index_hash_chain_uses_bounded_tail_for_large_index(tmp_path, monkeypatch):
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_INDEX_ENTRIES", 0)
+    runs = Path(subagent.SUBAGENT_RUN_DIR)
+    runs.mkdir(parents=True, exist_ok=True)
+    index_path = runs / "index.jsonl"
+
+    previous = {
+        "run_id": "previous",
+        "persona_key": "",
+        "status": "ok",
+        "started_at": None,
+        "finished_at": None,
+        "transcript_path": "previous.json",
+        "transcript_sha256": "a" * 64,
+        "previous_entry_sha256": "",
+    }
+    previous["entry_sha256"] = subagent._index_entry_hash(previous)
+    # Put more than the default 1 MiB tail window before the final valid entry.
+    with index_path.open("w", encoding="utf-8") as f:
+        for i in range(70000):
+            f.write(json.dumps({"padding": i}) + "\n")
+        f.write(json.dumps(previous, sort_keys=True) + "\n")
+
+    subagent._append_run_index({
+        "run_id": "new",
+        "status": "ok",
+        "transcript_path": "new.json",
+        "transcript_sha256": "b" * 64,
+    })
+
+    last_entry = json.loads(index_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert last_entry["run_id"] == "new"
+    assert last_entry["previous_entry_sha256"] == previous["entry_sha256"]
+
 def test_run_index_rotation_truncates_old_entries(tmp_path, monkeypatch):
     """When _SUBAGENT_MAX_INDEX_ENTRIES is set, the index is rotated to keep
     only the most recent N entries after each append."""

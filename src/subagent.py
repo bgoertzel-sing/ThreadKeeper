@@ -537,10 +537,46 @@ def _index_entry_hash(entry):
     return hashlib.sha256(line.encode("utf-8")).hexdigest()
 
 
+def _tail_index_lines(index_path, desired_count=1, max_bytes=1048576):
+    """Return recent non-empty index lines without reading an unbounded file.
+
+    The run-index append path only needs the last entry hash, and index
+    rotation only needs the most recent N entries. Scan backward in bounded
+    chunks so a long-running append-only index cannot turn a single finished
+    subagent run into an unbounded memory read. The boolean return value is
+    true when older file content was intentionally not read.
+    """
+    desired_count = max(1, int(desired_count or 1))
+    max_bytes = max(1024, int(max_bytes or 1024))
+    try:
+        size = os.path.getsize(index_path)
+    except FileNotFoundError:
+        return [], False
+    except Exception:
+        return [], False
+    if size <= 0:
+        return [], False
+
+    remaining = min(size, max_bytes)
+    offset = size
+    buffer = b""
+    with open(index_path, "rb") as f:
+        while remaining > 0:
+            chunk_size = min(65536, remaining)
+            offset -= chunk_size
+            remaining -= chunk_size
+            f.seek(offset)
+            buffer = f.read(chunk_size) + buffer
+            lines = [line for line in buffer.splitlines() if line.strip()]
+            if len(lines) >= desired_count + 1:
+                return lines[-desired_count:], (size > len(buffer))
+    lines = [line for line in buffer.splitlines() if line.strip()]
+    return lines[-desired_count:], (size > len(buffer))
+
+
 def _last_index_entry_hash(index_path):
     try:
-        with open(index_path, "rb") as f:
-            lines = [line for line in f.read().splitlines() if line.strip()]
+        lines, _truncated = _tail_index_lines(index_path, desired_count=1)
     except FileNotFoundError:
         return ""
     except Exception:
@@ -563,16 +599,18 @@ def _rotate_run_index_if_needed(index_path, lock):
     Reads all current entries, and if the count exceeds the configured cap,
     rewrites the file with only the most recent N entries. The hash chain is
     recomputed for retained entries: the first retained entry gets
-n    ``previous_entry_sha256 = ""`` (as if it were the first entry) and each
+    ``previous_entry_sha256 = ""`` (as if it were the first entry) and each
     subsequent entry's ``previous_entry_sha256`` links to the prior retained
     entry's recomputed ``entry_sha256``.
 
     This is called under the index lock so concurrent appenders are safe.
     """
     try:
-        with open(index_path, "rb") as f:
-            lines = [line for line in f.read().splitlines() if line.strip()]
-        if len(lines) <= _SUBAGENT_MAX_INDEX_ENTRIES:
+        lines, truncated = _tail_index_lines(
+            index_path,
+            desired_count=max(1, _SUBAGENT_MAX_INDEX_ENTRIES + 1),
+        )
+        if not truncated and len(lines) <= _SUBAGENT_MAX_INDEX_ENTRIES:
             return
         keep = lines[-_SUBAGENT_MAX_INDEX_ENTRIES:]
         # Parse retained entries and recompute the hash chain.
