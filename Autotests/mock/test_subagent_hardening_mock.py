@@ -42,6 +42,7 @@ def test_env_numeric_knobs_fallback_and_clamp_on_reload(monkeypatch):
         "OMEGACLAW_SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS": "0",
         "OMEGACLAW_SUBAGENT_MAX_EMIT_CHARS": "0",
         "OMEGACLAW_SUBAGENT_MAX_RESPONSE_CHARS": "0",
+        "OMEGACLAW_SUBAGENT_MAX_INDEX_AUDIT_BYTES": "-1",
         "OMEGACLAW_SUBAGENT_MAX_QUEUED_DISPATCHES": "-4",
         "OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_TASKS": "-4",
         "OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_IDLE_POLLS": "-1",
@@ -74,6 +75,7 @@ def test_env_numeric_knobs_fallback_and_clamp_on_reload(monkeypatch):
     assert reloaded._SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS == 1
     assert reloaded._SUBAGENT_MAX_EMIT_CHARS == 1
     assert reloaded._SUBAGENT_MAX_RESPONSE_CHARS == 1
+    assert reloaded._SUBAGENT_MAX_INDEX_AUDIT_BYTES == 0
     assert reloaded._SUBAGENT_MAX_QUEUED_DISPATCHES == 0
     assert reloaded._SUBAGENT_ASYNC_WORKER_MAX_TASKS == 0
     assert reloaded._SUBAGENT_ASYNC_WORKER_MAX_IDLE_POLLS == 0
@@ -593,6 +595,47 @@ def test_verify_subagent_run_index_detects_tampering(tmp_path, monkeypatch):
     assert audit["status"] == "index_tampered"
     assert audit["issue_count"] == 1
     assert audit["issues"][0]["issue"] == "transcript_hash_mismatch"
+
+
+def test_verify_subagent_run_index_rejects_oversized_index_before_read(tmp_path, monkeypatch):
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_INDEX_AUDIT_BYTES", 16)
+    runs = Path(subagent.SUBAGENT_RUN_DIR)
+    runs.mkdir(parents=True)
+    index_path = runs / "index.jsonl"
+    index_path.write_text("x" * 64, encoding="utf-8")
+
+    audit = json.loads(subagent.verify_subagent_run_index())
+
+    assert audit["status"] == "index_audit_too_large"
+    assert audit["index_size_bytes"] == 64
+    assert audit["entries_checked"] == 0
+    assert "OMEGACLAW_SUBAGENT_MAX_INDEX_AUDIT_BYTES=16" in audit["summary"]
+
+
+def test_verify_subagent_run_index_audit_cap_can_be_disabled(tmp_path, monkeypatch):
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_INDEX_AUDIT_BYTES", 0)
+    runs = Path(subagent.SUBAGENT_RUN_DIR)
+    runs.mkdir(parents=True)
+    index_path = runs / "index.jsonl"
+    entry = {
+        "run_id": "one",
+        "status": "ok",
+        "timestamp": 0,
+        "transcript_path": "",
+        "transcript_sha256": "",
+        "previous_entry_sha256": "",
+        "padding": "x" * 64,
+    }
+    entry["entry_sha256"] = subagent._index_entry_hash(entry)
+    index_path.write_text(json.dumps(entry) + "\n", encoding="utf-8")
+
+    audit = json.loads(subagent.verify_subagent_run_index())
+
+    assert audit["status"] == "index_verified"
+    assert audit["entries_checked"] == 1
+    assert audit["issue_count"] == 0
 
 
 def test_dispatch_rejects_mixed_emit_and_tool_response(tmp_path, monkeypatch):

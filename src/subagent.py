@@ -394,6 +394,14 @@ _SUBAGENT_MAX_INDEX_ENTRIES = _env_int(
     "OMEGACLAW_SUBAGENT_MAX_INDEX_ENTRIES", 0, minimum=0,
 )
 
+# Run-index audit read cap. Operators may intentionally leave index rotation
+# disabled for append-only evidence, but the read-only verifier should still
+# avoid loading/scanning an unbounded or adversarially large local index file.
+# Set to 0 to disable.
+_SUBAGENT_MAX_INDEX_AUDIT_BYTES = _env_int(
+    "OMEGACLAW_SUBAGENT_MAX_INDEX_AUDIT_BYTES", 1048576, minimum=0,
+)
+
 # Persistent local run records. Full worker prompts/responses/tool results are
 # kept out of the parent context; the parent receives only a bounded structured
 # digest plus the local transcript path for audit/debug.
@@ -650,6 +658,24 @@ def verify_subagent_run_index(index_path=None):
                 "entries_checked": 0,
                 "next_action": "no finished subagent records to audit yet",
             }, ensure_ascii=False, sort_keys=True)
+        if _SUBAGENT_MAX_INDEX_AUDIT_BYTES:
+            try:
+                index_size = os.path.getsize(path)
+            except OSError as e:
+                raise ValueError(f"subagent run index size check failed: {type(e).__name__}")
+            if index_size > _SUBAGENT_MAX_INDEX_AUDIT_BYTES:
+                return json.dumps({
+                    "status": "index_audit_too_large",
+                    "summary": (
+                        "subagent run index exceeds "
+                        f"OMEGACLAW_SUBAGENT_MAX_INDEX_AUDIT_BYTES={_SUBAGENT_MAX_INDEX_AUDIT_BYTES}"
+                    ),
+                    "index_path": path,
+                    "index_size_bytes": index_size,
+                    "entries_checked": 0,
+                    "transcripts_checked": 0,
+                    "next_action": "raise audit cap, rotate index, or inspect a bounded copy",
+                }, ensure_ascii=False, sort_keys=True)
 
         issues = []
         previous_hash = ""
