@@ -3105,3 +3105,84 @@ def test_build_tool_registry_wraps_tavily_with_bound(monkeypatch):
     result_a = fn_a("AAPL")
     assert len(result_a) < 200
     assert "truncated at 100 chars" in result_a
+
+
+def test_write_file_rejects_content_exceeding_max_file_size(tmp_path, monkeypatch):
+    """write-file refuses to write content larger than the configured max file size."""
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_WORKSPACE", str(tmp_path))
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_FILE_SIZE_CHARS", 100)
+    big_content = "x" * 200
+    result = subagent._tool_write_file("big.txt", big_content)
+    assert "write-file error" in result
+    assert "exceeds max file size" in result
+    assert not (tmp_path / "big.txt").exists()
+
+
+def test_write_file_allows_content_under_max_file_size(tmp_path, monkeypatch):
+    """write-file succeeds when content is under the cap."""
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_WORKSPACE", str(tmp_path))
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_FILE_SIZE_CHARS", 1000)
+    result = subagent._tool_write_file("ok.txt", "small content")
+    assert result == "WRITE-FILE-SUCCESS"
+    assert (tmp_path / "ok.txt").read_text() == "small content"
+
+
+def test_write_file_max_file_size_disabled_when_zero(tmp_path, monkeypatch):
+    """write-file has no size cap when _SUBAGENT_MAX_FILE_SIZE_CHARS is 0."""
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_WORKSPACE", str(tmp_path))
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_FILE_SIZE_CHARS", 0)
+    big_content = "x" * 50000
+    result = subagent._tool_write_file("big.txt", big_content)
+    assert result == "WRITE-FILE-SUCCESS"
+    assert (tmp_path / "big.txt").read_text() == big_content
+
+
+def test_append_file_rejects_existing_file_exceeding_max_size(tmp_path, monkeypatch):
+    """append-file refuses to read/append when the existing file already exceeds the cap."""
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_WORKSPACE", str(tmp_path))
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_FILE_SIZE_CHARS", 100)
+    target = tmp_path / "existing.txt"
+    target.write_text("y" * 200)
+    result = subagent._tool_append_file("existing.txt", "more")
+    assert "append-file error" in result
+    assert "existing file size" in result
+    assert "exceeds max file size" in result
+    # File unchanged
+    assert target.read_text() == "y" * 200
+
+
+def test_append_file_rejects_resulting_file_exceeding_max_size(tmp_path, monkeypatch):
+    """append-file refuses when existing + new content would exceed the cap."""
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_WORKSPACE", str(tmp_path))
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_FILE_SIZE_CHARS", 100)
+    target = tmp_path / "growing.txt"
+    target.write_text("x" * 80)
+    result = subagent._tool_append_file("growing.txt", "y" * 50)
+    assert "append-file error" in result
+    assert "resulting file size" in result
+    assert "would exceed max file size" in result
+    # File unchanged
+    assert target.read_text() == "x" * 80
+
+
+def test_append_file_allows_resulting_file_under_max_size(tmp_path, monkeypatch):
+    """append-file succeeds when existing + new content stays under the cap."""
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_WORKSPACE", str(tmp_path))
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_FILE_SIZE_CHARS", 1000)
+    target = tmp_path / "ok.txt"
+    target.write_text("existing\n")
+    result = subagent._tool_append_file("ok.txt", "appended")
+    assert result == "APPEND-FILE-SUCCESS"
+    assert "existing" in target.read_text()
+    assert "appended" in target.read_text()
+
+
+def test_append_file_max_size_disabled_when_zero(tmp_path, monkeypatch):
+    """append-file has no size cap when _SUBAGENT_MAX_FILE_SIZE_CHARS is 0."""
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_WORKSPACE", str(tmp_path))
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_FILE_SIZE_CHARS", 0)
+    target = tmp_path / "big.txt"
+    target.write_text("x" * 50000)
+    result = subagent._tool_append_file("big.txt", "more")
+    assert result == "APPEND-FILE-SUCCESS"
+    assert "more" in target.read_text()

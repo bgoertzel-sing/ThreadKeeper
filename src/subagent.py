@@ -353,6 +353,14 @@ _SUBAGENT_DISPATCH_TIMEOUT_S = _env_float("OMEGACLAW_SUBAGENT_DISPATCH_TIMEOUT_S
 # cap is exceeded.
 _SUBAGENT_MAX_TOKENS_PER_DISPATCH = _env_int("OMEGACLAW_SUBAGENT_MAX_TOKENS_PER_DISPATCH", 0, minimum=0)
 
+# Workspace file size cap. When non-zero, write-file and append-file refuse to
+# write or append to a file whose resulting size would exceed this many chars,
+# preventing unbounded disk growth from repeated appends and memory
+# exhaustion from reading very large existing files. Set to 0 to disable.
+_SUBAGENT_MAX_FILE_SIZE_CHARS = _env_int(
+    "OMEGACLAW_SUBAGENT_MAX_FILE_SIZE_CHARS", 100000, minimum=0,
+)
+
 # Run index entry cap. When non-zero, the compact audit index (index.jsonl) is
 # rotated after each append to keep at most the most recent N entries. This
 # prevents unbounded index growth in long-running deployments. The hash chain
@@ -2603,6 +2611,13 @@ def _tool_read_file(path):
 def _tool_write_file(path, content):
     try:
         resolved = _resolve_workspace_path(path)
+        content = str(content)
+        cap_size = _SUBAGENT_MAX_FILE_SIZE_CHARS
+        if cap_size > 0 and len(content) > cap_size:
+            return (
+                f"(write-file error: content size {len(content)} exceeds "
+                f"max file size {cap_size} chars)"
+            )
         with _workspace_file_lock(resolved):
             _atomic_replace_text(resolved, content)
         return "WRITE-FILE-SUCCESS"
@@ -2613,6 +2628,24 @@ def _tool_write_file(path, content):
 def _tool_append_file(path, content):
     try:
         resolved = _resolve_workspace_path(path)
+        content = str(content)
+        cap_size = _SUBAGENT_MAX_FILE_SIZE_CHARS
+        if cap_size > 0:
+            existing_size = 0
+            if os.path.exists(resolved):
+                existing_size = os.path.getsize(resolved)
+            # Check existing file size before reading to avoid memory exhaustion
+            if existing_size > cap_size:
+                return (
+                    f"(append-file error: existing file size {existing_size} exceeds "
+                    f"max file size {cap_size} chars)"
+                )
+            if existing_size + len(content) + 1 > cap_size:
+                return (
+                    f"(append-file error: resulting file size "
+                    f"{existing_size + len(content) + 1} would exceed "
+                    f"max file size {cap_size} chars)"
+                )
         with _workspace_file_lock(resolved):
             existing = ""
             if os.path.exists(resolved):
