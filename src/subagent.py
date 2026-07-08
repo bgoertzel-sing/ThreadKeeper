@@ -2897,18 +2897,21 @@ def _tool_shell(cmd):
         return "(shell error: subagent workspace does not exist)"
     env = _shell_safe_env(workspace)
     try:
-        out = subprocess.run(
-            argv,
-            shell=False,
-            cwd=workspace,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            timeout=_SHELL_TIMEOUT_S,
-        )
-        text = (out.stdout or b"").decode("utf-8", errors="replace")
-        text += (out.stderr or b"").decode("utf-8", errors="replace")
-        if len(text) > _SHELL_OUTPUT_CAP:
+        with tempfile.TemporaryFile() as output:
+            subprocess.run(
+                argv,
+                shell=False,
+                cwd=workspace,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=output,
+                stderr=subprocess.STDOUT,
+                timeout=_SHELL_TIMEOUT_S,
+            )
+            output.seek(0)
+            raw = output.read(_SHELL_OUTPUT_CAP + 1)
+        text = raw.decode("utf-8", errors="replace")
+        if len(raw) > _SHELL_OUTPUT_CAP:
             return text[:_SHELL_OUTPUT_CAP] + f"\n...(shell output truncated at {_SHELL_OUTPUT_CAP} chars)..."
         return text
     except subprocess.TimeoutExpired:

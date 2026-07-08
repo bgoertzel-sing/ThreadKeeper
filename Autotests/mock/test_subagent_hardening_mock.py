@@ -338,6 +338,30 @@ def test_shell_tool_output_is_bounded_with_marker(tmp_path, monkeypatch):
     assert "fghij" not in result
 
 
+def test_shell_tool_does_not_capture_unbounded_output_in_memory(tmp_path, monkeypatch):
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_ENABLE_SHELL", "1")
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_SHELL_ALLOWLIST", "fakecmd")
+    monkeypatch.setattr(subagent, "_SHELL_OUTPUT_CAP", 7)
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen["stdout"] = kwargs.get("stdout")
+        seen["stderr"] = kwargs.get("stderr")
+        assert kwargs.get("capture_output") is None
+        kwargs["stdout"].write(b"abcdefghijklmnop")
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(subagent.subprocess, "run", fake_run)
+
+    result = subagent._tool_shell("fakecmd")
+
+    assert seen["stdout"] is not subprocess.PIPE
+    assert seen["stderr"] is subprocess.STDOUT
+    assert result.startswith("abcdefg\n...(shell output truncated at 7 chars)...")
+    assert "hijklmnop" not in result
+
+
 def test_history_is_bounded_and_evicted_turns_are_digested(monkeypatch):
     monkeypatch.setattr(subagent, "_SUBAGENT_HISTORY_MAX_TURNS", 2)
     history = []
