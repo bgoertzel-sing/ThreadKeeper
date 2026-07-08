@@ -294,6 +294,13 @@ _SUBAGENT_MAX_SEARCH_OUTPUT_CHARS = _env_int("OMEGACLAW_SUBAGENT_MAX_SEARCH_OUTP
 # lower it for constrained deployments/tests.
 _SUBAGENT_MAX_JSON_FILE_BYTES = _env_int("OMEGACLAW_SUBAGENT_MAX_JSON_FILE_BYTES", 262144, minimum=1024)
 
+# Checksum sidecar read cap. Integrity sidecars should be tiny sha256 files;
+# bound reads before parsing so a tampered ``*.sha256`` cannot force the queue
+# worker/reviewer to load an arbitrary local blob into memory.
+_SUBAGENT_MAX_SHA256_SIDECAR_BYTES = _env_int(
+    "OMEGACLAW_SUBAGENT_MAX_SHA256_SIDECAR_BYTES", 4096, minimum=128,
+)
+
 # Subagent LLM call reliability controls. Keep defaults bounded so a stuck
 # worker endpoint cannot hang the parent loop indefinitely.
 _SUBAGENT_LLM_TIMEOUT_S = _env_int("OMEGACLAW_SUBAGENT_LLM_TIMEOUT_S", 180, minimum=1)
@@ -528,14 +535,23 @@ def _read_integrity_sidecar_digest(path):
     """Read and validate a required ``<path>.sha256`` audit sidecar."""
     sidecar = f"{path}.sha256"
     try:
-        with open(sidecar, "r", encoding="utf-8") as f:
-            digest = f.read().strip().split()[0]
+        with open(sidecar, "rb") as f:
+            payload = f.read(_SUBAGENT_MAX_SHA256_SIDECAR_BYTES + 1)
     except FileNotFoundError:
-        raise ValueError(f"missing integrity sidecar: {sidecar}")
+        raise ValueError("missing integrity sidecar")
+    if len(payload) > _SUBAGENT_MAX_SHA256_SIDECAR_BYTES:
+        raise ValueError(
+            "integrity sidecar exceeds "
+            f"{_SUBAGENT_MAX_SHA256_SIDECAR_BYTES} byte limit"
+        )
+    try:
+        digest = payload.decode("utf-8").strip().split()[0]
     except IndexError:
-        raise ValueError(f"empty integrity sidecar: {sidecar}")
+        raise ValueError("empty integrity sidecar")
+    except UnicodeDecodeError:
+        raise ValueError("integrity sidecar is not utf-8")
     if not re.fullmatch(r"[0-9a-f]{64}", digest):
-        raise ValueError(f"invalid integrity sidecar digest: {sidecar}")
+        raise ValueError("invalid integrity sidecar digest")
     return digest
 
 
