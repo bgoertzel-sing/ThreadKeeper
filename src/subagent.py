@@ -1511,7 +1511,7 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
                     "current_task_queue_path": None,
                 })
                 if (consecutive_error_limit and
-                        consecutive_errors > consecutive_error_limit):
+                        consecutive_errors >= consecutive_error_limit):
                     stop_reason = "max_consecutive_errors"
                     break
             if not stop_reason:

@@ -314,7 +314,7 @@ end-to-end walkthrough.
 | Async worker loop sees malformed explicit bounds or an invalid stop-file path/config value | `run_queued_worker_loop(...)` returns JSON `status=worker_config_invalid`; no worker lock is acquired and no queue record is claimed. |
 | Async worker loop sees an existing worker lock | `run_queued_worker_loop(...)` returns JSON `status=worker_already_running` plus any compact `worker_lock` metadata readable from `.async-worker.lock`; no queue record is claimed. |
 | Async worker loop sees its stop-file token before claiming work | `run_queued_worker_loop(...)` returns JSON `status=worker_stopped`; pending queue records remain pending. |
-| Async worker loop exceeds `max_consecutive_errors` | `run_queued_worker_loop(...)` stops early with `stop_reason=max_consecutive_errors`; `consecutive_errors` and `error_count` in the structured return; remaining queue tasks stay pending. |
+| Async worker loop reaches `max_consecutive_errors` | `run_queued_worker_loop(...)` stops early with `stop_reason=max_consecutive_errors` as soon as the cap is reached; `consecutive_errors` and `error_count` in the structured return; remaining queue tasks stay pending. |
 | Escalation policy denies cloud delegation | Structured JSON `status=error`; `summary` contains `(escalation denied) ...`; transcript status `escalation_denied`. |
 | Subagent endpoint times out / errors | Structured JSON `status=error`; `summary` contains `(subagent LLM call failed: <ExceptionType>: <reason>)`; transcript status `llm_failed`. |
 | Worker mixes `emit` with other parsed calls or multiple emits | Structured JSON `status=error` and `EMIT_PROTOCOL_VIOLATION`; transcript status `emit_protocol_violation`. |

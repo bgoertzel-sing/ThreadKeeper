@@ -2716,11 +2716,11 @@ def test_worker_loop_stops_on_max_consecutive_errors(tmp_path, monkeypatch):
 
     assert result["status"] == "worker_drained"
     assert result["stop_reason"] == "max_consecutive_errors"
-    assert result["consecutive_errors"] == 3
-    assert result["error_count"] == 3
-    assert result["tasks_attempted"] == 3
+    assert result["consecutive_errors"] == 2
+    assert result["error_count"] == 2
+    assert result["tasks_attempted"] == 2
     assert result["tasks_completed"] == 0
-    assert result["remaining_queue_tasks"] == 2
+    assert result["remaining_queue_tasks"] == 3
     assert all(r["status"] == "queue_worker_error" for r in result["results"])
 
 
