@@ -836,8 +836,10 @@ def verify_subagent_run_index(index_path=None):
                                 })
                                 previous_hash = recorded_entry_hash or actual_entry_hash
                                 continue
-                        with open(resolved_transcript, "rb") as transcript:
-                            actual_transcript_hash = hashlib.sha256(transcript.read()).hexdigest()
+                        actual_transcript_hash, _transcript_bytes = _sha256_file_bounded(
+                            resolved_transcript,
+                            max_bytes=_SUBAGENT_MAX_TRANSCRIPT_AUDIT_BYTES,
+                        )
                         transcripts_checked += 1
                         if actual_transcript_hash != expected_transcript_hash:
                             issues.append({"line": line_no, "run_id": entry.get("run_id", ""), "issue": "transcript_hash_mismatch"})
@@ -1001,6 +1003,30 @@ def _read_json_file(path, max_bytes=None):
     if len(payload) > max_bytes:
         raise ValueError(f"JSON file exceeds {max_bytes} byte limit")
     return json.loads(payload.decode("utf-8")), hashlib.sha256(payload).hexdigest()
+
+
+def _sha256_file_bounded(path, max_bytes=0, chunk_size=65536):
+    """Hash a local file without reading it into memory all at once.
+
+    ``max_bytes=0`` preserves the existing explicit opt-out semantics for audit
+    caps, but still streams in fixed-size chunks. When a cap is set, enforce it
+    during the read as well as via any caller-side size check so races/truncation
+    between ``getsize`` and ``open`` do not turn an audit into an unbounded read.
+    """
+    cap_bytes = max(0, int(max_bytes or 0))
+    chunk = max(1, int(chunk_size or 65536))
+    digest = hashlib.sha256()
+    total = 0
+    with open(path, "rb") as f:
+        while True:
+            raw = f.read(chunk)
+            if not raw:
+                break
+            total += len(raw)
+            if cap_bytes and total > cap_bytes:
+                raise ValueError(f"file exceeds {cap_bytes} byte audit limit")
+            digest.update(raw)
+    return digest.hexdigest(), total
 
 
 def _resolve_queue_task_path(queue_path):

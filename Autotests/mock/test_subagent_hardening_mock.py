@@ -831,6 +831,57 @@ def test_verify_subagent_run_index_transcript_audit_cap_can_be_disabled(tmp_path
     assert audit["transcripts_checked"] == 1
     assert audit["issue_count"] == 0
 
+
+def test_verify_subagent_run_index_streams_transcript_hash_reads(tmp_path, monkeypatch):
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_TRANSCRIPT_AUDIT_BYTES", 1024 * 1024)
+    runs = Path(subagent.SUBAGENT_RUN_DIR)
+    runs.mkdir(parents=True)
+    transcript = runs / "one.json"
+    transcript.write_text("x" * 128, encoding="utf-8")
+    digest = hashlib.sha256(transcript.read_bytes()).hexdigest()
+    subagent._append_run_index({
+        "run_id": "one", "status": "ok",
+        "transcript_path": str(transcript), "transcript_sha256": digest,
+    })
+
+    real_open = builtins.open
+
+    class NoUnboundedRead:
+        def __init__(self, wrapped):
+            self._wrapped = wrapped
+
+        def __enter__(self):
+            self._wrapped.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self._wrapped.__exit__(*args)
+
+        def __iter__(self):
+            return iter(self._wrapped)
+
+        def __getattr__(self, name):
+            return getattr(self._wrapped, name)
+
+        def read(self, size=-1):
+            assert size != -1, "transcript audit must not call unbounded read()"
+            return self._wrapped.read(size)
+
+    def guarded_open(path, *args, **kwargs):
+        handle = real_open(path, *args, **kwargs)
+        if os.path.realpath(str(path)) == os.path.realpath(str(transcript)):
+            return NoUnboundedRead(handle)
+        return handle
+
+    monkeypatch.setattr(builtins, "open", guarded_open)
+
+    audit = json.loads(subagent.verify_subagent_run_index())
+
+    assert audit["status"] == "index_verified"
+    assert audit["transcripts_checked"] == 1
+    assert audit["issue_count"] == 0
+
 def test_verify_subagent_run_index_audit_cap_can_be_disabled(tmp_path, monkeypatch):
     monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
     monkeypatch.setattr(subagent, "_SUBAGENT_MAX_INDEX_AUDIT_BYTES", 0)
