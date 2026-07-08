@@ -152,10 +152,12 @@ it. No second LLM call is made inside the dispatch loop.
 
 `subagent.review_subagent_candidate(transcript_path)` is a non-mutating local
 review helper for these two modes. It only accepts transcript JSON paths under
-`OMEGACLAW_SUBAGENT_RUN_DIR`, verifies the optional `.sha256` sidecar, and
-returns compact JSON naming whether patch-proposal review and/or adjudication is
-required. It deliberately does not apply patches, accept final answers, call an
-LLM, drain queues, or change live runtime behavior.
+`OMEGACLAW_SUBAGENT_RUN_DIR`, verifies the optional `.sha256` sidecar with the
+same bounded sidecar reader used by queued-worker integrity checks, and returns
+compact JSON naming whether patch-proposal review and/or adjudication is
+required. Review setup errors sanitize absolute local paths before returning to
+the caller. It deliberately does not apply patches, accept final answers, call
+an LLM, drain queues, or change live runtime behavior.
 
 Early setup, contract, provider, tool-subset, and escalation failures also
 return the same structured JSON shape and persist a minimal local transcript;

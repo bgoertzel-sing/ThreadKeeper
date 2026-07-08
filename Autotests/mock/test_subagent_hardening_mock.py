@@ -1150,6 +1150,23 @@ def test_review_subagent_candidate_rejects_path_escape(tmp_path, monkeypatch):
 
     assert review["status"] == "candidate_review_error"
     assert "escapes run dir" in review["summary"]
+    assert str(tmp_path) not in review["summary"]
+    assert str(tmp_path) not in review["transcript_path"]
+    assert review["transcript_path"] == "outside.json"
+
+
+def test_review_subagent_candidate_rejects_oversized_checksum_sidecar(tmp_path, monkeypatch):
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_SHA256_SIDECAR_BYTES", 128)
+    transcript = Path(subagent.SUBAGENT_RUN_DIR) / "oversized-sidecar.json"
+    subagent._json_atomic_write(str(transcript), {"status": "ok"})
+    Path(f"{transcript}.sha256").write_text("a" * 129, encoding="utf-8")
+
+    review = json.loads(subagent.review_subagent_candidate(str(transcript)))
+
+    assert review["status"] == "candidate_review_error"
+    assert "integrity sidecar exceeds 128 byte limit" in review["summary"]
+    assert str(tmp_path) not in review["summary"]
 
 
 def test_review_subagent_candidate_detects_checksum_mismatch(tmp_path, monkeypatch):

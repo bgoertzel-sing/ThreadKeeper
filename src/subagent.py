@@ -1453,7 +1453,7 @@ def _resolve_subagent_transcript_path(transcript_path):
     run_dir = os.path.realpath(os.path.abspath(SUBAGENT_RUN_DIR))
     candidate = os.path.realpath(os.path.abspath(str(transcript_path)))
     if os.path.commonpath([run_dir, candidate]) != run_dir:
-        raise ValueError(f"subagent transcript path escapes run dir ({run_dir}): {transcript_path}")
+        raise ValueError("subagent transcript path escapes run dir")
     if not candidate.endswith(".json"):
         raise ValueError("subagent transcript path must be a .json run record")
     return candidate
@@ -1476,8 +1476,7 @@ def review_subagent_candidate(transcript_path):
         sidecar_path = f"{path}.sha256"
         sidecar_status = "missing"
         if os.path.exists(sidecar_path):
-            with open(sidecar_path, "r", encoding="utf-8") as f:
-                sidecar_digest = f.read().strip().split()[0]
+            sidecar_digest = _read_integrity_sidecar_digest(path)
             if sidecar_digest != digest:
                 return json.dumps({
                     "status": "transcript_tampered",
@@ -1526,8 +1525,8 @@ def review_subagent_candidate(transcript_path):
     except Exception as e:
         return json.dumps({
             "status": "candidate_review_error",
-            "summary": f"subagent candidate review failed: {type(e).__name__}: {e}",
-            "transcript_path": str(transcript_path or ""),
+            "summary": f"subagent candidate review failed: {type(e).__name__}: {_sanitize_error_msg(e)}",
+            "transcript_path": os.path.basename(str(transcript_path or "")),
             "next_action": "fix transcript path/integrity before review",
         }, ensure_ascii=False, sort_keys=True)
 
