@@ -242,6 +242,8 @@ accidentally.
 | `OMEGACLAW_SUBAGENT_MAX_TRANSCRIPT_AUDIT_BYTES` | `1048576` | Maximum bytes read from each transcript referenced by `verify_subagent_run_index()` while checking transcript SHA-256s; oversized transcripts are reported as `transcript_too_large` instead of read into memory. `0` disables the cap. |
 | `OMEGACLAW_SUBAGENT_MAX_SHA256_SIDECAR_BYTES` | `4096` | Maximum bytes read from required local `.sha256` sidecars before parsing the digest; oversized or malformed sidecars fail closed without echoing local paths. |
 | `OMEGACLAW_SUBAGENT_MAX_ESCALATION_POLICY_BYTES` | `1048576` | Maximum bytes read from pinned `escalation.metta` before SHA-256 hashing during cloud-delegation integrity checks; oversized policies deny escalation before worker LLM calls, and integrity errors avoid echoing local paths. `0` disables this read cap. |
+| `OMEGACLAW_SUBAGENT_MAX_PERSONA_CONFIG_BYTES` | `65536` | Maximum bytes read from one `<persona_key>.json` config before JSON parsing; oversized configs fail closed before worker LLM calls and avoid echoing local paths. |
+| `OMEGACLAW_SUBAGENT_MAX_PERSONA_PROMPT_BYTES` | `262144` | Maximum bytes read from one persona prompt before optional SHA-256 hashing and prompt construction; oversized prompts fail closed before worker LLM calls and avoid echoing local paths. `0` disables this read cap. |
 | `OMEGACLAW_SUBAGENT_QUEUE_ONLY` | unset/false | If true, validate and enqueue the dispatch under `OMEGACLAW_SUBAGENT_RUN_DIR/queue/` without calling the worker LLM. |
 | `OMEGACLAW_SUBAGENT_MAX_QUEUED_DISPATCHES` | `32` | Maximum pending queued dispatch task records before returning `queue_backpressure`; `0` means no pending queue capacity. |
 | `OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_TASKS` | `32` | Default maximum tasks for one explicit `run_queued_worker_loop(...)` invocation; `0` exits without claiming work. |
@@ -286,9 +288,9 @@ end-to-end walkthrough.
 
 | Failure | Returned digest |
 |---|---|
-| `persona_key` config missing | Structured JSON `status=error`; `summary` contains `(subagent error: persona config '<key>.json' not found at <path>)`; transcript status `setup_error`. |
-| Config JSON malformed | Structured JSON `status=error`; `summary` contains `(subagent error: persona config '<key>.json' is malformed JSON: <reason>)`; transcript status `setup_error`. |
-| Persona prompt file missing/hash mismatch/path escape | Structured JSON `status=error`; `summary` contains `(subagent error: persona prompt <reason>)`; transcript status `persona_prompt_invalid`. |
+| `persona_key` config missing | Structured JSON `status=error`; `summary` contains `(subagent error: persona config '<key>.json' not found)`; transcript status `setup_error`. |
+| Config JSON malformed or oversized | Structured JSON `status=error`; `summary` contains `(subagent error: persona config '<key>.json' <reason>)`; transcript status `setup_error`; persona config reads are capped by `OMEGACLAW_SUBAGENT_MAX_PERSONA_CONFIG_BYTES`. |
+| Persona prompt file missing/hash mismatch/path escape/oversized | Structured JSON `status=error`; `summary` contains `(subagent error: persona prompt <reason>)`; transcript status `persona_prompt_invalid`; persona prompt reads are capped by `OMEGACLAW_SUBAGENT_MAX_PERSONA_PROMPT_BYTES`. |
 | `api_key_env` env var unset | Structured JSON `status=error`; `summary` contains `(subagent error: env var '<NAME>' is unset; cannot reach endpoint for provider '<P>')`; transcript status `provider_invalid`. |
 | OpenAI-compatible provider client cannot initialize | Structured JSON `status=error`; `summary` names the provider initialization failure; transcript status `provider_invalid`; no worker LLM call is attempted. |
 | Tool subset includes unknown skill | Structured JSON `status=error`; `summary` contains `(subagent error: unknown skill(s) [...]; registered subagent tools: [...])`; transcript status `tool_subset_invalid`. |

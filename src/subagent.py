@@ -327,6 +327,18 @@ _SUBAGENT_MAX_ESCALATION_POLICY_BYTES = _env_int(
     "OMEGACLAW_SUBAGENT_MAX_ESCALATION_POLICY_BYTES", 1048576, minimum=0,
 )
 
+# Persona config/prompt read caps. Persona files are deployment-controlled, but
+# they are still local inputs to dispatch setup and prompt construction. Bound
+# reads before JSON parsing/hash checks so malformed local persona artifacts
+# cannot become unbounded setup-time memory reads. Set prompt cap to 0 to
+# disable for unusual large-prompt deployments.
+_SUBAGENT_MAX_PERSONA_CONFIG_BYTES = _env_int(
+    "OMEGACLAW_SUBAGENT_MAX_PERSONA_CONFIG_BYTES", 65536, minimum=1024,
+)
+_SUBAGENT_MAX_PERSONA_PROMPT_BYTES = _env_int(
+    "OMEGACLAW_SUBAGENT_MAX_PERSONA_PROMPT_BYTES", 262144, minimum=0,
+)
+
 # Subagent LLM call reliability controls. Keep defaults bounded so a stuck
 # worker endpoint cannot hang the parent loop indefinitely.
 _SUBAGENT_LLM_TIMEOUT_S = _env_int("OMEGACLAW_SUBAGENT_LLM_TIMEOUT_S", 180, minimum=1)
@@ -2083,15 +2095,30 @@ def load_persona_config(persona_key):
     path = os.path.join(PERSONA_DIR, f"{persona_key}.json")
     if not os.path.isfile(path):
         raise FileNotFoundError(
-            f"persona config '{persona_key}.json' not found at {path}"
+            f"persona config '{persona_key}.json' not found"
         )
-    with open(path, "r", encoding="utf-8") as f:
-        try:
-            cfg = json.load(f)
-        except json.JSONDecodeError as e:
-            raise ValueError(
-                f"persona config '{persona_key}.json' is malformed JSON: {e}"
-            )
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(_SUBAGENT_MAX_PERSONA_CONFIG_BYTES + 1)
+    except OSError as e:
+        raise ValueError(
+            f"persona config '{persona_key}.json' read failed: {type(e).__name__}"
+        )
+    if len(raw) > _SUBAGENT_MAX_PERSONA_CONFIG_BYTES:
+        raise ValueError(
+            f"persona config '{persona_key}.json' exceeds "
+            f"OMEGACLAW_SUBAGENT_MAX_PERSONA_CONFIG_BYTES={_SUBAGENT_MAX_PERSONA_CONFIG_BYTES}"
+        )
+    try:
+        cfg = json.loads(raw.decode("utf-8"))
+    except UnicodeDecodeError:
+        raise ValueError(
+            f"persona config '{persona_key}.json' is not valid UTF-8"
+        )
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"persona config '{persona_key}.json' is malformed JSON: {e}"
+        )
     required = ["persona_file", "provider", "model", "api_key_env", "node_role"]
     missing = [k for k in required if k not in cfg]
     if missing:
@@ -2149,11 +2176,32 @@ def load_persona_prompt(persona_file, persona_key, expected_sha256=""):
     path = _resolve_persona_prompt_path(persona_file, persona_key)
     if not os.path.isfile(path):
         raise FileNotFoundError(
-            f"persona prompt '{persona_file}' for key '{persona_key}' "
-            f"not found at {path}"
+            f"persona prompt '{persona_file}' for key '{persona_key}' not found"
         )
-    with open(path, "rb") as f:
-        raw = f.read()
+    try:
+        if _SUBAGENT_MAX_PERSONA_PROMPT_BYTES:
+            prompt_size = os.path.getsize(path)
+            if prompt_size > _SUBAGENT_MAX_PERSONA_PROMPT_BYTES:
+                raise ValueError(
+                    f"persona prompt '{persona_file}' for key '{persona_key}' exceeds "
+                    f"OMEGACLAW_SUBAGENT_MAX_PERSONA_PROMPT_BYTES={_SUBAGENT_MAX_PERSONA_PROMPT_BYTES}"
+                )
+            read_limit = _SUBAGENT_MAX_PERSONA_PROMPT_BYTES + 1
+        else:
+            read_limit = -1
+        with open(path, "rb") as f:
+            raw = f.read(read_limit)
+    except ValueError:
+        raise
+    except OSError as e:
+        raise ValueError(
+            f"persona prompt '{persona_file}' for key '{persona_key}' read failed: {type(e).__name__}"
+        )
+    if _SUBAGENT_MAX_PERSONA_PROMPT_BYTES and len(raw) > _SUBAGENT_MAX_PERSONA_PROMPT_BYTES:
+        raise ValueError(
+            f"persona prompt '{persona_file}' for key '{persona_key}' exceeds "
+            f"OMEGACLAW_SUBAGENT_MAX_PERSONA_PROMPT_BYTES={_SUBAGENT_MAX_PERSONA_PROMPT_BYTES}"
+        )
     expected = str(expected_sha256 or "").strip().lower()
     if expected:
         actual = hashlib.sha256(raw).hexdigest()

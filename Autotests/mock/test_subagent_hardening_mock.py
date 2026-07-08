@@ -39,6 +39,8 @@ def test_env_numeric_knobs_fallback_and_clamp_on_reload(monkeypatch):
         "OMEGACLAW_SUBAGENT_MAX_JSON_FILE_BYTES": "12",
         "OMEGACLAW_SUBAGENT_MAX_SHA256_SIDECAR_BYTES": "12",
         "OMEGACLAW_SUBAGENT_MAX_ESCALATION_POLICY_BYTES": "-1",
+        "OMEGACLAW_SUBAGENT_MAX_PERSONA_CONFIG_BYTES": "12",
+        "OMEGACLAW_SUBAGENT_MAX_PERSONA_PROMPT_BYTES": "-1",
         "OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEMS": "-2",
         "OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEM_CHARS": "0",
         "OMEGACLAW_SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS": "0",
@@ -76,6 +78,8 @@ def test_env_numeric_knobs_fallback_and_clamp_on_reload(monkeypatch):
     assert reloaded._SUBAGENT_MAX_JSON_FILE_BYTES == 1024
     assert reloaded._SUBAGENT_MAX_SHA256_SIDECAR_BYTES == 128
     assert reloaded._SUBAGENT_MAX_ESCALATION_POLICY_BYTES == 0
+    assert reloaded._SUBAGENT_MAX_PERSONA_CONFIG_BYTES == 1024
+    assert reloaded._SUBAGENT_MAX_PERSONA_PROMPT_BYTES == 0
     assert reloaded._SUBAGENT_MAX_CONTRACT_ITEMS == 0
     assert reloaded._SUBAGENT_MAX_CONTRACT_ITEM_CHARS == 1
     assert reloaded._SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS == 1
@@ -429,6 +433,38 @@ def test_persona_key_rejects_path_traversal(monkeypatch, tmp_path):
         assert False, "path-like persona key should be rejected"
     except ValueError as e:
         assert "persona key" in str(e)
+
+
+def test_persona_config_read_is_bounded_without_path_leak(tmp_path, monkeypatch):
+    persona_dir = tmp_path / "personas"
+    persona_dir.mkdir()
+    (persona_dir / "unit.json").write_text("{" + "x" * 200 + "}")
+    monkeypatch.setattr(subagent, "PERSONA_DIR", str(persona_dir))
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_PERSONA_CONFIG_BYTES", 64)
+
+    try:
+        subagent.load_persona_config("unit")
+        assert False, "oversized persona config should fail closed"
+    except ValueError as e:
+        msg = str(e)
+        assert "OMEGACLAW_SUBAGENT_MAX_PERSONA_CONFIG_BYTES=64" in msg
+        assert str(tmp_path) not in msg
+
+
+def test_persona_prompt_read_is_bounded_without_path_leak(tmp_path, monkeypatch):
+    persona_dir = tmp_path / "personas"
+    persona_dir.mkdir()
+    (persona_dir / "unit.txt").write_text("x" * 200)
+    monkeypatch.setattr(subagent, "PERSONA_DIR", str(persona_dir))
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_PERSONA_PROMPT_BYTES", 64)
+
+    try:
+        subagent.load_persona_prompt("unit.txt", "unit")
+        assert False, "oversized persona prompt should fail closed"
+    except ValueError as e:
+        msg = str(e)
+        assert "OMEGACLAW_SUBAGENT_MAX_PERSONA_PROMPT_BYTES=64" in msg
+        assert str(tmp_path) not in msg
 
 
 def test_persona_prompt_sha256_pin_fails_closed(tmp_path, monkeypatch):
