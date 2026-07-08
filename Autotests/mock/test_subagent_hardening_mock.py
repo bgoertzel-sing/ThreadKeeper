@@ -28,6 +28,7 @@ def test_env_numeric_knobs_fallback_and_clamp_on_reload(monkeypatch):
         "OMEGACLAW_SUBAGENT_LLM_BACKOFF_S": "bad-float",
         "OMEGACLAW_SUBAGENT_LLM_CALLS_PER_MINUTE": "-7",
         "OMEGACLAW_SUBAGENT_MAX_CONCURRENT_LLM_CALLS": "-8",
+        "OMEGACLAW_SUBAGENT_MAX_LLM_STATE_BYTES": "12",
         "OMEGACLAW_SUBAGENT_MAX_TOOL_CALLS": "-9",
         "OMEGACLAW_SUBAGENT_MAX_TOOL_CALLS_PER_TURN": "0",
         "OMEGACLAW_SUBAGENT_MAX_PATH_ARG_CHARS": "0",
@@ -67,6 +68,7 @@ def test_env_numeric_knobs_fallback_and_clamp_on_reload(monkeypatch):
     assert reloaded._SUBAGENT_LLM_BACKOFF_S == 1.0
     assert reloaded._SUBAGENT_LLM_CALLS_PER_MINUTE == 0
     assert reloaded._SUBAGENT_MAX_CONCURRENT_LLM_CALLS == 0
+    assert reloaded._SUBAGENT_MAX_LLM_STATE_BYTES == 1024
     assert reloaded._SUBAGENT_MAX_TOOL_CALLS == 0
     assert reloaded._SUBAGENT_MAX_TOOL_CALLS_PER_TURN == 1
     assert reloaded._SUBAGENT_MAX_PATH_ARG_CHARS == 1
@@ -172,6 +174,43 @@ def test_llm_calls_per_minute_rate_limit_is_atomic_state(tmp_path, monkeypatch):
     blocked = subagent._call_with_retries(counted, "unit-rate")
     assert blocked.startswith("(subagent LLM call rate-limited via unit-rate")
     assert calls["n"] == 1
+
+
+def test_llm_rate_limit_state_read_is_bounded(tmp_path, monkeypatch):
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr(subagent, "_SUBAGENT_LLM_CALLS_PER_MINUTE", 1)
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_LLM_STATE_BYTES", 32)
+    monkeypatch.setattr(subagent, "_SUBAGENT_LLM_RETRIES", 0)
+    state_path = Path(subagent._rate_limit_state_path("unit-rate-huge"))
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text('{"calls": [' + ','.join(['1'] * 1000) + ']}', encoding="utf-8")
+
+    calls = {"n": 0}
+
+    def counted():
+        calls["n"] += 1
+        return '(emit "ok")'
+
+    assert subagent._call_with_retries(counted, "unit-rate-huge") == '(emit "ok")'
+    assert calls["n"] == 1
+    data = json.loads(state_path.read_text(encoding="utf-8"))
+    assert len(data["calls"]) == 1
+
+
+def test_llm_concurrency_state_read_is_bounded(tmp_path, monkeypatch):
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_CONCURRENT_LLM_CALLS", 1)
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_LLM_STATE_BYTES", 32)
+    state_path = Path(subagent._concurrency_state_path("unit-concurrency-huge"))
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text('{"inflight": [' + ','.join(['{"pid": 1, "ts": 1}'] * 1000) + ']}', encoding="utf-8")
+
+    ok, _reason, token = subagent._subagent_llm_concurrency_acquire("unit-concurrency-huge")
+    assert ok
+    data = json.loads(state_path.read_text(encoding="utf-8"))
+    assert len(data["inflight"]) == 1
+    assert data["inflight"][0]["token"] == token
+    subagent._subagent_llm_concurrency_release("unit-concurrency-huge", token)
 
 
 def test_llm_concurrency_limit_blocks_when_endpoint_slots_are_full(tmp_path, monkeypatch):

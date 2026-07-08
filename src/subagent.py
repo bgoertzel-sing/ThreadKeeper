@@ -346,6 +346,7 @@ _SUBAGENT_LLM_RETRIES = _env_int("OMEGACLAW_SUBAGENT_LLM_RETRIES", 1, minimum=0)
 _SUBAGENT_LLM_BACKOFF_S = _env_float("OMEGACLAW_SUBAGENT_LLM_BACKOFF_S", 1.0, minimum=0.0)
 _SUBAGENT_LLM_CALLS_PER_MINUTE = _env_int("OMEGACLAW_SUBAGENT_LLM_CALLS_PER_MINUTE", 60, minimum=0)
 _SUBAGENT_MAX_CONCURRENT_LLM_CALLS = _env_int("OMEGACLAW_SUBAGENT_MAX_CONCURRENT_LLM_CALLS", 4, minimum=0)
+_SUBAGENT_MAX_LLM_STATE_BYTES = _env_int("OMEGACLAW_SUBAGENT_MAX_LLM_STATE_BYTES", 65536, minimum=1024)
 
 # Per-dispatch safety controls. Tool-call quota bounds work even if a worker
 # loops or emits many calls per turn. Cancellation is intentionally file-based
@@ -1765,7 +1766,12 @@ def _pid_alive(pid):
 def _read_json_state(f):
     f.seek(0)
     try:
-        return json.load(f)
+        raw = f.read(_SUBAGENT_MAX_LLM_STATE_BYTES + 1)
+        if len(raw) > _SUBAGENT_MAX_LLM_STATE_BYTES:
+            return {}
+        if not raw.strip():
+            return {}
+        return json.loads(raw)
     except Exception:
         return {}
 
