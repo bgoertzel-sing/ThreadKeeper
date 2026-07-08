@@ -372,6 +372,9 @@ _SUBAGENT_ASYNC_WORKER_MAX_CONSECUTIVE_ERRORS = _env_int(
 _SUBAGENT_ASYNC_WORKER_MAX_RESULTS = _env_int(
     "OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_RESULTS", 16, minimum=0,
 )
+_SUBAGENT_ASYNC_WORKER_LOCK_METADATA_BYTES = _env_int(
+    "OMEGACLAW_SUBAGENT_ASYNC_WORKER_LOCK_METADATA_BYTES", 8192, minimum=1024,
+)
 
 # Transcript turn bounding. The full turn list (prompts + raw responses + tool
 # results) is written to the local transcript file for audit/debug. For
@@ -1115,8 +1118,11 @@ def _write_worker_loop_lock_metadata(lock, metadata):
 
 def _read_worker_loop_lock_metadata(lock_path):
     try:
-        with open(lock_path, "r", encoding="utf-8") as f:
-            raw = f.read(4096).strip()
+        with open(lock_path, "rb") as f:
+            payload = f.read(_SUBAGENT_ASYNC_WORKER_LOCK_METADATA_BYTES + 1)
+        if len(payload) > _SUBAGENT_ASYNC_WORKER_LOCK_METADATA_BYTES:
+            return {}
+        raw = payload.decode("utf-8").strip()
         if not raw:
             return {}
         value = json.loads(raw)

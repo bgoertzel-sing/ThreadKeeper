@@ -55,6 +55,7 @@ def test_env_numeric_knobs_fallback_and_clamp_on_reload(monkeypatch):
         "OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_IDLE_POLLS": "-1",
         "OMEGACLAW_SUBAGENT_ASYNC_WORKER_POLL_INTERVAL_S": "bad-float",
         "OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_RUNTIME_S": "bad-float",
+        "OMEGACLAW_SUBAGENT_ASYNC_WORKER_LOCK_METADATA_BYTES": "12",
     }
     for name, value in bad_values.items():
         monkeypatch.setenv(name, value)
@@ -95,6 +96,7 @@ def test_env_numeric_knobs_fallback_and_clamp_on_reload(monkeypatch):
     assert reloaded._SUBAGENT_ASYNC_WORKER_MAX_IDLE_POLLS == 0
     assert reloaded._SUBAGENT_ASYNC_WORKER_POLL_INTERVAL_S == 2.0
     assert reloaded._SUBAGENT_ASYNC_WORKER_MAX_RUNTIME_S == 600.0
+    assert reloaded._SUBAGENT_ASYNC_WORKER_LOCK_METADATA_BYTES == 1024
 
     monkeypatch.undo()
     importlib.reload(subagent)
@@ -2093,6 +2095,28 @@ def test_run_queued_worker_loop_detects_stale_lock_from_crashed_worker(tmp_path,
     finished_metadata = json.loads(lock_path.read_text(encoding="utf-8"))
     assert finished_metadata["status"] == "finished"
     assert finished_metadata["pid"] != 99999
+
+
+def test_run_queued_worker_loop_ignores_oversized_stale_lock_metadata(tmp_path, monkeypatch):
+    """Stale lock inspection should not parse an oversized local lock file."""
+    run_dir = tmp_path / "runs"
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(run_dir))
+    monkeypatch.setattr(subagent, "_SUBAGENT_ASYNC_WORKER_LOCK_METADATA_BYTES", 64)
+    monkeypatch.setattr(subagent.time, "sleep", lambda *_args: None)
+    lock_path = run_dir / ".async-worker.lock"
+    lock_path.parent.mkdir(parents=True)
+    lock_path.write_text(
+        json.dumps({"status": "running", "pid": 777, "padding": "x" * 200}),
+        encoding="utf-8",
+    )
+
+    assert subagent._read_worker_loop_lock_metadata(str(lock_path)) == {}
+    result = json.loads(subagent.run_queued_worker_loop(
+        max_tasks=0, poll_interval_s=0, max_idle_polls=0,
+    ))
+
+    assert result["status"] == "worker_idle"
+    assert result["stale_lock"] is None
 
 
 def test_run_queued_worker_loop_no_stale_lock_on_fresh_start(tmp_path, monkeypatch):

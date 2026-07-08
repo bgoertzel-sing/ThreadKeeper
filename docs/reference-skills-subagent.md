@@ -121,7 +121,10 @@ workers draining the same queue concurrently when `fcntl` is available. While
 held, the lock file contains compact JSON metadata (`pid`, `started_at`, bounds,
 `stop_file`, and status) so a supervisor/operator can distinguish an active
 local worker from a stale prior run; completed loops leave a final `status` /
-`stop_reason` summary in the same file. It still does not start itself from
+`stop_reason` summary in the same file. Stale-lock metadata reads are bounded by
+`OMEGACLAW_SUBAGENT_ASYNC_WORKER_LOCK_METADATA_BYTES` before JSON parsing, so a
+corrupt local lock file is ignored rather than parsed unbounded. It still does
+not start itself from
 `dispatch` and is not a service manager; deployments must launch it deliberately
 under their chosen supervisor. The repository also provides the conservative
 operator entrypoint `scripts/run-subagent-worker-loop`, which imports `subagent`
@@ -253,6 +256,7 @@ accidentally.
 | `OMEGACLAW_SUBAGENT_ASYNC_WORKER_STOP_FILE` | unset | Optional stop-token path under `OMEGACLAW_SUBAGENT_RUN_DIR`; relative values are interpreted there, absolute values must stay there, and only regular non-symlink files count as present. Malformed explicit worker-loop bounds and invalid stop-file values fail closed before the worker lock/queue claim. |
 | `OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_CONSECUTIVE_ERRORS` | `3` | Max consecutive `queue_worker_error` results before the worker loop exits early; `0` disables the consecutive-error limit. |
 | `OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_RESULTS` | `16` | Max result entries kept in the worker-loop structured return; older entries are dropped and counted in `results_truncated`. `0` disables the cap. |
+| `OMEGACLAW_SUBAGENT_ASYNC_WORKER_LOCK_METADATA_BYTES` | `8192` | Maximum bytes read from `.async-worker.lock` stale-lock metadata before JSON parsing; oversized metadata is ignored rather than surfaced as stale-lock evidence. |
 | `OMEGACLAW_SUBAGENT_LLM_TIMEOUT_S` | `180` | Timeout for each worker LLM call. |
 | `OMEGACLAW_SUBAGENT_LLM_RETRIES` | `1` | Retry count after the first worker LLM attempt. |
 | `OMEGACLAW_SUBAGENT_LLM_BACKOFF_S` | `1.0` | Exponential backoff base between worker retries; jitter (up to 25% of the base delay) is added to each retry. |
