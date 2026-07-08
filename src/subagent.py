@@ -933,12 +933,22 @@ def _is_pending_queue_task_name(name):
     )
 
 
+def _is_regular_pending_queue_task_path(queue_dir, name):
+    if not _is_pending_queue_task_name(name):
+        return False
+    try:
+        st = os.lstat(os.path.join(queue_dir, name))
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) and not stat.S_ISLNK(st.st_mode)
+
+
 def _pending_dispatch_queue_count():
     try:
         queue_dir = _dispatch_queue_dir()
         return len([
             name for name in os.listdir(queue_dir)
-            if _is_pending_queue_task_name(name)
+            if _is_regular_pending_queue_task_path(queue_dir, name)
         ])
     except FileNotFoundError:
         return 0
@@ -1036,11 +1046,18 @@ def _resolve_queue_task_path(queue_path):
     if not queue_path or "\x00" in str(queue_path):
         raise ValueError("invalid queued dispatch path")
     queue_dir = os.path.realpath(os.path.abspath(_dispatch_queue_dir()))
-    candidate = os.path.realpath(os.path.abspath(str(queue_path)))
+    raw_candidate = os.path.abspath(str(queue_path))
+    candidate = os.path.realpath(raw_candidate)
     if os.path.commonpath([queue_dir, candidate]) != queue_dir:
         raise ValueError(f"queued dispatch path escapes queue dir ({queue_dir}): {queue_path}")
     if not _is_pending_queue_task_name(os.path.basename(candidate)):
         raise ValueError("queued dispatch path must be a pending queue/*.json task record")
+    try:
+        st = os.lstat(raw_candidate)
+    except FileNotFoundError:
+        raise ValueError("queued dispatch task not found")
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+        raise ValueError("queued dispatch path must be a regular non-symlink task record")
     return candidate
 
 
@@ -1055,12 +1072,19 @@ def _pending_queued_dispatch_paths():
     try:
         names = [
             name for name in os.listdir(queue_dir)
-            if _is_pending_queue_task_name(name)
+            if _is_regular_pending_queue_task_path(queue_dir, name)
         ]
     except FileNotFoundError:
         return []
     paths = [os.path.join(queue_dir, name) for name in names]
-    return sorted(paths, key=lambda path: (os.path.getmtime(path), path))
+
+    def _queue_sort_key(path):
+        try:
+            return (os.lstat(path).st_mtime, path)
+        except OSError:
+            return (float("inf"), path)
+
+    return sorted(paths, key=_queue_sort_key)
 
 
 def drain_queued_dispatches(max_tasks=1):
