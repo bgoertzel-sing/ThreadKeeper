@@ -2119,6 +2119,38 @@ def test_run_queued_worker_loop_ignores_oversized_stale_lock_metadata(tmp_path, 
     assert result["stale_lock"] is None
 
 
+def test_run_queued_worker_loop_ignores_symlink_stale_lock_metadata(tmp_path, monkeypatch):
+    """Stale-lock inspection should not follow local lock symlinks."""
+    run_dir = tmp_path / "runs"
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(run_dir))
+    run_dir.mkdir(parents=True)
+    target = tmp_path / "outside-lock.json"
+    target.write_text(json.dumps({"status": "running", "pid": 31337}), encoding="utf-8")
+    lock_path = run_dir / ".async-worker.lock"
+    lock_path.symlink_to(target)
+
+    assert subagent._read_worker_loop_lock_metadata(str(lock_path)) == {}
+
+
+def test_run_queued_worker_loop_rejects_symlink_lock_path(tmp_path, monkeypatch):
+    """The worker lock must be a regular in-run-dir file, not a symlink."""
+    run_dir = tmp_path / "runs"
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(run_dir))
+    monkeypatch.setattr(subagent.time, "sleep", lambda *_args: None)
+    run_dir.mkdir(parents=True)
+    target = tmp_path / "outside-lock.json"
+    target.write_text("{}\n", encoding="utf-8")
+    (run_dir / ".async-worker.lock").symlink_to(target)
+
+    result = json.loads(subagent.run_queued_worker_loop(
+        max_tasks=1, poll_interval_s=0, max_idle_polls=0,
+    ))
+
+    assert result["status"] == "worker_config_invalid"
+    assert "lock invalid" in result["summary"]
+    assert result["tasks_attempted"] == 0
+
+
 def test_run_queued_worker_loop_no_stale_lock_on_fresh_start(tmp_path, monkeypatch):
     """No ``stale_lock`` field when no previous lock file exists."""
     run_dir = tmp_path / "runs"

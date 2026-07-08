@@ -122,8 +122,10 @@ held, the lock file contains compact JSON metadata (`pid`, `started_at`, bounds,
 `stop_file`, and status) so a supervisor/operator can distinguish an active
 local worker from a stale prior run; completed loops leave a final `status` /
 `stop_reason` summary in the same file. Stale-lock metadata reads are bounded by
-`OMEGACLAW_SUBAGENT_ASYNC_WORKER_LOCK_METADATA_BYTES` before JSON parsing, so a
-corrupt local lock file is ignored rather than parsed unbounded. It still does
+`OMEGACLAW_SUBAGENT_ASYNC_WORKER_LOCK_METADATA_BYTES` before JSON parsing, and
+symlink/non-regular lock files are ignored for stale metadata and rejected for
+new worker acquisition, so a corrupt or redirected local lock file is ignored
+rather than parsed/followed unbounded. It still does
 not start itself from
 `dispatch` and is not a service manager; deployments must launch it deliberately
 under their chosen supervisor. The repository also provides the conservative

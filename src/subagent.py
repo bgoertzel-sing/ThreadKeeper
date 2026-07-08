@@ -1118,6 +1118,9 @@ def _write_worker_loop_lock_metadata(lock, metadata):
 
 def _read_worker_loop_lock_metadata(lock_path):
     try:
+        st = os.lstat(lock_path)
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+            return {}
         with open(lock_path, "rb") as f:
             payload = f.read(_SUBAGENT_ASYNC_WORKER_LOCK_METADATA_BYTES + 1)
         if len(payload) > _SUBAGENT_ASYNC_WORKER_LOCK_METADATA_BYTES:
@@ -1129,6 +1132,22 @@ def _read_worker_loop_lock_metadata(lock_path):
         return value if isinstance(value, dict) else {}
     except Exception:
         return {}
+
+
+def _open_worker_loop_lock(lock_path):
+    """Open the async-worker lock without following symlinks."""
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(lock_path, flags, 0o600)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError("async worker lock path is not a regular file")
+        return os.fdopen(fd, "a+", encoding="utf-8")
+    except Exception:
+        os.close(fd)
+        raise
 
 
 def _coerce_worker_limit(value, default, minimum=0, maximum=None):
@@ -1307,7 +1326,30 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
     if pre_existing_lock.get("status") == "running":
         stale_lock = pre_existing_lock
 
-    with open(lock_path, "a+", encoding="utf-8") as lock:
+    try:
+        lock_cm = _open_worker_loop_lock(lock_path)
+    except Exception as e:
+        return json.dumps({
+            "status": "worker_config_invalid",
+            "summary": f"queued subagent async worker loop lock invalid: {type(e).__name__}",
+            "lock_path": lock_path,
+            "started_at": started_at,
+            "finished_at": time.time(),
+            "total_runtime_s": round(time.time() - started_at, 3),
+            "max_tasks": task_limit,
+            "poll_interval_s": poll_interval,
+            "max_idle_polls": idle_limit,
+            "max_runtime_s": runtime_limit,
+            "max_consecutive_errors": consecutive_error_limit,
+            "stop_file": stop_path,
+            "tasks_attempted": 0,
+            "tasks_completed": 0,
+            "results_truncated": 0,
+            "remaining_queue_tasks": len(_pending_queued_dispatch_paths()),
+            "results": [],
+        }, ensure_ascii=False, sort_keys=True)
+
+    with lock_cm as lock:
         if fcntl is not None:
             try:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
