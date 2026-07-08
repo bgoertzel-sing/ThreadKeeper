@@ -40,6 +40,7 @@ def test_env_numeric_knobs_fallback_and_clamp_on_reload(monkeypatch):
         "OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEMS": "-2",
         "OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEM_CHARS": "0",
         "OMEGACLAW_SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS": "0",
+        "OMEGACLAW_SUBAGENT_MAX_PATCH_PROPOSAL_CHARS": "0",
         "OMEGACLAW_SUBAGENT_MAX_EMIT_CHARS": "0",
         "OMEGACLAW_SUBAGENT_MAX_RESPONSE_CHARS": "0",
         "OMEGACLAW_SUBAGENT_MAX_LLM_HTTP_RESPONSE_BYTES": "-1",
@@ -74,6 +75,7 @@ def test_env_numeric_knobs_fallback_and_clamp_on_reload(monkeypatch):
     assert reloaded._SUBAGENT_MAX_CONTRACT_ITEMS == 0
     assert reloaded._SUBAGENT_MAX_CONTRACT_ITEM_CHARS == 1
     assert reloaded._SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS == 1
+    assert reloaded._SUBAGENT_MAX_PATCH_PROPOSAL_CHARS == 1
     assert reloaded._SUBAGENT_MAX_EMIT_CHARS == 1
     assert reloaded._SUBAGENT_MAX_RESPONSE_CHARS == 1
     assert reloaded._SUBAGENT_MAX_LLM_HTTP_RESPONSE_BYTES == 0
@@ -998,6 +1000,31 @@ def test_task_contract_patch_proposal_only_records_without_writing(tmp_path, mon
         "content": "candidate",
     }]
     assert "PATCH_PROPOSAL_RECORDED" in saved["turns"][0]["tool_results"]
+
+
+def test_task_contract_patch_proposal_only_bounds_persisted_content(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_PATCH_PROPOSAL_CHARS", 5)
+    contract_goal = json.dumps({
+        "objective": "propose a bounded patch but do not apply it",
+        "patch_proposal_only": True,
+    })
+    responses = iter([
+        '(write-file "proposed.txt" "abcdefghijklmnopqrstuvwxyz")',
+        '(emit "patch proposed")',
+    ])
+    monkeypatch.setattr(subagent, "_call_subagent_llm", lambda *_a: (next(responses), 0, 0))
+
+    payload = json.loads(subagent.dispatch(contract_goal, "write-file", "unit", max_turns=3))
+
+    assert payload["status"] == "ok"
+    assert payload["patch_proposals"] == [{"action": "write-file", "path": "proposed.txt"}]
+    assert not (tmp_path / "workspace" / "proposed.txt").exists()
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    proposal = saved["patch_proposals"][0]
+    assert proposal["content"].startswith("abcde")
+    assert "patch proposal content truncated at 5 chars" in proposal["content"]
+    assert "fghijklmnopqrstuvwxyz" not in proposal["content"]
 
 
 def test_task_contract_patch_proposal_only_must_be_boolean_before_llm(tmp_path, monkeypatch):

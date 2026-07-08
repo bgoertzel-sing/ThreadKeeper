@@ -135,10 +135,12 @@ rejected from runner env files before import; `--max-tasks 0` is the intended
 no-claim smoke for install/supervisor wiring checks.
 
 When a JSON task contract sets `"patch_proposal_only": true`, `write-file` and
-`append-file` calls do not mutate workspace files. Instead they append full
-proposed changes to the local transcript's `patch_proposals` list and the parent
-digest receives only bounded `{action, path}` metadata. The parent/supervisor is
-then responsible for review, tests, and application.
+`append-file` calls do not mutate workspace files. Instead they append proposed
+changes to the local transcript's `patch_proposals` list and the parent digest
+receives only bounded `{action, path}` metadata. Each persisted proposal content
+field is capped by `OMEGACLAW_SUBAGENT_MAX_PATCH_PROPOSAL_CHARS` (default
+20,000) with an explicit truncation marker. The parent/supervisor is then
+responsible for review, tests, and application.
 
 When a JSON task contract sets `"requires_adjudication": true`, the subagent's
 final `emit` is treated as a candidate output rather than an accepted result.
@@ -266,6 +268,7 @@ accidentally.
 | `OMEGACLAW_SUBAGENT_MAX_TOKENS_PER_DISPATCH` | `0` (disabled) | Dispatch-level token budget cap. When non-zero, the dispatch loop checks total accumulated tokens (input + output) after each worker LLM call and returns a structured `token_budget_exceeded` record if the cap is exceeded. `0` disables. |
 | `OMEGACLAW_SUBAGENT_MAX_TRANSCRIPT_TURNS` | `0` (disabled) | Maximum turns retained in the local transcript file. `0` disables the cap. Older turns are dropped when exceeded. |
 | `OMEGACLAW_SUBAGENT_MAX_TRANSCRIPT_FIELD_CHARS` | `0` (disabled) | Maximum per-field string size (prompt, raw_response, tool_results) in each transcript turn entry. `0` disables the cap. |
+| `OMEGACLAW_SUBAGENT_MAX_PATCH_PROPOSAL_CHARS` | `20000` | Maximum persisted content length for each patch-proposal-only write/append proposal before a truncation marker is appended. |
 | `OMEGACLAW_SUBAGENT_MAX_EMIT_CHARS` | `20000` | Maximum final `emit` argument length accepted as successful worker output; oversized emits return `EMIT_PROTOCOL_VIOLATION` before becoming a transcript summary/adjudication candidate. |
 | `OMEGACLAW_SUBAGENT_MAX_RESPONSE_CHARS` | `50000` | Maximum raw worker response length parsed/persisted for one turn; oversized responses return `response_too_large` before tool parsing/execution. |
 | `OMEGACLAW_SUBAGENT_MAX_LLM_HTTP_RESPONSE_BYTES` | `1048576` | Maximum raw HTTP response body read from the native Ollama-compatible worker transport before JSON decoding. `0` disables. OpenAI-compatible SDK calls remain bounded after parsed content return by `OMEGACLAW_SUBAGENT_MAX_RESPONSE_CHARS`. |

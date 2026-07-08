@@ -341,6 +341,15 @@ _SUBAGENT_MAX_TRANSCRIPT_SUMMARY_CHARS = _env_int(
     "OMEGACLAW_SUBAGENT_MAX_TRANSCRIPT_SUMMARY_CHARS", 0, minimum=0,
 )
 
+# Patch-proposal content bounding. In patch_proposal_only mode, proposed
+# write-file/append-file payloads are persisted in transcripts for human review
+# even though the parent digest exposes only bounded metadata. Keep each stored
+# proposal content bounded independently of tool-argument caps so operators can
+# tune transcript retention without allowing large proposal blobs.
+_SUBAGENT_MAX_PATCH_PROPOSAL_CHARS = _env_int(
+    "OMEGACLAW_SUBAGENT_MAX_PATCH_PROPOSAL_CHARS", 20000, minimum=1,
+)
+
 # Final emit bounding. The parent receives only the structured digest cap, but
 # the raw emit also becomes the transcript summary/candidate output. Reject
 # oversized final emits at protocol level before treating them as successful
@@ -3027,7 +3036,7 @@ def run_tools(calls, allowed_names, record=None, quota=None, task_contract=None)
                 record.setdefault("patch_proposals", []).append({
                     "action": name,
                     "path": str(args[0]),
-                    "content": str(args[1]),
+                    "content": _bound_patch_proposal_content(args[1]),
                 })
             out_parts.append(
                 f"(PATCH_PROPOSAL_RECORDED: {name} path '{args[0]}' not applied; "
@@ -3061,6 +3070,14 @@ def _looks_like_test_command(cmd):
         return False
     names = {os.path.basename(a) for a in argv[:3]}
     return bool(names & {"pytest", "unittest", "tox", "nox", "make"}) or " test" in f" {cmd} "
+
+
+def _bound_patch_proposal_content(content):
+    text = str(content)
+    cap = max(1, int(_SUBAGENT_MAX_PATCH_PROPOSAL_CHARS))
+    if len(text) <= cap:
+        return text
+    return text[:cap] + f"\n[...patch proposal content truncated at {cap} chars...]"
 
 
 def _extract_final_emit(calls):
