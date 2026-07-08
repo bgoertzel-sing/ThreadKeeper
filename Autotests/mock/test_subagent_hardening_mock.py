@@ -38,6 +38,7 @@ def test_env_numeric_knobs_fallback_and_clamp_on_reload(monkeypatch):
         "OMEGACLAW_SUBAGENT_MAX_READ_FILE_CHARS": "0",
         "OMEGACLAW_SUBAGENT_MAX_JSON_FILE_BYTES": "12",
         "OMEGACLAW_SUBAGENT_MAX_SHA256_SIDECAR_BYTES": "12",
+        "OMEGACLAW_SUBAGENT_MAX_ESCALATION_POLICY_BYTES": "-1",
         "OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEMS": "-2",
         "OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEM_CHARS": "0",
         "OMEGACLAW_SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS": "0",
@@ -74,6 +75,7 @@ def test_env_numeric_knobs_fallback_and_clamp_on_reload(monkeypatch):
     assert reloaded._SUBAGENT_MAX_READ_FILE_CHARS == 1
     assert reloaded._SUBAGENT_MAX_JSON_FILE_BYTES == 1024
     assert reloaded._SUBAGENT_MAX_SHA256_SIDECAR_BYTES == 128
+    assert reloaded._SUBAGENT_MAX_ESCALATION_POLICY_BYTES == 0
     assert reloaded._SUBAGENT_MAX_CONTRACT_ITEMS == 0
     assert reloaded._SUBAGENT_MAX_CONTRACT_ITEM_CHARS == 1
     assert reloaded._SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS == 1
@@ -928,6 +930,27 @@ def test_escalation_policy_hash_mismatch_denies_cloud_dispatch(tmp_path, monkeyp
     assert payload["status"] == "error"
     assert "escalation denied" in payload["summary"]
     assert "integrity mismatch" in payload["summary"]
+    assert str(tmp_path) not in payload["summary"]
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["status"] == "escalation_denied"
+
+
+def test_escalation_policy_integrity_read_is_bounded_before_hashing(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch, node_role="cloud")
+    policy = tmp_path / "escalation.metta"
+    policy.write_text("x" * 11)
+    monkeypatch.setenv("OMEGACLAW_ESCALATION_METTA_PATH", str(policy))
+    monkeypatch.setenv("OMEGACLAW_ESCALATION_METTA_SHA256", hashlib.sha256(b"x" * 11).hexdigest())
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_ESCALATION_POLICY_BYTES", 10)
+    monkeypatch.setattr(subagent, "_call_subagent_llm", lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")))
+
+    result = subagent.dispatch("cloud task", "write-file", "unit", max_turns=1)
+    payload = json.loads(result)
+
+    assert payload["status"] == "error"
+    assert "escalation denied" in payload["summary"]
+    assert "MAX_ESCALATION_POLICY_BYTES=10" in payload["summary"]
+    assert str(tmp_path) not in payload["summary"]
     saved = json.loads(Path(payload["transcript_path"]).read_text())
     assert saved["status"] == "escalation_denied"
 

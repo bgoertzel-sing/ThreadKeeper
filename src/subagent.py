@@ -167,13 +167,31 @@ def _escalation_policy_integrity():
     if not path:
         return (False, "escalation.metta not found for integrity check")
     try:
+        if _SUBAGENT_MAX_ESCALATION_POLICY_BYTES:
+            policy_size = os.path.getsize(path)
+            if policy_size > _SUBAGENT_MAX_ESCALATION_POLICY_BYTES:
+                return (
+                    False,
+                    "escalation.metta exceeds "
+                    f"OMEGACLAW_SUBAGENT_MAX_ESCALATION_POLICY_BYTES={_SUBAGENT_MAX_ESCALATION_POLICY_BYTES}",
+                )
+            read_limit = _SUBAGENT_MAX_ESCALATION_POLICY_BYTES + 1
+        else:
+            read_limit = -1
         with open(path, "rb") as f:
-            actual = hashlib.sha256(f.read()).hexdigest()
+            payload = f.read(read_limit)
+        if _SUBAGENT_MAX_ESCALATION_POLICY_BYTES and len(payload) > _SUBAGENT_MAX_ESCALATION_POLICY_BYTES:
+            return (
+                False,
+                "escalation.metta exceeds "
+                f"OMEGACLAW_SUBAGENT_MAX_ESCALATION_POLICY_BYTES={_SUBAGENT_MAX_ESCALATION_POLICY_BYTES}",
+            )
+        actual = hashlib.sha256(payload).hexdigest()
     except Exception as e:
-        return (False, f"escalation.metta integrity read failed: {type(e).__name__}: {e}")
+        return (False, f"escalation.metta integrity read failed: {type(e).__name__}")
     if actual != expected:
-        return (False, f"escalation.metta integrity mismatch at {path}")
-    return (True, f"escalation.metta integrity ok at {path}")
+        return (False, "escalation.metta integrity mismatch")
+    return (True, "escalation.metta integrity ok")
 
 
 def _escalation_gate(cfg, thread_id="default"):
@@ -299,6 +317,14 @@ _SUBAGENT_MAX_JSON_FILE_BYTES = _env_int("OMEGACLAW_SUBAGENT_MAX_JSON_FILE_BYTES
 # worker/reviewer to load an arbitrary local blob into memory.
 _SUBAGENT_MAX_SHA256_SIDECAR_BYTES = _env_int(
     "OMEGACLAW_SUBAGENT_MAX_SHA256_SIDECAR_BYTES", 4096, minimum=128,
+)
+
+# Escalation policy integrity read cap. Cloud escalation may optionally pin
+# ``escalation.metta`` by sha256; bound the policy read before hashing so a
+# malformed/oversized local policy cannot turn a pre-dispatch budget check into
+# an unbounded memory read. Set to 0 to disable.
+_SUBAGENT_MAX_ESCALATION_POLICY_BYTES = _env_int(
+    "OMEGACLAW_SUBAGENT_MAX_ESCALATION_POLICY_BYTES", 1048576, minimum=0,
 )
 
 # Subagent LLM call reliability controls. Keep defaults bounded so a stuck
