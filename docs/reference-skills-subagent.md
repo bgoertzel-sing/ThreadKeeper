@@ -125,8 +125,10 @@ local worker from a stale prior run; completed loops leave a final `status` /
 `OMEGACLAW_SUBAGENT_ASYNC_WORKER_LOCK_METADATA_BYTES` before JSON parsing, and
 symlink/non-regular lock files are ignored for stale metadata and rejected for
 new worker acquisition, so a corrupt or redirected local lock file is ignored
-rather than parsed/followed unbounded. It still does
-not start itself from
+rather than parsed/followed unbounded. SIGTERM/SIGINT are handled as graceful
+stop requests for the current bounded run, and the module-local signal flag is
+cleared before returning so a later same-process worker-loop invocation is not
+poisoned by an earlier handled signal. It still does not start itself from
 `dispatch` and is not a service manager; deployments must launch it deliberately
 under their chosen supervisor. The repository also provides the conservative
 operator entrypoint `scripts/run-subagent-worker-loop`, which imports `subagent`

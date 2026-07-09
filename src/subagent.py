@@ -1543,6 +1543,12 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
                     _signal_module.signal(_signal_module.SIGINT, _prev_sigint)
                 except (ValueError, OSError):
                     pass
+            # The signal handler uses module-local state so it can stay
+            # async-signal-safe. Clear that state after every bounded worker
+            # run; otherwise an operator SIGTERM/SIGINT handled by one loop can
+            # poison a later same-process supervised loop into stopping before
+            # it checks the queue.
+            _worker_signal_state["stop_requested"] = False
             if fcntl is not None:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 

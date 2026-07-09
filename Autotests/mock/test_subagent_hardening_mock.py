@@ -1991,6 +1991,26 @@ def test_run_queued_worker_loop_graceful_signal_shutdown(tmp_path, monkeypatch):
     assert metadata["stop_reason"] == "signal"
 
 
+def test_run_queued_worker_loop_clears_signal_state_after_exit(tmp_path, monkeypatch):
+    """A handled stop signal must not poison a later same-process worker run."""
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr(subagent.time, "sleep", lambda *_args: None)
+    subagent._worker_signal_state["stop_requested"] = True
+
+    first = json.loads(subagent.run_queued_worker_loop(
+        max_tasks=1, poll_interval_s=0, max_idle_polls=0,
+    ))
+    second = json.loads(subagent.run_queued_worker_loop(
+        max_tasks=1, poll_interval_s=0, max_idle_polls=0,
+    ))
+
+    assert first["status"] == "worker_stopped"
+    assert first["stop_reason"] == "signal"
+    assert subagent._worker_signal_state["stop_requested"] is False
+    assert second["status"] == "worker_idle"
+    assert second["stop_reason"] == "idle"
+
+
 def test_run_queued_worker_loop_restores_signal_handlers(tmp_path, monkeypatch):
     """Signal handlers are restored after the worker loop exits."""
     import signal as _sig
