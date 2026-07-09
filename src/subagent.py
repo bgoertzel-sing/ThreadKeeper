@@ -907,7 +907,8 @@ def verify_subagent_run_index(index_path=None):
         previous_hash = ""
         entries_checked = 0
         transcripts_checked = 0
-        with open(path, "r", encoding="utf-8") as f:
+        index_fd = _open_regular_no_symlink(path, os.O_RDONLY)
+        with os.fdopen(index_fd, "r", encoding="utf-8") as f:
             for line_no, line in enumerate(f, start=1):
                 if not line.strip():
                     continue
@@ -1253,7 +1254,8 @@ def _read_worker_loop_lock_metadata(lock_path):
         st = os.lstat(lock_path)
         if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
             return {}
-        with open(lock_path, "rb") as f:
+        fd = _open_regular_no_symlink(lock_path, os.O_RDONLY)
+        with os.fdopen(fd, "rb") as f:
             payload = f.read(_SUBAGENT_ASYNC_WORKER_LOCK_METADATA_BYTES + 1)
         if len(payload) > _SUBAGENT_ASYNC_WORKER_LOCK_METADATA_BYTES:
             return {}

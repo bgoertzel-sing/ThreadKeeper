@@ -870,6 +870,39 @@ def test_verify_subagent_run_index_rejects_symlink_index_path(tmp_path, monkeypa
     assert "regular non-symlink" in audit["summary"]
 
 
+def test_verify_subagent_run_index_reads_index_with_nofollow_opener(tmp_path, monkeypatch):
+    """Index audits should keep no-follow protection on the actual read."""
+    run_dir = tmp_path / "runs"
+    run_dir.mkdir()
+    index_path = run_dir / "index.jsonl"
+    entry = {
+        "run_id": "one",
+        "persona_key": "mock",
+        "status": "ok",
+        "started_at": 1,
+        "finished_at": 2,
+        "transcript_path": "",
+        "transcript_sha256": "",
+        "previous_entry_sha256": "",
+    }
+    entry["entry_sha256"] = subagent._index_entry_hash(entry)
+    index_path.write_text(json.dumps(entry, sort_keys=True) + "\n", encoding="utf-8")
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(run_dir))
+    opened = []
+    original_open = subagent._open_regular_no_symlink
+
+    def recording_open(path, flags, mode=0o600):
+        opened.append((path, flags))
+        return original_open(path, flags, mode)
+
+    monkeypatch.setattr(subagent, "_open_regular_no_symlink", recording_open)
+
+    audit = json.loads(subagent.verify_subagent_run_index())
+
+    assert audit["status"] == "index_verified"
+    assert any(path == str(index_path) and flags == os.O_RDONLY for path, flags in opened)
+
+
 def test_verify_subagent_run_index_rejects_symlink_transcript_path(tmp_path, monkeypatch):
     if not hasattr(os, "symlink"):
         return
@@ -2429,6 +2462,28 @@ def test_run_queued_worker_loop_ignores_symlink_stale_lock_metadata(tmp_path, mo
     lock_path.symlink_to(target)
 
     assert subagent._read_worker_loop_lock_metadata(str(lock_path)) == {}
+
+
+def test_read_worker_loop_lock_metadata_uses_nofollow_opener(tmp_path, monkeypatch):
+    """Stale-lock metadata reads should not fall back to built-in open()."""
+    run_dir = tmp_path / "runs"
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(run_dir))
+    run_dir.mkdir(parents=True)
+    lock_path = run_dir / ".async-worker.lock"
+    lock_path.write_text(json.dumps({"status": "running", "pid": 123}), encoding="utf-8")
+    opened = []
+    original_open = subagent._open_regular_no_symlink
+
+    def recording_open(path, flags, mode=0o600):
+        opened.append((path, flags))
+        return original_open(path, flags, mode)
+
+    monkeypatch.setattr(subagent, "_open_regular_no_symlink", recording_open)
+
+    metadata = subagent._read_worker_loop_lock_metadata(str(lock_path))
+
+    assert metadata["status"] == "running"
+    assert any(path == str(lock_path) and flags == os.O_RDONLY for path, flags in opened)
 
 
 def test_run_queued_worker_loop_rejects_symlink_lock_path(tmp_path, monkeypatch):

@@ -82,7 +82,8 @@ The read-only helper `subagent.verify_subagent_run_index()` verifies that hash
 chain and any recorded local transcript SHA-256s without repairing files,
 draining queues, or calling a worker LLM. Finished-run appends and read-only
 audits reject symlink/non-regular `index.jsonl` and `index.jsonl.lock` paths;
-transcript JSON reads/hashes also use regular non-symlink opens, and atomic
+the audit scan opens the index itself through the regular non-symlink no-follow
+opener, transcript JSON reads/hashes also use regular non-symlink opens, and atomic
 JSON audit writes plus transcript checksum-sidecar writes now fail closed if the
 pre-existing destination is a symlink or other non-regular file. Index rotation
 rewrites through random local temp files rather than predictable
@@ -133,9 +134,9 @@ workers draining the same queue concurrently when `fcntl` is available. While
 held, the lock file contains compact JSON metadata (`pid`, `started_at`, bounds,
 `stop_file`, and status) so a supervisor/operator can distinguish an active
 local worker from a stale prior run; completed loops leave a final `status` /
-`stop_reason` summary in the same file. Stale-lock metadata reads are bounded by
-`OMEGACLAW_SUBAGENT_ASYNC_WORKER_LOCK_METADATA_BYTES` before JSON parsing, and
-symlink/non-regular lock files are ignored for stale metadata and rejected for
+`stop_reason` summary in the same file. Stale-lock metadata reads open the lock
+through the regular non-symlink no-follow helper and are bounded by
+`OMEGACLAW_SUBAGENT_ASYNC_WORKER_LOCK_METADATA_BYTES` before JSON parsing; symlink/non-regular lock files are ignored for stale metadata and rejected for
 new worker acquisition, so a corrupt or redirected local lock file is ignored
 rather than parsed/followed unbounded. SIGTERM/SIGINT are handled as graceful
 stop requests for the current bounded run, and the module-local signal flag is
