@@ -1273,6 +1273,29 @@ def test_escalation_policy_integrity_read_is_bounded_before_hashing(tmp_path, mo
     assert saved["status"] == "escalation_denied"
 
 
+def test_escalation_policy_integrity_rejects_symlink_policy(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch, node_role="cloud")
+    real_policy = tmp_path / "real-escalation.metta"
+    real_policy.write_text("trusted policy")
+    symlink_policy = tmp_path / "escalation.metta"
+    symlink_policy.symlink_to(real_policy)
+    monkeypatch.setenv("OMEGACLAW_ESCALATION_METTA_PATH", str(symlink_policy))
+    monkeypatch.setenv("OMEGACLAW_ESCALATION_METTA_SHA256", hashlib.sha256(b"trusted policy").hexdigest())
+    monkeypatch.setattr(subagent, "_call_subagent_llm", lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")))
+
+    result = subagent.dispatch("cloud task", "write-file", "unit", max_turns=1)
+    payload = json.loads(result)
+
+    assert payload["status"] == "error"
+    assert "escalation denied" in payload["summary"]
+    assert "not found" in payload["summary"] or "integrity read failed" in payload["summary"]
+    assert str(tmp_path) not in payload["summary"]
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["status"] == "escalation_denied"
+    assert symlink_policy.is_symlink()
+    assert real_policy.read_text() == "trusted policy"
+
+
 def test_task_contract_limits_file_paths_and_persists_contract(tmp_path, monkeypatch):
     _write_unit_persona(tmp_path, monkeypatch)
     contract_goal = json.dumps({

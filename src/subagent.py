@@ -155,14 +155,27 @@ def _persona_is_cloud(cfg):
 
 def _escalation_policy_path():
     here = os.path.dirname(os.path.abspath(__file__))
+    configured = os.environ.get("OMEGACLAW_ESCALATION_METTA_PATH", "")
     candidates = [
-        os.environ.get("OMEGACLAW_ESCALATION_METTA_PATH", ""),
+        configured,
         os.path.join(here, "escalation.metta"),
         os.path.join(here, "..", "src", "escalation.metta"),
     ]
     for path in candidates:
-        if path and os.path.isfile(path):
-            return os.path.realpath(os.path.abspath(path))
+        if not path:
+            continue
+        candidate = os.path.abspath(path)
+        try:
+            st = os.lstat(candidate)
+        except OSError:
+            if path == configured:
+                return ""
+            continue
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+            if path == configured:
+                return ""
+            continue
+        return candidate
     return ""
 
 
@@ -190,7 +203,8 @@ def _escalation_policy_integrity():
             read_limit = _SUBAGENT_MAX_ESCALATION_POLICY_BYTES + 1
         else:
             read_limit = -1
-        with open(path, "rb") as f:
+        fd = _open_regular_no_symlink(path, os.O_RDONLY)
+        with os.fdopen(fd, "rb") as f:
             payload = f.read(read_limit)
         if _SUBAGENT_MAX_ESCALATION_POLICY_BYTES and len(payload) > _SUBAGENT_MAX_ESCALATION_POLICY_BYTES:
             return (

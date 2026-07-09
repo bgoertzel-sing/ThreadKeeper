@@ -263,7 +263,7 @@ accidentally.
 | `OMEGACLAW_SUBAGENT_MAX_INDEX_AUDIT_BYTES` | `1048576` | Maximum `index.jsonl` bytes scanned by `verify_subagent_run_index()`; returns `index_audit_too_large` before reading oversized indexes. Finished-run appends also read only a bounded tail of `index.jsonl` when linking/rotating the hash chain, so append cost does not scale with an intentionally unrotated index. `0` disables only the audit cap. |
 | `OMEGACLAW_SUBAGENT_MAX_TRANSCRIPT_AUDIT_BYTES` | `1048576` | Maximum bytes read from each regular non-symlink transcript referenced by `verify_subagent_run_index()` while checking transcript SHA-256s; oversized transcripts are reported as `transcript_too_large`, and transcript hashes are streamed in fixed-size chunks instead of using one unbounded `read()`. `0` disables only the cap. |
 | `OMEGACLAW_SUBAGENT_MAX_SHA256_SIDECAR_BYTES` | `4096` | Maximum bytes read from required local regular non-symlink `.sha256` sidecars before parsing the digest; symlink, oversized, or malformed sidecars fail closed without echoing local paths. |
-| `OMEGACLAW_SUBAGENT_MAX_ESCALATION_POLICY_BYTES` | `1048576` | Maximum bytes read from pinned `escalation.metta` before SHA-256 hashing during cloud-delegation integrity checks; oversized policies deny escalation before worker LLM calls, and integrity errors avoid echoing local paths. `0` disables this read cap. |
+| `OMEGACLAW_SUBAGENT_MAX_ESCALATION_POLICY_BYTES` | `1048576` | Maximum bytes read from pinned regular non-symlink `escalation.metta` before SHA-256 hashing during cloud-delegation integrity checks; oversized, symlinked, or non-regular policies deny escalation before worker LLM calls, and integrity errors avoid echoing local paths. `0` disables only this read cap. |
 | `OMEGACLAW_SUBAGENT_MAX_PERSONA_CONFIG_BYTES` | `65536` | Maximum bytes read from one `<persona_key>.json` config before JSON parsing; oversized configs fail closed before worker LLM calls and avoid echoing local paths. |
 | `OMEGACLAW_SUBAGENT_MAX_PERSONA_PROMPT_BYTES` | `262144` | Maximum bytes read from one persona prompt before optional SHA-256 hashing and prompt construction; oversized prompts fail closed before worker LLM calls and avoid echoing local paths. `0` disables this read cap. |
 | `OMEGACLAW_SUBAGENT_QUEUE_ONLY` | unset/false | If true, validate and enqueue the dispatch under `OMEGACLAW_SUBAGENT_RUN_DIR/queue/` without calling the worker LLM. |
@@ -303,7 +303,8 @@ accidentally.
 | `OMEGACLAW_SUBAGENT_MAX_RESPONSE_CHARS` | `50000` | Maximum raw worker response length parsed/persisted for one turn; oversized responses return `response_too_large` before tool parsing/execution. |
 | `OMEGACLAW_SUBAGENT_MAX_LLM_HTTP_RESPONSE_BYTES` | `1048576` | Maximum raw HTTP response body read from the native Ollama-compatible worker transport before JSON decoding. `0` disables. OpenAI-compatible SDK calls remain bounded after parsed content return by `OMEGACLAW_SUBAGENT_MAX_RESPONSE_CHARS`. |
 | `OMEGACLAW_SUBAGENT_WORKSPACE` | current working directory | Sandbox root for subagent file tools. |
-| `OMEGACLAW_ESCALATION_METTA_SHA256` | unset | Optional SHA-256 pin for `escalation.metta`; mismatch denies cloud delegation. |
+| `OMEGACLAW_ESCALATION_METTA_PATH` | auto-detected source `escalation.metta` | Optional explicit escalation policy path. When set for pinned cloud-delegation integrity checks, the path must name a regular non-symlink file; unsafe values fail closed instead of falling back silently. |
+| `OMEGACLAW_ESCALATION_METTA_SHA256` | unset | Optional SHA-256 pin for `escalation.metta`; mismatch or unsafe policy path denies cloud delegation. |
 
 See [`tutorial-09-subagents.md`](./tutorial-09-subagents.md) for an
 end-to-end walkthrough.
