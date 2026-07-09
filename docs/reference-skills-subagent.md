@@ -150,8 +150,12 @@ When a JSON task contract sets `"patch_proposal_only": true`, `write-file` and
 changes to the local transcript's `patch_proposals` list and the parent digest
 receives only bounded `{action, path}` metadata. Each persisted proposal content
 field is capped by `OMEGACLAW_SUBAGENT_MAX_PATCH_PROPOSAL_CHARS` (default
-20,000) with an explicit truncation marker. The parent/supervisor is then
-responsible for review, tests, and application.
+20,000) with an explicit truncation marker. Normal `write-file` / `append-file`
+updates use atomic replace plus a per-target workspace lock when `fcntl` is
+available; existing lock paths are rejected if they are symlinks or non-regular
+files, so local workspace lock files cannot redirect file-tool synchronization
+outside the workspace. The parent/supervisor is then responsible for review,
+tests, and application.
 
 When a JSON task contract sets `"requires_adjudication": true`, the subagent's
 final `emit` is treated as a candidate output rather than an accepted result.

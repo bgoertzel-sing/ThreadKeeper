@@ -774,7 +774,13 @@ def _append_run_index(record):
 
 
 def _open_regular_no_symlink(path, flags, mode=0o600):
-    """Open a local audit/control file without following symlinks."""
+    """Open a local audit/control/lock file without following symlinks."""
+    try:
+        existing = os.lstat(path)
+    except FileNotFoundError:
+        existing = None
+    if existing is not None and (stat.S_ISLNK(existing.st_mode) or not stat.S_ISREG(existing.st_mode)):
+        raise ValueError("path is not a regular non-symlink file")
     open_flags = flags
     if hasattr(os, "O_NOFOLLOW"):
         open_flags |= os.O_NOFOLLOW
@@ -1959,7 +1965,8 @@ def _workspace_file_lock(resolved_path):
         yield
         return
     lock_path = os.path.join(parent or ".", f".{os.path.basename(resolved_path)}.lock")
-    with open(lock_path, "a+", encoding="utf-8") as lock_f:
+    lock_fd = _open_regular_no_symlink(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    with os.fdopen(lock_fd, "a+", encoding="utf-8") as lock_f:
         fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
         try:
             yield

@@ -291,6 +291,22 @@ def test_append_file_uses_atomic_replace_inside_workspace(tmp_path, monkeypatch)
     assert not list((tmp_path / "nested").glob(".*.tmp"))
 
 
+def test_workspace_file_lock_rejects_symlink_lock_files(tmp_path, monkeypatch):
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_WORKSPACE", str(tmp_path))
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    outside = tmp_path / "outside.lock"
+    outside.write_text("external")
+    (nested / ".artifact.txt.lock").symlink_to(outside)
+
+    result = subagent._tool_write_file("nested/artifact.txt", "content")
+
+    assert "write-file error" in result
+    assert "regular non-symlink" in result
+    assert not (nested / "artifact.txt").exists()
+    assert outside.read_text() == "external"
+
+
 def test_append_file_lock_prevents_concurrent_lost_updates(tmp_path, monkeypatch):
     monkeypatch.setenv("OMEGACLAW_SUBAGENT_WORKSPACE", str(tmp_path))
     worker_count = 4
