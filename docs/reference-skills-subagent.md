@@ -81,10 +81,11 @@ truncation, reordering, or later mutation during audit.
 The read-only helper `subagent.verify_subagent_run_index()` verifies that hash
 chain and any recorded local transcript SHA-256s without repairing files,
 draining queues, or calling a worker LLM. Finished-run appends and read-only
-audits reject symlink/non-regular `index.jsonl` and `index.jsonl.lock` paths,
-and index rotation rewrites through random local temp files rather than
-predictable `index.jsonl.tmp.<pid>` names, so the compact audit log cannot be
-redirected through local link tricks.
+audits reject symlink/non-regular `index.jsonl` and `index.jsonl.lock` paths;
+transcript JSON reads/hashes also use regular non-symlink opens. Index rotation
+rewrites through random local temp files rather than predictable
+`index.jsonl.tmp.<pid>` names, so compact audit records and referenced local
+transcripts cannot be redirected through local link tricks.
 
 `worker_token_usage` contains aggregated `input_tokens`, `output_tokens`, and
 `total_tokens` across all worker LLM calls in the dispatch, for cost
@@ -169,12 +170,13 @@ it. No second LLM call is made inside the dispatch loop.
 
 `subagent.review_subagent_candidate(transcript_path)` is a non-mutating local
 review helper for these two modes. It only accepts transcript JSON paths under
-`OMEGACLAW_SUBAGENT_RUN_DIR`, verifies the optional `.sha256` sidecar with the
-same bounded sidecar reader used by queued-worker integrity checks, and returns
-compact JSON naming whether patch-proposal review and/or adjudication is
-required. Review setup errors sanitize absolute local paths before returning to
-the caller. It deliberately does not apply patches, accept final answers, call
-an LLM, drain queues, or change live runtime behavior.
+`OMEGACLAW_SUBAGENT_RUN_DIR`, opens transcript records as regular non-symlink
+files, verifies the optional `.sha256` sidecar with the same bounded sidecar
+reader used by queued-worker integrity checks, and returns compact JSON naming
+whether patch-proposal review and/or adjudication is required. Review setup
+errors sanitize absolute local paths before returning to the caller. It
+deliberately does not apply patches, accept final answers, call an LLM, drain
+queues, or change live runtime behavior.
 
 Early setup, contract, provider, tool-subset, and escalation failures also
 return the same structured JSON shape and persist a minimal local transcript;
@@ -256,7 +258,7 @@ accidentally.
 | `OMEGACLAW_SUBAGENT_MAX_DIGEST_CHARS` | `2000` | Length cap on the JSON digest returned to the parent. |
 | `OMEGACLAW_SUBAGENT_RUN_DIR` | `memory/subagent-runs` | Directory for persistent JSON transcript/run records, `index.jsonl`, checksum sidecars, worker rate/concurrency state, and optional queued dispatch tasks. |
 | `OMEGACLAW_SUBAGENT_MAX_INDEX_AUDIT_BYTES` | `1048576` | Maximum `index.jsonl` bytes scanned by `verify_subagent_run_index()`; returns `index_audit_too_large` before reading oversized indexes. Finished-run appends also read only a bounded tail of `index.jsonl` when linking/rotating the hash chain, so append cost does not scale with an intentionally unrotated index. `0` disables only the audit cap. |
-| `OMEGACLAW_SUBAGENT_MAX_TRANSCRIPT_AUDIT_BYTES` | `1048576` | Maximum bytes read from each transcript referenced by `verify_subagent_run_index()` while checking transcript SHA-256s; oversized transcripts are reported as `transcript_too_large`, and transcript hashes are streamed in fixed-size chunks instead of using one unbounded `read()`. `0` disables only the cap. |
+| `OMEGACLAW_SUBAGENT_MAX_TRANSCRIPT_AUDIT_BYTES` | `1048576` | Maximum bytes read from each regular non-symlink transcript referenced by `verify_subagent_run_index()` while checking transcript SHA-256s; oversized transcripts are reported as `transcript_too_large`, and transcript hashes are streamed in fixed-size chunks instead of using one unbounded `read()`. `0` disables only the cap. |
 | `OMEGACLAW_SUBAGENT_MAX_SHA256_SIDECAR_BYTES` | `4096` | Maximum bytes read from required local regular non-symlink `.sha256` sidecars before parsing the digest; symlink, oversized, or malformed sidecars fail closed without echoing local paths. |
 | `OMEGACLAW_SUBAGENT_MAX_ESCALATION_POLICY_BYTES` | `1048576` | Maximum bytes read from pinned `escalation.metta` before SHA-256 hashing during cloud-delegation integrity checks; oversized policies deny escalation before worker LLM calls, and integrity errors avoid echoing local paths. `0` disables this read cap. |
 | `OMEGACLAW_SUBAGENT_MAX_PERSONA_CONFIG_BYTES` | `65536` | Maximum bytes read from one `<persona_key>.json` config before JSON parsing; oversized configs fail closed before worker LLM calls and avoid echoing local paths. |
@@ -334,7 +336,7 @@ end-to-end walkthrough.
 | Worker emits an oversized final digest beyond `OMEGACLAW_SUBAGENT_MAX_EMIT_CHARS` | Structured JSON `status=error` and `EMIT_PROTOCOL_VIOLATION`; transcript status `emit_protocol_violation`; oversized text is not accepted as a successful summary/candidate. |
 | Worker raw response exceeds `OMEGACLAW_SUBAGENT_MAX_RESPONSE_CHARS` | Structured JSON `status=error`; transcript status `response_too_large`; the response is bounded in the transcript and no tool calls are parsed or executed. |
 | `verify_subagent_run_index()` sees an `index.jsonl` larger than `OMEGACLAW_SUBAGENT_MAX_INDEX_AUDIT_BYTES` | Structured JSON `status=index_audit_too_large`; no index entries or transcript files are read. |
-| `verify_subagent_run_index()` sees a referenced transcript larger than `OMEGACLAW_SUBAGENT_MAX_TRANSCRIPT_AUDIT_BYTES` | Structured JSON `status=index_tampered` with issue `transcript_too_large`; the oversized transcript is not read into memory. |
+| `verify_subagent_run_index()` sees a referenced transcript that is symlink/non-regular or larger than `OMEGACLAW_SUBAGENT_MAX_TRANSCRIPT_AUDIT_BYTES` | Structured JSON `status=index_tampered` with issue `transcript_unverifiable:*` or `transcript_too_large`; the transcript is not followed/read unbounded. |
 | Worker response exceeds the per-turn tool-call cap | Structured JSON `status=error`; `summary` contains `TURN_QUOTA_EXCEEDED`; transcript status `turn_quota_exceeded`. |
 | Optional `shell` output exceeds `OMEGACLAW_SUBAGENT_SHELL_OUTPUT_CAP` | Tool result is truncated in the worker context with an explicit `(shell output truncated at <N> chars)` marker. |
 | `read-file` target is larger than `OMEGACLAW_SUBAGENT_MAX_READ_FILE_CHARS` | Tool result is truncated in the worker context with an explicit `(read-file truncated at <N> chars)` marker. |

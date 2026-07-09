@@ -839,6 +839,53 @@ def test_verify_subagent_run_index_rejects_symlink_index_path(tmp_path, monkeypa
     assert "regular non-symlink" in audit["summary"]
 
 
+def test_verify_subagent_run_index_rejects_symlink_transcript_path(tmp_path, monkeypatch):
+    if not hasattr(os, "symlink"):
+        return
+    run_dir = tmp_path / "runs"
+    run_dir.mkdir()
+    target = run_dir / "real-transcript.json"
+    digest = subagent._json_atomic_write(str(target), {"status": "ok", "run_id": "one"})
+    link = run_dir / "linked-transcript.json"
+    link.symlink_to(target)
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(run_dir))
+    entry = {
+        "run_id": "one",
+        "persona_key": "mock",
+        "status": "ok",
+        "started_at": 1,
+        "finished_at": 2,
+        "transcript_path": str(link),
+        "transcript_sha256": digest,
+        "previous_entry_sha256": "",
+    }
+    entry["entry_sha256"] = subagent._index_entry_hash(entry)
+    (run_dir / "index.jsonl").write_text(json.dumps(entry, sort_keys=True) + "\n", encoding="utf-8")
+
+    audit = json.loads(subagent.verify_subagent_run_index())
+
+    assert audit["status"] == "index_tampered"
+    assert audit["transcripts_checked"] == 0
+    assert audit["issues"][0]["issue"] == "transcript_unverifiable:ValueError"
+
+
+def test_review_subagent_candidate_rejects_symlink_transcript_path(tmp_path, monkeypatch):
+    if not hasattr(os, "symlink"):
+        return
+    run_dir = tmp_path / "runs"
+    run_dir.mkdir()
+    target = run_dir / "real-transcript.json"
+    subagent._json_atomic_write(str(target), {"status": "ok", "run_id": "one", "summary": "done"})
+    link = run_dir / "linked-transcript.json"
+    link.symlink_to(target)
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(run_dir))
+
+    review = json.loads(subagent.review_subagent_candidate(str(link)))
+
+    assert review["status"] == "candidate_review_error"
+    assert "regular non-symlink" in review["summary"]
+
+
 def test_verify_subagent_run_index_checks_chain_and_transcripts(tmp_path, monkeypatch):
     monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
     runs = Path(subagent.SUBAGENT_RUN_DIR)

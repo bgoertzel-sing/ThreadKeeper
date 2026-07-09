@@ -1089,7 +1089,8 @@ def _enqueue_dispatch_record(record, tool_names, max_turns, max_chars):
 def _read_json_file(path, max_bytes=None):
     if max_bytes is None:
         max_bytes = _SUBAGENT_MAX_JSON_FILE_BYTES
-    with open(path, "rb") as f:
+    fd = _open_regular_no_symlink(path, os.O_RDONLY)
+    with os.fdopen(fd, "rb") as f:
         payload = f.read(max_bytes + 1)
     if len(payload) > max_bytes:
         raise ValueError(f"JSON file exceeds {max_bytes} byte limit")
@@ -1108,7 +1109,8 @@ def _sha256_file_bounded(path, max_bytes=0, chunk_size=65536):
     chunk = max(1, int(chunk_size or 65536))
     digest = hashlib.sha256()
     total = 0
-    with open(path, "rb") as f:
+    fd = _open_regular_no_symlink(path, os.O_RDONLY)
+    with os.fdopen(fd, "rb") as f:
         while True:
             raw = f.read(chunk)
             if not raw:
@@ -1672,8 +1674,9 @@ def _resolve_subagent_transcript_path(transcript_path):
     if not transcript_path or "\x00" in str(transcript_path):
         raise ValueError("invalid subagent transcript path")
     run_dir = os.path.realpath(os.path.abspath(SUBAGENT_RUN_DIR))
-    candidate = os.path.realpath(os.path.abspath(str(transcript_path)))
-    if os.path.commonpath([run_dir, candidate]) != run_dir:
+    candidate = os.path.abspath(str(transcript_path))
+    resolved_candidate = os.path.realpath(candidate)
+    if os.path.commonpath([run_dir, resolved_candidate]) != run_dir:
         raise ValueError("subagent transcript path escapes run dir")
     if not candidate.endswith(".json"):
         raise ValueError("subagent transcript path must be a .json run record")
