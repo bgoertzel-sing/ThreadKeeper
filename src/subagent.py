@@ -2034,7 +2034,8 @@ def _subagent_llm_concurrency_acquire(label):
     now = time.time()
     stale_before = now - 3600.0
     try:
-        with open(path, "a+", encoding="utf-8") as f:
+        state_fd = _open_regular_no_symlink(path, os.O_RDWR | os.O_CREAT, 0o600)
+        with os.fdopen(state_fd, "r+", encoding="utf-8") as f:
             fcntl.flock(f.fileno(), fcntl.LOCK_EX)
             data = _read_json_state(f)
             inflight = []
@@ -2061,7 +2062,8 @@ def _subagent_llm_concurrency_release(label, token):
         return
     path = _concurrency_state_path(label)
     try:
-        with open(path, "a+", encoding="utf-8") as f:
+        state_fd = _open_regular_no_symlink(path, os.O_RDWR | os.O_CREAT, 0o600)
+        with os.fdopen(state_fd, "r+", encoding="utf-8") as f:
             fcntl.flock(f.fileno(), fcntl.LOCK_EX)
             data = _read_json_state(f)
             inflight = [e for e in data.get("inflight", []) if e.get("token") != token]
@@ -2089,7 +2091,8 @@ def _subagent_llm_rate_limit_acquire(label):
     now = time.time()
     window_start = now - 60.0
     try:
-        with open(path, "a+", encoding="utf-8") as f:
+        state_fd = _open_regular_no_symlink(path, os.O_RDWR | os.O_CREAT, 0o600)
+        with os.fdopen(state_fd, "r+", encoding="utf-8") as f:
             fcntl.flock(f.fileno(), fcntl.LOCK_EX)
             data = _read_json_state(f)
             calls = [float(ts) for ts in data.get("calls", []) if float(ts) >= window_start]

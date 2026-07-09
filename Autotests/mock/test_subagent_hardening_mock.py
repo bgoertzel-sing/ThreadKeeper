@@ -215,6 +215,44 @@ def test_llm_concurrency_state_read_is_bounded(tmp_path, monkeypatch):
     subagent._subagent_llm_concurrency_release("unit-concurrency-huge", token)
 
 
+def test_llm_guard_state_rejects_symlink_paths(tmp_path, monkeypatch):
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlink unavailable")
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr(subagent, "_SUBAGENT_LLM_CALLS_PER_MINUTE", 1)
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_CONCURRENT_LLM_CALLS", 1)
+    monkeypatch.setattr(subagent, "_SUBAGENT_LLM_RETRIES", 0)
+    run_dir = Path(subagent.SUBAGENT_RUN_DIR)
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    outside_rate = tmp_path / "outside-rate.json"
+    outside_rate.write_text('{"calls": []}', encoding="utf-8")
+    rate_state = Path(subagent._rate_limit_state_path("unit-rate-link"))
+    os.symlink(outside_rate, rate_state)
+
+    calls = {"n": 0}
+
+    def counted():
+        calls["n"] += 1
+        return '(emit "ok")'
+
+    result = subagent._call_with_retries(counted, "unit-rate-link")
+    assert result.startswith("(subagent LLM call rate-limited via unit-rate-link")
+    assert calls["n"] == 0
+    assert outside_rate.read_text(encoding="utf-8") == '{"calls": []}'
+
+    outside_inflight = tmp_path / "outside-inflight.json"
+    outside_inflight.write_text('{"inflight": []}', encoding="utf-8")
+    inflight_state = Path(subagent._concurrency_state_path("unit-concurrency-link"))
+    os.symlink(outside_inflight, inflight_state)
+
+    ok, reason, token = subagent._subagent_llm_concurrency_acquire("unit-concurrency-link")
+    assert not ok
+    assert token == ""
+    assert "regular non-symlink" in reason
+    assert outside_inflight.read_text(encoding="utf-8") == '{"inflight": []}'
+
+
 def test_llm_concurrency_limit_blocks_when_endpoint_slots_are_full(tmp_path, monkeypatch):
     monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
     monkeypatch.setattr(subagent, "_SUBAGENT_MAX_CONCURRENT_LLM_CALLS", 1)
