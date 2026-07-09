@@ -727,6 +727,64 @@ def test_run_index_entries_are_hash_chained(tmp_path, monkeypatch):
     assert entries[1]["entry_sha256"] == subagent._index_entry_hash(entries[1])
 
 
+def test_append_run_index_rejects_symlink_index_path(tmp_path, monkeypatch):
+    if not hasattr(os, "symlink"):
+        return
+    run_dir = tmp_path / "runs"
+    run_dir.mkdir()
+    target = tmp_path / "outside-index.jsonl"
+    target.write_text("", encoding="utf-8")
+    (run_dir / "index.jsonl").symlink_to(target)
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(run_dir))
+
+    record = {"run_id": "one", "status": "ok", "transcript_path": "one.json", "transcript_sha256": "a" * 64}
+
+    try:
+        subagent._append_run_index(record)
+    except ValueError as e:
+        assert "regular non-symlink" in str(e)
+    else:
+        raise AssertionError("symlink run index should fail closed")
+    assert target.read_text(encoding="utf-8") == ""
+
+
+def test_append_run_index_rejects_symlink_index_lock_path(tmp_path, monkeypatch):
+    if not hasattr(os, "symlink"):
+        return
+    run_dir = tmp_path / "runs"
+    run_dir.mkdir()
+    target = tmp_path / "outside-lock"
+    target.write_text("", encoding="utf-8")
+    (run_dir / "index.jsonl.lock").symlink_to(target)
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(run_dir))
+
+    record = {"run_id": "one", "status": "ok", "transcript_path": "one.json", "transcript_sha256": "a" * 64}
+
+    try:
+        subagent._append_run_index(record)
+    except ValueError as e:
+        assert "regular non-symlink" in str(e)
+    else:
+        raise AssertionError("symlink run-index lock should fail closed")
+    assert target.read_text(encoding="utf-8") == ""
+
+
+def test_verify_subagent_run_index_rejects_symlink_index_path(tmp_path, monkeypatch):
+    if not hasattr(os, "symlink"):
+        return
+    run_dir = tmp_path / "runs"
+    run_dir.mkdir()
+    target = run_dir / "real-index.jsonl"
+    target.write_text("{}\n", encoding="utf-8")
+    (run_dir / "index.jsonl").symlink_to(target)
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(run_dir))
+
+    audit = json.loads(subagent.verify_subagent_run_index())
+
+    assert audit["status"] == "index_audit_error"
+    assert "regular non-symlink" in audit["summary"]
+
+
 def test_verify_subagent_run_index_checks_chain_and_transcripts(tmp_path, monkeypatch):
     monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
     runs = Path(subagent.SUBAGENT_RUN_DIR)

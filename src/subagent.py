@@ -644,6 +644,14 @@ def _tail_index_lines(index_path, desired_count=1, max_bytes=1048576):
 
 def _last_index_entry_hash(index_path):
     try:
+        st = os.lstat(index_path)
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+            return ""
+    except FileNotFoundError:
+        return ""
+    except Exception:
+        return ""
+    try:
         lines, _truncated = _tail_index_lines(index_path, desired_count=1)
     except FileNotFoundError:
         return ""
@@ -720,10 +728,14 @@ def _append_run_index(record):
     os.makedirs(SUBAGENT_RUN_DIR, exist_ok=True)
     index_path = os.path.join(SUBAGENT_RUN_DIR, "index.jsonl")
     lock_path = f"{index_path}.lock"
-    with open(lock_path, "a+", encoding="utf-8") as lock:
+    _reject_nonregular_existing_path(index_path, "subagent run index")
+    _reject_nonregular_existing_path(lock_path, "subagent run index lock")
+    lock_fd = _open_regular_no_symlink(lock_path, os.O_RDWR | os.O_CREAT)
+    with os.fdopen(lock_fd, "a+", encoding="utf-8") as lock:
         if fcntl is not None:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         try:
+            _reject_nonregular_existing_path(index_path, "subagent run index")
             entry = {
                 "run_id": record.get("run_id", ""),
                 "persona_key": record.get("persona_key", ""),
@@ -736,7 +748,10 @@ def _append_run_index(record):
             }
             entry["entry_sha256"] = _index_entry_hash(entry)
             line = json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n"
-            with open(index_path, "a", encoding="utf-8") as f:
+            index_fd = _open_regular_no_symlink(
+                index_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+            )
+            with os.fdopen(index_fd, "a", encoding="utf-8") as f:
                 f.write(line)
                 f.flush()
                 os.fsync(f.fileno())
@@ -752,6 +767,31 @@ def _append_run_index(record):
     return index_path
 
 
+def _open_regular_no_symlink(path, flags, mode=0o600):
+    """Open a local audit/control file without following symlinks."""
+    open_flags = flags
+    if hasattr(os, "O_NOFOLLOW"):
+        open_flags |= os.O_NOFOLLOW
+    fd = os.open(path, open_flags, mode)
+    try:
+        st = os.fstat(fd)
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+            raise ValueError("path is not a regular non-symlink file")
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _reject_nonregular_existing_path(path, label):
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+        raise ValueError(f"{label} must be a regular non-symlink file")
+
+
 def verify_subagent_run_index(index_path=None):
     """Verify the local subagent run-index hash chain and transcript hashes.
 
@@ -764,9 +804,10 @@ def verify_subagent_run_index(index_path=None):
     """
     try:
         run_dir = os.path.realpath(os.path.abspath(SUBAGENT_RUN_DIR))
-        path = index_path or os.path.join(run_dir, "index.jsonl")
-        path = os.path.realpath(os.path.abspath(str(path)))
-        if os.path.commonpath([run_dir, path]) != run_dir:
+        raw_path = index_path or os.path.join(run_dir, "index.jsonl")
+        path = os.path.abspath(str(raw_path))
+        resolved_path = os.path.realpath(path)
+        if os.path.commonpath([run_dir, resolved_path]) != run_dir:
             raise ValueError(f"subagent run index path escapes run dir ({run_dir}): {index_path}")
         if os.path.basename(path) != "index.jsonl":
             raise ValueError("subagent run index path must be index.jsonl")
@@ -778,6 +819,12 @@ def verify_subagent_run_index(index_path=None):
                 "entries_checked": 0,
                 "next_action": "no finished subagent records to audit yet",
             }, ensure_ascii=False, sort_keys=True)
+        try:
+            st = os.lstat(path)
+        except OSError as e:
+            raise ValueError(f"subagent run index stat failed: {type(e).__name__}")
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+            raise ValueError("subagent run index must be a regular non-symlink file")
         if _SUBAGENT_MAX_INDEX_AUDIT_BYTES:
             try:
                 index_size = os.path.getsize(path)
