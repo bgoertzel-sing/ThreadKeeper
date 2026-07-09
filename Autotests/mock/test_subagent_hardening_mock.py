@@ -577,6 +577,28 @@ def test_persona_config_read_is_bounded_without_path_leak(tmp_path, monkeypatch)
         assert str(tmp_path) not in msg
 
 
+def test_persona_config_rejects_symlink_before_read(tmp_path, monkeypatch):
+    persona_dir = tmp_path / "personas"
+    persona_dir.mkdir()
+    target = tmp_path / "unit-target.json"
+    target.write_text(json.dumps({
+        "persona_file": "unit.txt",
+        "provider": "ollama",
+        "model": "unit-model",
+        "api_key_env": "UNIT_API_KEY",
+        "node_role": "local",
+        "endpoint_kind": "ollama_native",
+    }))
+    (persona_dir / "unit.json").symlink_to(target)
+    monkeypatch.setattr(subagent, "PERSONA_DIR", str(persona_dir))
+
+    try:
+        subagent.load_persona_config("unit")
+        assert False, "symlink persona config should fail closed"
+    except ValueError as e:
+        assert "regular non-symlink" in str(e)
+
+
 def test_persona_prompt_read_is_bounded_without_path_leak(tmp_path, monkeypatch):
     persona_dir = tmp_path / "personas"
     persona_dir.mkdir()
@@ -623,6 +645,21 @@ def test_persona_prompt_rejects_path_escape(tmp_path, monkeypatch):
             assert False, f"persona prompt escape should be rejected: {path}"
         except ValueError as e:
             assert "escapes persona directory" in str(e)
+
+
+def test_persona_prompt_rejects_symlink_before_read(tmp_path, monkeypatch):
+    persona_dir = tmp_path / "personas"
+    persona_dir.mkdir()
+    target = persona_dir / "unit-target.txt"
+    target.write_text("trusted prompt")
+    (persona_dir / "unit.txt").symlink_to(target)
+    monkeypatch.setattr(subagent, "PERSONA_DIR", str(persona_dir))
+
+    try:
+        subagent.load_persona_prompt("unit.txt", "unit")
+        assert False, "symlink persona prompt should fail closed"
+    except ValueError as e:
+        assert "regular non-symlink" in str(e)
 
 
 def test_committed_persona_examples_use_explicit_metadata_and_valid_prompt_pin(monkeypatch):

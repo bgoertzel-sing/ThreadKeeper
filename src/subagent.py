@@ -2318,12 +2318,23 @@ def load_persona_config(persona_key):
     fields documented in docs/subagent-design.md §4.4.1."""
     persona_key = _validate_persona_key(persona_key)
     path = os.path.join(PERSONA_DIR, f"{persona_key}.json")
-    if not os.path.isfile(path):
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
         raise FileNotFoundError(
             f"persona config '{persona_key}.json' not found"
         )
+    except OSError as e:
+        raise ValueError(
+            f"persona config '{persona_key}.json' stat failed: {type(e).__name__}"
+        )
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+        raise ValueError(
+            f"persona config '{persona_key}.json' must be a regular non-symlink file"
+        )
     try:
-        with open(path, "rb") as f:
+        fd = _open_regular_no_symlink(path, os.O_RDONLY)
+        with os.fdopen(fd, "rb") as f:
             raw = f.read(_SUBAGENT_MAX_PERSONA_CONFIG_BYTES + 1)
     except OSError as e:
         raise ValueError(
@@ -2380,7 +2391,8 @@ def _resolve_persona_prompt_path(persona_file, persona_key):
         raise ValueError(f"persona prompt for key '{persona_key}' is empty")
     base = os.path.realpath(PERSONA_DIR)
     candidate = rel if os.path.isabs(rel) else os.path.join(base, rel)
-    path = os.path.realpath(candidate)
+    candidate_abs = os.path.abspath(candidate)
+    path = os.path.realpath(candidate_abs)
     try:
         common = os.path.commonpath([base, path])
     except ValueError:
@@ -2389,7 +2401,19 @@ def _resolve_persona_prompt_path(persona_file, persona_key):
         raise ValueError(
             f"persona prompt '{persona_file}' for key '{persona_key}' escapes persona directory"
         )
-    return path
+    try:
+        st = os.lstat(candidate_abs)
+    except FileNotFoundError:
+        return candidate_abs
+    except OSError as e:
+        raise ValueError(
+            f"persona prompt '{persona_file}' for key '{persona_key}' stat failed: {type(e).__name__}"
+        )
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+        raise ValueError(
+            f"persona prompt '{persona_file}' for key '{persona_key}' must be a regular non-symlink file"
+        )
+    return candidate_abs
 
 
 def load_persona_prompt(persona_file, persona_key, expected_sha256=""):
@@ -2414,7 +2438,8 @@ def load_persona_prompt(persona_file, persona_key, expected_sha256=""):
             read_limit = _SUBAGENT_MAX_PERSONA_PROMPT_BYTES + 1
         else:
             read_limit = -1
-        with open(path, "rb") as f:
+        fd = _open_regular_no_symlink(path, os.O_RDONLY)
+        with os.fdopen(fd, "rb") as f:
             raw = f.read(read_limit)
     except ValueError:
         raise
