@@ -10,6 +10,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
@@ -132,6 +134,35 @@ def test_env_float_knobs_reject_non_finite_values(monkeypatch):
 
     monkeypatch.undo()
     importlib.reload(subagent)
+
+
+def test_worker_usage_log_appends_regular_file(monkeypatch, tmp_path):
+    usage_log = tmp_path / "memory" / "usage.jsonl"
+    monkeypatch.setattr(subagent, "_USAGE_LOG_PATH", str(usage_log))
+
+    subagent._log_worker_usage("unit-worker", 3, 5)
+
+    records = [json.loads(line) for line in usage_log.read_text(encoding="utf-8").splitlines()]
+    assert len(records) == 1
+    assert records[0]["model"] == "unit-worker"
+    assert records[0]["input_tokens"] == 3
+    assert records[0]["output_tokens"] == 5
+
+
+def test_worker_usage_log_rejects_symlink_target(monkeypatch, tmp_path):
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlink unavailable on this platform")
+    usage_log = tmp_path / "memory" / "usage.jsonl"
+    usage_log.parent.mkdir()
+    outside = tmp_path / "outside-usage.jsonl"
+    outside.write_text("", encoding="utf-8")
+    usage_log.symlink_to(outside)
+    monkeypatch.setattr(subagent, "_USAGE_LOG_PATH", str(usage_log))
+
+    subagent._log_worker_usage("unit-worker", 7, 11)
+
+    assert outside.read_text(encoding="utf-8") == ""
+    assert usage_log.is_symlink()
 
 
 def test_llm_retry_backoff_returns_success_after_transient_failure(monkeypatch):

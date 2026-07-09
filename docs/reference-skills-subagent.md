@@ -89,8 +89,11 @@ transcripts cannot be redirected through local link tricks.
 
 `worker_token_usage` contains aggregated `input_tokens`, `output_tokens`, and
 `total_tokens` across all worker LLM calls in the dispatch, for cost
-accounting and audit. It is omitted from the structured return when no worker
-LLM calls were made (e.g., setup errors before the loop).
+accounting and audit. Worker calls are also appended to the shared
+`usage.jsonl` accounting log through a regular non-symlink open so a local
+pre-existing symlink cannot redirect usage writes outside the configured
+memory directory. It is omitted from the structured return when no worker LLM
+calls were made (e.g., setup errors before the loop).
 
 When `OMEGACLAW_SUBAGENT_QUEUE_ONLY=1`, dispatch performs setup/contract/tool
 validation and persists a durable task record under

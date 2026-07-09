@@ -74,12 +74,24 @@ _USAGE_LOG_PATH = os.path.join(
 
 
 def _log_worker_usage(model, in_tok, out_tok):
-    """Append a worker LLM call to usage.jsonl. Never raises."""
+    """Append a worker LLM call to usage.jsonl. Never raises.
+
+    The usage log is operator/accounting state shared with the parent loop and
+    dashboard. Treat it like other local audit files: append through the
+    regular non-symlink opener so a pre-existing local symlink cannot redirect
+    worker accounting writes outside the configured memory directory.
+    """
     try:
         rec = {"ts": time.time(), "model": model,
                "input_tokens": int(in_tok or 0), "output_tokens": int(out_tok or 0)}
-        with open(_USAGE_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec) + "\n")
+        parent = os.path.dirname(_USAGE_LOG_PATH)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        fd = _open_regular_no_symlink(_USAGE_LOG_PATH, os.O_WRONLY | os.O_CREAT | os.O_APPEND)
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False, sort_keys=True) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
     except Exception:
         pass
 
