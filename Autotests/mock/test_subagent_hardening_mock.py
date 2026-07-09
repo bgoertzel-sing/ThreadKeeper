@@ -1224,6 +1224,48 @@ def test_task_contract_patch_proposal_only_must_be_boolean_before_llm(tmp_path, 
     assert saved["status"] == "contract_invalid"
 
 
+def test_inline_task_contract_rejects_scalar_string_list_fields_before_llm(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")),
+    )
+
+    result = subagent.dispatch(json.dumps({
+        "objective": "bad allowed path shape",
+        "allowed_paths": "safe",
+    }), "write-file", "unit", max_turns=1)
+    payload = json.loads(result)
+
+    assert payload["status"] == "error"
+    assert "allowed_paths must be a list of strings" in payload["summary"]
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["status"] == "contract_invalid"
+    assert saved["task_contract"]["allowed_paths"] == "safe"
+
+
+def test_inline_task_contract_rejects_non_string_list_items_before_llm(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")),
+    )
+
+    result = subagent.dispatch(json.dumps({
+        "objective": "bad done criteria shape",
+        "done_criteria": ["file exists", 123],
+    }), "write-file", "unit", max_turns=1)
+    payload = json.loads(result)
+
+    assert payload["status"] == "error"
+    assert "done_criteria entries must be strings" in payload["summary"]
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["status"] == "contract_invalid"
+    assert saved["task_contract"]["done_criteria"] == ["file exists", 123]
+
+
 def test_task_contract_requires_adjudication_marks_candidate_not_final(tmp_path, monkeypatch):
     _write_unit_persona(tmp_path, monkeypatch)
     contract_goal = json.dumps({

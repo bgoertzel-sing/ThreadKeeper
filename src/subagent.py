@@ -2713,17 +2713,26 @@ def _validate_task_contract(contract):
 
 
 def _contract_string_list(value):
+    """Normalize optional string-list contract fields without type coercion.
+
+    Earlier versions accepted scalar/non-string values by stringifying them,
+    which made malformed inline/persona contracts look valid before the strict
+    validator ran. Keep the ergonomic empty-value-to-empty-list behavior, but
+    otherwise preserve bad shapes so _validate_task_contract can fail closed
+    before any worker call.
+    """
     if value is None or value == "":
         return []
-    if isinstance(value, str):
-        value = [value]
     if not isinstance(value, (list, tuple)):
-        value = [str(value)]
+        return value
     out = []
     for item in value:
-        text = str(item or "").strip()
-        if text and "\x00" not in text:
-            out.append(text)
+        if isinstance(item, str):
+            text = item.strip()
+            if text:
+                out.append(text)
+        else:
+            out.append(item)
     return out
 
 

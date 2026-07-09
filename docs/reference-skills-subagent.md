@@ -48,8 +48,10 @@ and returns a single-string digest via its own `emit` instruction.
   also be a JSON task contract with `objective`, `allowed_paths`,
   `forbidden_actions`, `done_criteria`, optional `max_tool_calls`, and
   optional boolean `patch_proposal_only`, and optional boolean
-  `requires_adjudication`;
-  contract fields are bounded and validated before any worker LLM call.
+  `requires_adjudication`. The string-list fields (`allowed_paths`,
+  `forbidden_actions`, `done_criteria`) must be JSON arrays of strings;
+  scalar or non-string entries fail closed before any worker LLM call.
+  Contract fields are bounded and validated before any worker LLM call.
 - `tools_csv` — comma-separated list of tool names the subagent may
   call. Must be a subset of the v1 registered tools (see
   [§4.5](./subagent-design.md#45-tool-registry-for-subagents-v1)).
