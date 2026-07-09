@@ -82,7 +82,9 @@ The read-only helper `subagent.verify_subagent_run_index()` verifies that hash
 chain and any recorded local transcript SHA-256s without repairing files,
 draining queues, or calling a worker LLM. Finished-run appends and read-only
 audits reject symlink/non-regular `index.jsonl` and `index.jsonl.lock` paths,
-so the compact audit log cannot be redirected through local link tricks.
+and index rotation rewrites through random local temp files rather than
+predictable `index.jsonl.tmp.<pid>` names, so the compact audit log cannot be
+redirected through local link tricks.
 
 `worker_token_usage` contains aggregated `input_tokens`, `output_tokens`, and
 `total_tokens` across all worker LLM calls in the dispatch, for cost

@@ -623,18 +623,25 @@ def _tail_index_lines(index_path, desired_count=1, max_bytes=1048576):
     desired_count = max(1, int(desired_count or 1))
     max_bytes = max(1024, int(max_bytes or 1024))
     try:
-        size = os.path.getsize(index_path)
+        st = os.lstat(index_path)
     except FileNotFoundError:
         return [], False
     except Exception:
         return [], False
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+        return [], False
+    size = st.st_size
     if size <= 0:
         return [], False
 
     remaining = min(size, max_bytes)
     offset = size
     buffer = b""
-    with open(index_path, "rb") as f:
+    try:
+        fd = _open_regular_no_symlink(index_path, os.O_RDONLY)
+    except Exception:
+        return [], False
+    with os.fdopen(fd, "rb") as f:
         while remaining > 0:
             chunk_size = min(65536, remaining)
             offset -= chunk_size
@@ -705,14 +712,26 @@ def _rotate_run_index_if_needed(index_path, lock):
             entry["entry_sha256"] = new_hash
             rebuilt.append(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
             prev_hash = new_hash
-        # Atomic rewrite via temp file + os.replace.
-        tmp_path = f"{index_path}.tmp.{os.getpid()}"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            for line in rebuilt:
-                f.write(line)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, index_path)
+        # Atomic rewrite via random mkstemp + os.replace. Avoid predictable
+        # temp names such as ``index.jsonl.tmp.<pid>`` so a pre-created local
+        # symlink cannot redirect the rewrite outside SUBAGENT_RUN_DIR.
+        parent = os.path.dirname(index_path) or "."
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=f".{os.path.basename(index_path)}.", suffix=".tmp", dir=parent
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                for line in rebuilt:
+                    f.write(line)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, index_path)
+        finally:
+            try:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+            except Exception:
+                pass
     except Exception:
         # Rotation failure should not crash the append path; the index
         # remains append-only and unbounded, which is the safe default.

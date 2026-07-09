@@ -3687,6 +3687,47 @@ def test_tail_index_lines_reads_recent_lines_with_bounded_tail(tmp_path):
     assert [entry["run_id"] for entry in entries] == ["recent-1", "recent-2"]
 
 
+def test_tail_index_lines_rejects_symlink_index(tmp_path):
+    target = tmp_path / "outside-index.jsonl"
+    target.write_text(json.dumps({"run_id": "outside"}) + "\n", encoding="utf-8")
+    link = tmp_path / "index.jsonl"
+    link.symlink_to(target)
+
+    lines, truncated = subagent._tail_index_lines(str(link), desired_count=1, max_bytes=256)
+
+    assert lines == []
+    assert truncated is False
+
+
+def test_run_index_rotation_ignores_predictable_temp_symlink(tmp_path, monkeypatch):
+    """Rotation rewrites through a random temp file, not index.jsonl.tmp.<pid>."""
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_INDEX_ENTRIES", 1)
+    runs = Path(subagent.SUBAGENT_RUN_DIR)
+    runs.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("do-not-touch", encoding="utf-8")
+    predictable_tmp = runs / f"index.jsonl.tmp.{os.getpid()}"
+    predictable_tmp.symlink_to(outside)
+
+    for i in range(2):
+        subagent._append_run_index({
+            "run_id": f"run-{i}",
+            "status": "ok",
+            "transcript_path": f"run-{i}.json",
+            "transcript_sha256": "a" * 64,
+        })
+
+    assert outside.read_text(encoding="utf-8") == "do-not-touch"
+    assert predictable_tmp.is_symlink()
+    entries = [
+        json.loads(line)
+        for line in (runs / "index.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert [entry["run_id"] for entry in entries] == ["run-1"]
+
+
 def test_append_run_index_hash_chain_uses_bounded_tail_for_large_index(tmp_path, monkeypatch):
     monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
     monkeypatch.setattr(subagent, "_SUBAGENT_MAX_INDEX_ENTRIES", 0)
