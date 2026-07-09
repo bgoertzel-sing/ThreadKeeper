@@ -551,6 +551,7 @@ def _json_bytes(data):
 
 
 def _json_atomic_write(path, data):
+    _reject_nonregular_existing_path(path, "JSON audit target")
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
@@ -578,6 +579,7 @@ def _write_transcript_integrity_sidecar(path, digest):
     if not path or not digest:
         return ""
     sidecar = f"{path}.sha256"
+    _reject_nonregular_existing_path(sidecar, "transcript integrity sidecar")
     parent = os.path.dirname(sidecar)
     if parent:
         os.makedirs(parent, exist_ok=True)

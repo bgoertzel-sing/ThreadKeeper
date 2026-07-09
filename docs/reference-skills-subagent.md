@@ -82,7 +82,9 @@ The read-only helper `subagent.verify_subagent_run_index()` verifies that hash
 chain and any recorded local transcript SHA-256s without repairing files,
 draining queues, or calling a worker LLM. Finished-run appends and read-only
 audits reject symlink/non-regular `index.jsonl` and `index.jsonl.lock` paths;
-transcript JSON reads/hashes also use regular non-symlink opens. Index rotation
+transcript JSON reads/hashes also use regular non-symlink opens, and atomic
+JSON audit writes plus transcript checksum-sidecar writes now fail closed if the
+pre-existing destination is a symlink or other non-regular file. Index rotation
 rewrites through random local temp files rather than predictable
 `index.jsonl.tmp.<pid>` names, so compact audit records and referenced local
 transcripts cannot be redirected through local link tricks.

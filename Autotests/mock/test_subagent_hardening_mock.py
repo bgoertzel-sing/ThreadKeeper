@@ -4255,3 +4255,41 @@ def test_read_integrity_sidecar_digest_rejects_symlink_sidecar(tmp_path):
         assert str(tmp_path) not in str(exc)
     else:
         raise AssertionError("expected symlink integrity sidecar to be rejected")
+
+
+def test_json_atomic_write_rejects_existing_symlink_target(tmp_path):
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlink unavailable on this platform")
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}", encoding="utf-8")
+    target = tmp_path / "record.json"
+    target.symlink_to(outside)
+
+    try:
+        subagent._json_atomic_write(str(target), {"ok": True})
+    except ValueError as exc:
+        assert "regular non-symlink" in str(exc)
+        assert str(tmp_path) not in str(exc)
+    else:
+        raise AssertionError("expected symlink JSON audit target to be rejected")
+    assert outside.read_text(encoding="utf-8") == "{}"
+
+
+def test_write_transcript_integrity_sidecar_rejects_existing_symlink(tmp_path):
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlink unavailable on this platform")
+    transcript = tmp_path / "run.json"
+    transcript.write_text("{}", encoding="utf-8")
+    outside = tmp_path / "outside.sha256"
+    outside.write_text("old\n", encoding="utf-8")
+    sidecar = tmp_path / "run.json.sha256"
+    sidecar.symlink_to(outside)
+
+    try:
+        subagent._write_transcript_integrity_sidecar(str(transcript), "a" * 64)
+    except ValueError as exc:
+        assert "regular non-symlink" in str(exc)
+        assert str(tmp_path) not in str(exc)
+    else:
+        raise AssertionError("expected symlink transcript integrity sidecar to be rejected")
+    assert outside.read_text(encoding="utf-8") == "old\n"
