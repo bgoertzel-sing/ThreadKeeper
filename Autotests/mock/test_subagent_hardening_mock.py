@@ -4040,3 +4040,22 @@ def test_read_integrity_sidecar_digest_rejects_bad_digest_without_path_leak(tmp_
         assert str(tmp_path) not in str(exc)
     else:
         raise AssertionError("expected malformed integrity sidecar to be rejected")
+
+
+def test_read_integrity_sidecar_digest_rejects_symlink_sidecar(tmp_path):
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlink unavailable on this platform")
+    path = tmp_path / "task.json"
+    path.write_text("{}", encoding="utf-8")
+    target = tmp_path / "external.sha256"
+    target.write_text("a" * 64 + "  task.json\n", encoding="utf-8")
+    sidecar = tmp_path / "task.json.sha256"
+    sidecar.symlink_to(target)
+
+    try:
+        subagent._read_integrity_sidecar_digest(str(path))
+    except ValueError as exc:
+        assert "regular non-symlink" in str(exc)
+        assert str(tmp_path) not in str(exc)
+    else:
+        raise AssertionError("expected symlink integrity sidecar to be rejected")

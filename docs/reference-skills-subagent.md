@@ -100,7 +100,7 @@ tasks, dispatch fails closed with transcript status `queue_backpressure` before
 any worker call.
 The Python helper `subagent.run_queued_dispatch(queue_path)` is the current
 single-task worker primitive: it atomically claims one queued regular non-symlink task, verifies the
-required queue-task `.sha256` sidecar, revalidates the task shape and task
+required regular non-symlink queue-task `.sha256` sidecar, revalidates the task shape and task
 contract, re-injects that contract into the synchronous dispatch goal while
 queue-only mode is suppressed, writes a compact `*.result.json`, and leaves the
 task as `*.done` plus a refreshed `.sha256` sidecar for audit instead of
@@ -251,7 +251,7 @@ accidentally.
 | `OMEGACLAW_SUBAGENT_RUN_DIR` | `memory/subagent-runs` | Directory for persistent JSON transcript/run records, `index.jsonl`, checksum sidecars, worker rate/concurrency state, and optional queued dispatch tasks. |
 | `OMEGACLAW_SUBAGENT_MAX_INDEX_AUDIT_BYTES` | `1048576` | Maximum `index.jsonl` bytes scanned by `verify_subagent_run_index()`; returns `index_audit_too_large` before reading oversized indexes. Finished-run appends also read only a bounded tail of `index.jsonl` when linking/rotating the hash chain, so append cost does not scale with an intentionally unrotated index. `0` disables only the audit cap. |
 | `OMEGACLAW_SUBAGENT_MAX_TRANSCRIPT_AUDIT_BYTES` | `1048576` | Maximum bytes read from each transcript referenced by `verify_subagent_run_index()` while checking transcript SHA-256s; oversized transcripts are reported as `transcript_too_large`, and transcript hashes are streamed in fixed-size chunks instead of using one unbounded `read()`. `0` disables only the cap. |
-| `OMEGACLAW_SUBAGENT_MAX_SHA256_SIDECAR_BYTES` | `4096` | Maximum bytes read from required local `.sha256` sidecars before parsing the digest; oversized or malformed sidecars fail closed without echoing local paths. |
+| `OMEGACLAW_SUBAGENT_MAX_SHA256_SIDECAR_BYTES` | `4096` | Maximum bytes read from required local regular non-symlink `.sha256` sidecars before parsing the digest; symlink, oversized, or malformed sidecars fail closed without echoing local paths. |
 | `OMEGACLAW_SUBAGENT_MAX_ESCALATION_POLICY_BYTES` | `1048576` | Maximum bytes read from pinned `escalation.metta` before SHA-256 hashing during cloud-delegation integrity checks; oversized policies deny escalation before worker LLM calls, and integrity errors avoid echoing local paths. `0` disables this read cap. |
 | `OMEGACLAW_SUBAGENT_MAX_PERSONA_CONFIG_BYTES` | `65536` | Maximum bytes read from one `<persona_key>.json` config before JSON parsing; oversized configs fail closed before worker LLM calls and avoid echoing local paths. |
 | `OMEGACLAW_SUBAGENT_MAX_PERSONA_PROMPT_BYTES` | `262144` | Maximum bytes read from one persona prompt before optional SHA-256 hashing and prompt construction; oversized prompts fail closed before worker LLM calls and avoid echoing local paths. `0` disables this read cap. |
@@ -315,7 +315,7 @@ end-to-end walkthrough.
 | Queue-only mode is at capacity | Structured JSON `status=error`; `summary` contains `queue backpressure`; transcript status `queue_backpressure`; no worker LLM call is attempted. |
 | Queued worker sees an escaping task path | `run_queued_dispatch(...)` returns JSON `status=queue_worker_error`; no worker LLM call is attempted. |
 | Queued worker sees a missing/mismatched queue-task checksum sidecar after claiming a task | `run_queued_dispatch(...)` returns JSON `status=queue_worker_error`; claimed task is retained as `*.failed` with a fresh checksum sidecar when possible; no worker LLM call is attempted. |
-| Queued worker sees an oversized or malformed queue-task checksum sidecar | `run_queued_dispatch(...)` returns JSON `status=queue_worker_error`; the sidecar read is bounded by `OMEGACLAW_SUBAGENT_MAX_SHA256_SIDECAR_BYTES`; no worker LLM call is attempted. |
+| Queued worker sees a symlink, oversized, or malformed queue-task checksum sidecar | `run_queued_dispatch(...)` returns JSON `status=queue_worker_error`; the sidecar must be regular/non-symlink and reads are bounded by `OMEGACLAW_SUBAGENT_MAX_SHA256_SIDECAR_BYTES`; no worker LLM call is attempted. |
 | Queued worker sees bad queued JSON/shape after claiming a task | `run_queued_dispatch(...)` returns JSON `status=queue_worker_error`; claimed task is retained as `*.failed` with `*.failed.result.json`; no worker LLM call is attempted for validation failures. |
 | Async worker loop sees malformed explicit bounds or an invalid stop-file path/config value | `run_queued_worker_loop(...)` returns JSON `status=worker_config_invalid`; no worker lock is acquired and no queue record is claimed. |
 | Async worker loop sees an existing worker lock | `run_queued_worker_loop(...)` returns JSON `status=worker_already_running` plus any compact `worker_lock` metadata readable from `.async-worker.lock`; no queue record is claimed. |

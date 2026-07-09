@@ -577,10 +577,16 @@ def _read_integrity_sidecar_digest(path):
     """Read and validate a required ``<path>.sha256`` audit sidecar."""
     sidecar = f"{path}.sha256"
     try:
-        with open(sidecar, "rb") as f:
-            payload = f.read(_SUBAGENT_MAX_SHA256_SIDECAR_BYTES + 1)
+        st = os.lstat(sidecar)
     except FileNotFoundError:
         raise ValueError("missing integrity sidecar")
+    except OSError:
+        raise ValueError("integrity sidecar stat failed")
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+        raise ValueError("integrity sidecar must be a regular non-symlink file")
+    fd = _open_regular_no_symlink(sidecar, os.O_RDONLY)
+    with os.fdopen(fd, "rb") as f:
+        payload = f.read(_SUBAGENT_MAX_SHA256_SIDECAR_BYTES + 1)
     if len(payload) > _SUBAGENT_MAX_SHA256_SIDECAR_BYTES:
         raise ValueError(
             "integrity sidecar exceeds "
