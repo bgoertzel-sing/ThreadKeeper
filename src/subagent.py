@@ -3468,6 +3468,15 @@ def _validate_tool_args(name, args):
         return "path argument must not be empty"
     if name in ("read-file", "write-file", "append-file") and len(str(args[0])) > _SUBAGENT_MAX_PATH_ARG_CHARS:
         return f"path argument exceeds {_SUBAGENT_MAX_PATH_ARG_CHARS} characters"
+    if name in ("read-file", "write-file", "append-file"):
+        raw_path = str(args[0])
+        if os.path.isabs(raw_path):
+            return "path argument must be relative to the subagent workspace"
+        raw_parts = raw_path.split(os.sep)
+        normalized = os.path.normpath(raw_path)
+        normalized_parts = normalized.split(os.sep)
+        if os.pardir in raw_parts or normalized == os.pardir or os.pardir in normalized_parts:
+            return "path argument must not contain parent-directory traversal"
     if name in ("search", "tavily-search", "technical-analysis") and not str(args[0]).strip():
         return "query argument must not be empty or whitespace-only"
     if name == "shell" and not str(args[0]).strip():

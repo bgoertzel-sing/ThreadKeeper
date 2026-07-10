@@ -4067,6 +4067,40 @@ def test_validate_tool_args_rejects_non_string_arguments():
         assert subagent._validate_tool_args(tool, args) == "arguments must be strings"
 
 
+def test_validate_tool_args_rejects_absolute_file_paths():
+    """Subagent file tools accept workspace-relative paths only, so worker
+    calls cannot smuggle host absolute paths into resolver/audit paths."""
+    assert (
+        subagent._validate_tool_args("read-file", ["/tmp/secret.txt"])
+        == "path argument must be relative to the subagent workspace"
+    )
+    assert (
+        subagent._validate_tool_args("write-file", ["/tmp/out.txt", "x"])
+        == "path argument must be relative to the subagent workspace"
+    )
+    assert (
+        subagent._validate_tool_args("append-file", ["/tmp/out.txt", "x"])
+        == "path argument must be relative to the subagent workspace"
+    )
+
+
+def test_validate_tool_args_rejects_parent_directory_traversal():
+    """Traversal attempts are rejected at argument validation before any
+    workspace path resolution or tool execution."""
+    assert (
+        subagent._validate_tool_args("read-file", ["../secret.txt"])
+        == "path argument must not contain parent-directory traversal"
+    )
+    assert (
+        subagent._validate_tool_args("write-file", ["safe/../../secret.txt", "x"])
+        == "path argument must not contain parent-directory traversal"
+    )
+    assert (
+        subagent._validate_tool_args("append-file", ["safe/../out.txt", "x"])
+        == "path argument must not contain parent-directory traversal"
+    )
+
+
 # ------------------------------------------------------------------
 # Search/tavily-search/technical-analysis empty query validation
 # ------------------------------------------------------------------

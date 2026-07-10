@@ -91,6 +91,9 @@ ancestor component is a symlink or other non-regular local filesystem object. Wo
 helper, and `append-file` uses that already-open file descriptor for size checks
 before reading existing content, closing TOCTOU symlink-swap gaps between
 `realpath` containment resolution, size inspection, and the actual file read.
+Subagent file-tool arguments are now accepted only as workspace-relative paths
+without parent-directory traversal (`..`); absolute host paths fail closed during
+argument validation before any file-tool resolver/audit path is touched.
 Workspace `write-file` / `append-file` parents are revalidated as real
 non-symlink directories under the workspace immediately before lock/temp-file
 creation, so a local parent-directory swap
