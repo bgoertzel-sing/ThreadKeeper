@@ -382,6 +382,24 @@ def test_append_file_uses_atomic_replace_inside_workspace(tmp_path, monkeypatch)
     assert not list((tmp_path / "nested").glob(".*.tmp"))
 
 
+def test_append_file_size_check_uses_nofollow_fd_not_getsize(tmp_path, monkeypatch):
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_WORKSPACE", str(tmp_path))
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_FILE_SIZE_CHARS", 8)
+    target = tmp_path / "artifact.txt"
+    target.write_text("1234567", encoding="utf-8")
+
+    def forbidden_getsize(path):
+        raise AssertionError("append-file must not use path-based getsize")
+
+    monkeypatch.setattr(os.path, "getsize", forbidden_getsize)
+
+    result = subagent._tool_append_file("artifact.txt", "x")
+
+    assert "append-file error" in result
+    assert "would exceed max file size 8 chars" in result
+    assert target.read_text(encoding="utf-8") == "1234567"
+
+
 def test_workspace_file_lock_rejects_symlink_lock_files(tmp_path, monkeypatch):
     monkeypatch.setenv("OMEGACLAW_SUBAGENT_WORKSPACE", str(tmp_path))
     nested = tmp_path / "nested"

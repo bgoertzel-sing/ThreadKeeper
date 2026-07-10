@@ -3274,28 +3274,40 @@ def _tool_append_file(path, content):
         resolved = _resolve_workspace_path(path)
         content = str(content)
         cap_size = _SUBAGENT_MAX_FILE_SIZE_CHARS
-        if cap_size > 0:
-            existing_size = 0
-            if os.path.exists(resolved):
-                existing_size = os.path.getsize(resolved)
-            # Check existing file size before reading to avoid memory exhaustion
-            if existing_size > cap_size:
-                return (
-                    f"(append-file error: existing file size {existing_size} exceeds "
-                    f"max file size {cap_size} chars)"
-                )
-            if existing_size + len(content) + 1 > cap_size:
-                return (
-                    f"(append-file error: resulting file size "
-                    f"{existing_size + len(content) + 1} would exceed "
-                    f"max file size {cap_size} chars)"
-                )
         with _workspace_file_lock(resolved):
             existing = ""
+            existing_size = 0
             if os.path.exists(resolved):
                 fd = _open_workspace_file_read(resolved)
-                with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as f:
-                    existing = f.read()
+                try:
+                    existing_size = os.fstat(fd).st_size
+                    # Check existing file size before reading to avoid memory exhaustion.
+                    # Use the already-open no-follow fd so a local symlink swap between
+                    # path resolution and size inspection cannot redirect the append check.
+                    if cap_size > 0 and existing_size > cap_size:
+                        os.close(fd)
+                        return (
+                            f"(append-file error: existing file size {existing_size} exceeds "
+                            f"max file size {cap_size} chars)"
+                        )
+                    if cap_size > 0 and existing_size + len(content) + 1 > cap_size:
+                        os.close(fd)
+                        return (
+                            f"(append-file error: resulting file size "
+                            f"{existing_size + len(content) + 1} would exceed "
+                            f"max file size {cap_size} chars)"
+                        )
+                    with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as f:
+                        existing = f.read()
+                except Exception:
+                    with contextlib.suppress(Exception):
+                        os.close(fd)
+                    raise
+            elif cap_size > 0 and len(content) + 1 > cap_size:
+                return (
+                    f"(append-file error: resulting file size {len(content) + 1} "
+                    f"would exceed max file size {cap_size} chars)"
+                )
             new_content = existing
             if new_content and not new_content.endswith("\n"):
                 new_content += "\n"

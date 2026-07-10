@@ -88,10 +88,12 @@ JSON audit writes plus transcript checksum-sidecar writes now fail closed if the
 pre-existing destination or required parent directory is a symlink or other
 non-regular local filesystem object. Workspace
 `read-file` and `append-file` reads also open through a no-follow regular-file
-helper, closing a TOCTOU symlink-swap gap between `realpath` containment
-resolution and the actual file read. Workspace `write-file` / `append-file`
-parents are revalidated as real non-symlink directories under the workspace
-immediately before lock/temp-file creation, so a local parent-directory swap
+helper, and `append-file` uses that already-open file descriptor for size checks
+before reading existing content, closing TOCTOU symlink-swap gaps between
+`realpath` containment resolution, size inspection, and the actual file read.
+Workspace `write-file` / `append-file` parents are revalidated as real
+non-symlink directories under the workspace immediately before lock/temp-file
+creation, so a local parent-directory swap
 cannot redirect file-tool replacements outside the sandbox. Atomic JSON,
 transcript sidecar, index-rotation, and workspace file-tool replacements also
 fsync the replaced file and best-effort fsync the parent directory after
