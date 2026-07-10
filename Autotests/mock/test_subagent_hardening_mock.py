@@ -316,6 +316,37 @@ def test_llm_guard_state_rejects_symlink_paths(tmp_path, monkeypatch):
     assert outside_inflight.read_text(encoding="utf-8") == '{"inflight": []}'
 
 
+def test_llm_guard_state_rejects_symlink_run_dir_parent(tmp_path, monkeypatch):
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlink unavailable")
+    outside = tmp_path / "outside-runs"
+    outside.mkdir()
+    run_link = tmp_path / "runs-link"
+    os.symlink(outside, run_link)
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(run_link))
+    monkeypatch.setattr(subagent, "_SUBAGENT_LLM_CALLS_PER_MINUTE", 1)
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_CONCURRENT_LLM_CALLS", 0)
+    monkeypatch.setattr(subagent, "_SUBAGENT_LLM_RETRIES", 0)
+
+    calls = {"n": 0}
+
+    def counted():
+        calls["n"] += 1
+        return '(emit "ok")'
+
+    result = subagent._call_with_retries(counted, "unit-rate-parent-link")
+    assert result.startswith("(subagent LLM call rate-limited via unit-rate-parent-link")
+    assert calls["n"] == 0
+    assert not (outside / ".llm-rate-unit-rate-parent-link.json").exists()
+
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_CONCURRENT_LLM_CALLS", 1)
+    ok, reason, token = subagent._subagent_llm_concurrency_acquire("unit-concurrency-parent-link")
+    assert not ok
+    assert token == ""
+    assert "directory must be a real non-symlink directory" in reason
+    assert not (outside / ".llm-inflight-unit-concurrency-parent-link.json").exists()
+
+
 def test_llm_concurrency_limit_blocks_when_endpoint_slots_are_full(tmp_path, monkeypatch):
     monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
     monkeypatch.setattr(subagent, "_SUBAGENT_MAX_CONCURRENT_LLM_CALLS", 1)

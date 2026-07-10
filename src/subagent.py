@@ -2208,7 +2208,11 @@ def _subagent_llm_concurrency_acquire(label):
         return (False, "fcntl unavailable for atomic concurrency state", "")
     path = _concurrency_state_path(label)
     parent = os.path.dirname(path)
-    os.makedirs(parent, exist_ok=True)
+    try:
+        if parent:
+            _ensure_regular_directory(parent, "LLM concurrency state parent")
+    except Exception as e:
+        return (False, f"concurrency state error: {type(e).__name__}: {e}", "")
     token = f"{os.getpid()}-{uuid.uuid4().hex}"
     now = time.time()
     stale_before = now - 3600.0
@@ -2266,7 +2270,11 @@ def _subagent_llm_rate_limit_acquire(label):
         return (False, "fcntl unavailable for atomic rate-limit state")
     path = _rate_limit_state_path(label)
     parent = os.path.dirname(path)
-    os.makedirs(parent, exist_ok=True)
+    try:
+        if parent:
+            _ensure_regular_directory(parent, "LLM rate-limit state parent")
+    except Exception as e:
+        return (False, f"rate-limit state error: {type(e).__name__}: {e}")
     now = time.time()
     window_start = now - 60.0
     try:
