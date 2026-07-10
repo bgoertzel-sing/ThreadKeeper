@@ -3187,9 +3187,18 @@ def _parse_args(skill_name, rest):
         if content.startswith('"') and content.endswith('"'):
             content = content[1:-1]
         return [filename, content]
-    # Single-arg skills
-    if rest.startswith('"') and rest.endswith('"'):
-        return [rest[1:-1]]
+    # Single-arg skills. If the worker starts a quoted single argument,
+    # require that the closing quote ends the argument (modulo whitespace).
+    # Otherwise same-line payloads such as `(emit "done") (write-file ...)`
+    # are parsed as one successful emit instead of a malformed final response.
+    if rest.startswith('"'):
+        end = _find_close_quote(rest, 1)
+        if end == -1:
+            return [rest]
+        trailing = rest[end + 1:].strip()
+        if trailing:
+            return [rest[1:end], trailing]
+        return [rest[1:end]]
     return [rest]
 
 
