@@ -190,10 +190,14 @@ cat memory/usage.jsonl                         # per-call token log
 cat memory/escalations.jsonl                   # audit trail of escalation decisions
 ```
 
-Budget/accounting logs are treated as local audit files: existing symlinks or
-non-regular log paths are ignored/fail-closed, and usage-log reads are capped by
-`THREADKEEPER_MAX_BUDGET_LOG_BYTES` (default 1 MiB) so a malformed or huge local
-log cannot redirect writes or stall escalation checks.
+Budget/accounting inputs are treated as local audit/control files: existing
+symlinks or non-regular log paths are ignored/fail-closed, usage-log reads are
+capped by `THREADKEEPER_MAX_BUDGET_LOG_BYTES` (default 1 MiB), and the local
+budget config is read only from a regular non-symlink file capped by
+`THREADKEEPER_MAX_BUDGET_CONFIG_BYTES` (default 64 KiB). The MeTTa escalation
+policy loader also rejects symlink/non-regular policy paths before loading, so a
+malformed local config/log/policy cannot redirect reads/writes or stall
+escalation checks.
 
 ### What the dashboard numbers mean (honest scope)
 

@@ -14,6 +14,57 @@ if str(SRC) not in sys.path:
 import threadkeeper_budget as tb  # noqa: E402
 
 
+def test_budget_config_read_rejects_symlink_source(tmp_path):
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlink unavailable on this platform")
+    config_path = tmp_path / "threadkeeper.config.yaml"
+    outside = tmp_path / "outside-config.yaml"
+    outside.write_text(
+        "budget:\n  thread_token_ceiling: 7\n  min_local_iterations_before_escalation: 0\n",
+        encoding="utf-8",
+    )
+    config_path.symlink_to(outside)
+
+    tracker = tb.BudgetTracker(
+        config_path=str(config_path),
+        usage_log=str(tmp_path / "memory" / "usage.jsonl"),
+        escalation_log=str(tmp_path / "memory" / "escalations.jsonl"),
+    )
+
+    assert tracker.summary("default")["ceiling_tokens"] == 2_000_000
+
+
+def test_budget_config_read_is_bounded(tmp_path, monkeypatch):
+    monkeypatch.setattr(tb, "_MAX_BUDGET_CONFIG_BYTES", 64)
+    config_path = tmp_path / "threadkeeper.config.yaml"
+    config_path.write_text(
+        "budget:\n  thread_token_ceiling: 7\n  min_local_iterations_before_escalation: 0\n"
+        + ("#" * 128),
+        encoding="utf-8",
+    )
+
+    tracker = tb.BudgetTracker(
+        config_path=str(config_path),
+        usage_log=str(tmp_path / "memory" / "usage.jsonl"),
+        escalation_log=str(tmp_path / "memory" / "escalations.jsonl"),
+    )
+
+    assert tracker.summary("default")["ceiling_tokens"] == 2_000_000
+
+
+def test_budget_metta_policy_rejects_symlink_source(tmp_path, monkeypatch):
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlink unavailable on this platform")
+    policy_path = tmp_path / "escalation.metta"
+    outside = tmp_path / "outside-escalation.metta"
+    outside.write_text("; policy\n", encoding="utf-8")
+    policy_path.symlink_to(outside)
+    policy = tb._MettaPolicy(str(policy_path))
+    monkeypatch.setattr(policy, "_import_petta", lambda: object())
+
+    assert policy._ensure() is None
+
+
 def test_budget_usage_log_rejects_symlink_target(tmp_path):
     if not hasattr(os, "symlink"):
         pytest.skip("symlink unavailable on this platform")

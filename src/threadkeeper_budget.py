@@ -82,6 +82,7 @@ def _int_env(name: str, default: int, minimum: int = 0) -> int:
 
 
 _MAX_BUDGET_LOG_BYTES = _int_env("THREADKEEPER_MAX_BUDGET_LOG_BYTES", 1024 * 1024, 1024)
+_MAX_BUDGET_CONFIG_BYTES = _int_env("THREADKEEPER_MAX_BUDGET_CONFIG_BYTES", 64 * 1024, 1024)
 
 
 def _open_regular_no_symlink(path: str, flags: int, mode: int = 0o600):
@@ -203,7 +204,8 @@ class _MettaPolicy:
             return self._engine
         self._tried = True
         try:
-            if not os.path.isfile(self._path):
+            st = os.lstat(self._path)
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
                 return None
             PeTTa = self._import_petta()
             if PeTTa is None:
@@ -296,10 +298,16 @@ class BudgetTracker:
 
     # -- config loading -------------------------------------------------
     def _load_raw_config(self) -> dict:
-        if yaml is None or not os.path.isfile(self._config_path):
+        if yaml is None:
             return {}
         try:
-            with open(self._config_path, "r", encoding="utf-8") as f:
+            st = os.lstat(self._config_path)
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+                return {}
+            if st.st_size > _MAX_BUDGET_CONFIG_BYTES:
+                return {}
+            fd = _open_regular_no_symlink(self._config_path, os.O_RDONLY)
+            with os.fdopen(fd, "r", encoding="utf-8") as f:
                 return yaml.safe_load(f) or {}
         except Exception:
             return {}
