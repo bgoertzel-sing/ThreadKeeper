@@ -181,6 +181,22 @@ def test_worker_usage_log_rejects_symlink_parent(monkeypatch, tmp_path):
     assert memory_link.is_symlink()
 
 
+def test_worker_usage_log_rejects_symlink_ancestor_parent(monkeypatch, tmp_path):
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlink unavailable on this platform")
+    outside_dir = tmp_path / "outside-memory"
+    outside_dir.mkdir()
+    memory_link = tmp_path / "memory"
+    memory_link.symlink_to(outside_dir, target_is_directory=True)
+    usage_log = memory_link / "nested" / "usage.jsonl"
+    monkeypatch.setattr(subagent, "_USAGE_LOG_PATH", str(usage_log))
+
+    subagent._log_worker_usage("unit-worker", 7, 11)
+
+    assert not (outside_dir / "nested").exists()
+    assert memory_link.is_symlink()
+
+
 def test_llm_retry_backoff_returns_success_after_transient_failure(monkeypatch):
     calls = {"n": 0}
     monkeypatch.setattr(subagent, "_SUBAGENT_LLM_RETRIES", 1)
@@ -4565,6 +4581,26 @@ def test_json_atomic_write_rejects_symlink_parent_directory(tmp_path):
     else:
         raise AssertionError("expected symlink JSON audit parent to be rejected")
     assert not (outside / "record.json").exists()
+
+
+def test_json_atomic_write_rejects_symlink_ancestor_parent_directory(tmp_path):
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlink unavailable on this platform")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    run_dir = tmp_path / "run-dir"
+    run_dir.mkdir()
+    symlink_ancestor = run_dir / "audit-link"
+    symlink_ancestor.symlink_to(outside, target_is_directory=True)
+
+    try:
+        subagent._json_atomic_write(str(symlink_ancestor / "nested" / "record.json"), {"ok": True})
+    except ValueError as exc:
+        assert "non-symlink directory" in str(exc)
+        assert str(tmp_path) not in str(exc)
+    else:
+        raise AssertionError("expected symlink JSON audit ancestor to be rejected")
+    assert not (outside / "nested").exists()
 
 
 def test_write_transcript_integrity_sidecar_rejects_symlink_parent_directory(tmp_path):

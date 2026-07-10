@@ -85,8 +85,8 @@ audits reject symlink/non-regular `index.jsonl` and `index.jsonl.lock` paths;
 the audit scan opens the index itself through the regular non-symlink no-follow
 opener, transcript JSON reads/hashes also use regular non-symlink opens, and atomic
 JSON audit writes plus transcript checksum-sidecar writes now fail closed if the
-pre-existing destination or required parent directory is a symlink or other
-non-regular local filesystem object. Workspace
+pre-existing destination, required parent directory, or any newly-created parent
+ancestor component is a symlink or other non-regular local filesystem object. Workspace
 `read-file` and `append-file` reads also open through a no-follow regular-file
 helper, and `append-file` uses that already-open file descriptor for size checks
 before reading existing content, closing TOCTOU symlink-swap gaps between
@@ -105,10 +105,11 @@ transcripts cannot be redirected through local link tricks.
 `worker_token_usage` contains aggregated `input_tokens`, `output_tokens`, and
 `total_tokens` across all worker LLM calls in the dispatch, for cost
 accounting and audit. Worker calls are also appended to the shared
-`usage.jsonl` accounting log only after its parent directory is validated as a
-real non-symlink directory, through a regular non-symlink open with flush/fsync
-and a best-effort parent-directory fsync, so local pre-existing symlinks cannot
-redirect usage writes outside the configured memory directory and completed
+`usage.jsonl` accounting log only after its parent directory tree is validated
+component-by-component as real non-symlink directories, through a regular
+non-symlink open with flush/fsync and a best-effort parent-directory fsync, so
+local pre-existing symlinks cannot redirect usage writes outside the configured
+memory directory and completed
 appends are pushed to disk. It is omitted from the structured return when no worker LLM
 calls were made (e.g., setup errors before the loop).
 

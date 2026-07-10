@@ -86,7 +86,6 @@ def _log_worker_usage(model, in_tok, out_tok):
                "input_tokens": int(in_tok or 0), "output_tokens": int(out_tok or 0)}
         parent = os.path.dirname(_USAGE_LOG_PATH)
         if parent:
-            os.makedirs(parent, exist_ok=True)
             _ensure_regular_directory(parent, "worker usage log parent")
         fd = _open_regular_no_symlink(_USAGE_LOG_PATH, os.O_WRONLY | os.O_CREAT | os.O_APPEND)
         with os.fdopen(fd, "a", encoding="utf-8") as f:
@@ -603,16 +602,35 @@ def _fsync_parent_dir(path):
 
 
 def _ensure_regular_directory(path, label):
-    """Create/validate a local directory without accepting symlink targets."""
+    """Create/validate a local directory tree without accepting symlinks.
+
+    ``os.makedirs(..., exist_ok=True)`` follows symlinked ancestor components,
+    so a local ``run-dir/link/child`` path could otherwise create/use ``child``
+    under the symlink target before the final-directory check runs.  Walk the
+    path component-by-component with ``lstat`` so every existing ancestor is a
+    real directory and missing components are created only below already-vetted
+    parents.
+    """
     if not path:
         return
-    os.makedirs(path, exist_ok=True)
-    try:
-        st = os.lstat(path)
-    except OSError:
-        raise ValueError(f"{label} directory stat failed")
-    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
-        raise ValueError(f"{label} directory must be a real non-symlink directory")
+    abs_path = os.path.abspath(path)
+    current = os.path.sep if os.path.isabs(abs_path) else os.curdir
+    for part in abs_path.strip(os.path.sep).split(os.path.sep):
+        if not part:
+            continue
+        current = os.path.join(current, part)
+        try:
+            st = os.lstat(current)
+        except FileNotFoundError:
+            try:
+                os.mkdir(current)
+                st = os.lstat(current)
+            except OSError:
+                raise ValueError(f"{label} directory creation failed")
+        except OSError:
+            raise ValueError(f"{label} directory stat failed")
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+            raise ValueError(f"{label} directory must be a real non-symlink directory")
 
 
 def _json_atomic_write(path, data):
