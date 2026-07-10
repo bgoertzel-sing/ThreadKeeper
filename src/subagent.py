@@ -87,11 +87,13 @@ def _log_worker_usage(model, in_tok, out_tok):
         parent = os.path.dirname(_USAGE_LOG_PATH)
         if parent:
             os.makedirs(parent, exist_ok=True)
+            _ensure_regular_directory(parent, "worker usage log parent")
         fd = _open_regular_no_symlink(_USAGE_LOG_PATH, os.O_WRONLY | os.O_CREAT | os.O_APPEND)
         with os.fdopen(fd, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False, sort_keys=True) + "\n")
             f.flush()
             os.fsync(f.fileno())
+        _fsync_parent_dir(_USAGE_LOG_PATH)
     except Exception:
         pass
 

@@ -103,10 +103,11 @@ transcripts cannot be redirected through local link tricks.
 `worker_token_usage` contains aggregated `input_tokens`, `output_tokens`, and
 `total_tokens` across all worker LLM calls in the dispatch, for cost
 accounting and audit. Worker calls are also appended to the shared
-`usage.jsonl` accounting log through a regular non-symlink open with flush/fsync
-so a local pre-existing symlink cannot redirect usage writes outside the
-configured memory directory and completed appends are pushed to disk. It is
-omitted from the structured return when no worker LLM
+`usage.jsonl` accounting log only after its parent directory is validated as a
+real non-symlink directory, through a regular non-symlink open with flush/fsync
+and a best-effort parent-directory fsync, so local pre-existing symlinks cannot
+redirect usage writes outside the configured memory directory and completed
+appends are pushed to disk. It is omitted from the structured return when no worker LLM
 calls were made (e.g., setup errors before the loop).
 
 When `OMEGACLAW_SUBAGENT_QUEUE_ONLY=1`, dispatch performs setup/contract/tool

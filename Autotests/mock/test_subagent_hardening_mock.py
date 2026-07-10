@@ -165,6 +165,22 @@ def test_worker_usage_log_rejects_symlink_target(monkeypatch, tmp_path):
     assert usage_log.is_symlink()
 
 
+def test_worker_usage_log_rejects_symlink_parent(monkeypatch, tmp_path):
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlink unavailable on this platform")
+    outside_dir = tmp_path / "outside-memory"
+    outside_dir.mkdir()
+    memory_link = tmp_path / "memory"
+    memory_link.symlink_to(outside_dir, target_is_directory=True)
+    usage_log = memory_link / "usage.jsonl"
+    monkeypatch.setattr(subagent, "_USAGE_LOG_PATH", str(usage_log))
+
+    subagent._log_worker_usage("unit-worker", 7, 11)
+
+    assert not (outside_dir / "usage.jsonl").exists()
+    assert memory_link.is_symlink()
+
+
 def test_llm_retry_backoff_returns_success_after_transient_failure(monkeypatch):
     calls = {"n": 0}
     monkeypatch.setattr(subagent, "_SUBAGENT_LLM_RETRIES", 1)
