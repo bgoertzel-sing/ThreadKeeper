@@ -1928,6 +1928,30 @@ def test_queue_listing_and_worker_reject_symlink_task_records(tmp_path, monkeypa
     assert not Path(str(symlink_task) + ".failed").exists()
 
 
+def test_queue_listing_and_worker_reject_symlink_queue_directory(tmp_path, monkeypatch):
+    if not hasattr(os, "symlink"):
+        return
+    run_dir = tmp_path / "runs"
+    outside_queue = tmp_path / "outside-queue"
+    run_dir.mkdir()
+    outside_queue.mkdir()
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(run_dir))
+    task = outside_queue / "task.json"
+    task.write_text('{"status":"queued"}', encoding="utf-8")
+    os.symlink(outside_queue, run_dir / "queue")
+
+    assert subagent._pending_queued_dispatch_paths() == []
+    assert subagent._pending_dispatch_queue_count() == subagent._SUBAGENT_MAX_QUEUED_DISPATCHES
+
+    result = json.loads(subagent.run_queued_dispatch(str(run_dir / "queue" / "task.json")))
+
+    assert result["status"] == "queue_worker_error"
+    assert "subagent dispatch queue directory must be a real non-symlink directory" in result["summary"]
+    assert task.exists()
+    assert not Path(str(task) + ".claimed").exists()
+    assert not Path(str(task) + ".failed").exists()
+
+
 def test_run_queued_dispatch_retains_failed_claim_for_audit(tmp_path, monkeypatch):
     _write_unit_persona(tmp_path, monkeypatch)
     monkeypatch.setenv("OMEGACLAW_SUBAGENT_QUEUE_ONLY", "1")

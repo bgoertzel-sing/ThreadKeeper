@@ -120,7 +120,7 @@ worker LLM. This is the first async/backpressure primitive: the parent receives
 `status="queued"`, `queue_path`, `queue_sha256`, `queue_sha256_path`, and a
 normal transcript; a separate local supervisor can later claim the queued task.
 If the queue already has `OMEGACLAW_SUBAGENT_MAX_QUEUED_DISPATCHES` pending regular non-symlink JSON
-tasks, dispatch fails closed with transcript status `queue_backpressure` before
+tasks, or the queue directory itself is not a real non-symlink directory, dispatch fails closed with transcript status `queue_backpressure` before
 any worker call.
 The Python helper `subagent.run_queued_dispatch(queue_path)` is the current
 single-task worker primitive: it atomically claims one queued regular non-symlink task, verifies the
@@ -128,7 +128,7 @@ required regular non-symlink queue-task `.sha256` sidecar, revalidates the task 
 contract, re-injects that contract into the synchronous dispatch goal while
 queue-only mode is suppressed, writes a compact `*.result.json`, and leaves the
 task as `*.done` plus a refreshed `.sha256` sidecar for audit instead of
-silently re-running it. Symlink and non-regular `queue/*.json` entries are ignored by queue listing and rejected before claim. If checksum, validation, or execution fails after a task
+silently re-running it. Symlink and non-regular `queue/*.json` entries are ignored by queue listing and rejected before claim; a symlink/non-directory `queue/` itself is also rejected before listing or claim, so a worker cannot be redirected outside `OMEGACLAW_SUBAGENT_RUN_DIR`. If checksum, validation, or execution fails after a task
 has been claimed, the helper retains the claimed task as `*.failed`, writes a
 fresh `.sha256` sidecar for the retained bytes when possible, and writes
 `*.failed.result.json` so malformed or tampered queued records do not vanish

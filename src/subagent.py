@@ -1139,6 +1139,8 @@ def _is_regular_pending_queue_task_path(queue_dir, name):
 def _pending_dispatch_queue_count():
     try:
         queue_dir = _dispatch_queue_dir()
+        _ensure_regular_directory(SUBAGENT_RUN_DIR, "subagent run dir")
+        _ensure_regular_directory(queue_dir, "subagent dispatch queue")
         return len([
             name for name in os.listdir(queue_dir)
             if _is_regular_pending_queue_task_path(queue_dir, name)
@@ -1240,7 +1242,10 @@ def _sha256_file_bounded(path, max_bytes=0, chunk_size=65536):
 def _resolve_queue_task_path(queue_path):
     if not queue_path or "\x00" in str(queue_path):
         raise ValueError("invalid queued dispatch path")
-    queue_dir = os.path.realpath(os.path.abspath(_dispatch_queue_dir()))
+    _ensure_regular_directory(SUBAGENT_RUN_DIR, "subagent run dir")
+    queue_dir_path = _dispatch_queue_dir()
+    _ensure_regular_directory(queue_dir_path, "subagent dispatch queue")
+    queue_dir = os.path.realpath(os.path.abspath(queue_dir_path))
     raw_candidate = os.path.abspath(str(queue_path))
     candidate = os.path.realpath(raw_candidate)
     if os.path.commonpath([queue_dir, candidate]) != queue_dir:
@@ -1265,11 +1270,13 @@ def _pending_queued_dispatch_paths():
     """
     queue_dir = _dispatch_queue_dir()
     try:
+        _ensure_regular_directory(SUBAGENT_RUN_DIR, "subagent run dir")
+        _ensure_regular_directory(queue_dir, "subagent dispatch queue")
         names = [
             name for name in os.listdir(queue_dir)
             if _is_regular_pending_queue_task_path(queue_dir, name)
         ]
-    except FileNotFoundError:
+    except (FileNotFoundError, ValueError):
         return []
     paths = [os.path.join(queue_dir, name) for name in names]
 
