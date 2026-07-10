@@ -190,6 +190,11 @@ cat memory/usage.jsonl                         # per-call token log
 cat memory/escalations.jsonl                   # audit trail of escalation decisions
 ```
 
+Budget/accounting logs are treated as local audit files: existing symlinks or
+non-regular log paths are ignored/fail-closed, and usage-log reads are capped by
+`THREADKEEPER_MAX_BUDGET_LOG_BYTES` (default 1 MiB) so a malformed or huge local
+log cannot redirect writes or stall escalation checks.
+
 ### What the dashboard numbers mean (honest scope)
 
 The live mesh dashboard (`channels/local.py`) and the budget tracker both read

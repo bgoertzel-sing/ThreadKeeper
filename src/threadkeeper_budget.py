@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import time
 from dataclasses import dataclass, field, asdict
 from typing import Optional
@@ -71,6 +72,43 @@ _DEFAULT_CONFIG_PATH = os.path.join(_REPO_ROOT, "threadkeeper.config.yaml")
 _DEFAULT_USAGE_LOG = os.path.join(_REPO_ROOT, "memory", "usage.jsonl")
 _DEFAULT_ESCALATION_LOG = os.path.join(_REPO_ROOT, "memory", "escalations.jsonl")
 _DEFAULT_ESCALATION_METTA = os.path.join(_REPO_ROOT, "src", "escalation.metta")
+
+
+def _int_env(name: str, default: int, minimum: int = 0) -> int:
+    try:
+        return max(minimum, int(os.environ.get(name, default)))
+    except Exception:
+        return default
+
+
+_MAX_BUDGET_LOG_BYTES = _int_env("THREADKEEPER_MAX_BUDGET_LOG_BYTES", 1024 * 1024, 1024)
+
+
+def _open_regular_no_symlink(path: str, flags: int, mode: int = 0o600):
+    """Open a local budget/accounting file without following symlinks."""
+    open_flags = flags
+    if hasattr(os, "O_NOFOLLOW"):
+        open_flags |= os.O_NOFOLLOW
+    fd = os.open(path, open_flags, mode)
+    try:
+        st = os.fstat(fd)
+        if not os.path.isfile(path) or not stat.S_ISREG(st.st_mode):
+            raise ValueError("path is not a regular non-symlink file")
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _reject_unsafe_existing_file(path: str, label: str) -> None:
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return
+    except OSError as e:
+        raise ValueError(f"{label} stat failed: {e}")
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+        raise ValueError(f"{label} must be a regular non-symlink file")
 
 
 # ----------------------------------------------------------------------
@@ -311,7 +349,11 @@ class BudgetTracker:
         )
         try:
             os.makedirs(os.path.dirname(self.usage_log), exist_ok=True)
-            with open(self.usage_log, "a", encoding="utf-8") as f:
+            _reject_unsafe_existing_file(self.usage_log, "usage log")
+            fd = _open_regular_no_symlink(
+                self.usage_log, os.O_WRONLY | os.O_CREAT | os.O_APPEND
+            )
+            with os.fdopen(fd, "a", encoding="utf-8") as f:
                 f.write(json.dumps(asdict(rec)) + "\n")
         except Exception:
             pass  # accounting must never break the response path
@@ -331,10 +373,14 @@ class BudgetTracker:
 
     # -- accounting -----------------------------------------------------
     def _iter_records(self, thread_id: Optional[str] = None):
-        if not os.path.isfile(self.usage_log):
-            return
         try:
-            with open(self.usage_log, "r", encoding="utf-8") as f:
+            st = os.lstat(self.usage_log)
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+                return
+            if st.st_size > _MAX_BUDGET_LOG_BYTES:
+                return
+            fd = _open_regular_no_symlink(self.usage_log, os.O_RDONLY)
+            with os.fdopen(fd, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -510,7 +556,11 @@ class BudgetTracker:
             return
         try:
             os.makedirs(os.path.dirname(self.escalation_log), exist_ok=True)
-            with open(self.escalation_log, "a", encoding="utf-8") as f:
+            _reject_unsafe_existing_file(self.escalation_log, "escalation log")
+            fd = _open_regular_no_symlink(
+                self.escalation_log, os.O_WRONLY | os.O_CREAT | os.O_APPEND
+            )
+            with os.fdopen(fd, "a", encoding="utf-8") as f:
                 f.write(json.dumps(asdict(d)) + "\n")
         except Exception:
             pass
