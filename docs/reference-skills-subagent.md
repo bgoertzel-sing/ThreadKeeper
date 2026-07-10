@@ -89,7 +89,10 @@ pre-existing destination or required parent directory is a symlink or other
 non-regular local filesystem object. Workspace
 `read-file` and `append-file` reads also open through a no-follow regular-file
 helper, closing a TOCTOU symlink-swap gap between `realpath` containment
-resolution and the actual file read. Atomic JSON,
+resolution and the actual file read. Workspace `write-file` / `append-file`
+parents are revalidated as real non-symlink directories under the workspace
+immediately before lock/temp-file creation, so a local parent-directory swap
+cannot redirect file-tool replacements outside the sandbox. Atomic JSON,
 transcript sidecar, index-rotation, and workspace file-tool replacements also
 fsync the replaced file and best-effort fsync the parent directory after
 `os.replace`, so local run records survive crashes more reliably. Index rotation
@@ -168,10 +171,10 @@ changes to the local transcript's `patch_proposals` list and the parent digest
 receives only bounded `{action, path}` metadata. Each persisted proposal content
 field is capped by `OMEGACLAW_SUBAGENT_MAX_PATCH_PROPOSAL_CHARS` (default
 20,000) with an explicit truncation marker. Normal `write-file` / `append-file`
-updates use atomic replace plus a per-target workspace lock when `fcntl` is
-available; existing lock paths are rejected if they are symlinks or non-regular
-files, so local workspace lock files cannot redirect file-tool synchronization
-outside the workspace. The parent/supervisor is then responsible for review,
+updates revalidate parent directories, use atomic replace plus a per-target
+workspace lock when `fcntl` is available; existing lock paths are rejected if
+they are symlinks or non-regular files, so local workspace lock files cannot
+redirect file-tool synchronization outside the workspace. The parent/supervisor is then responsible for review,
 tests, and application.
 
 When a JSON task contract sets `"requires_adjudication": true`, the subagent's

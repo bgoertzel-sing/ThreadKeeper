@@ -4335,6 +4335,53 @@ def test_append_file_max_size_disabled_when_zero(tmp_path, monkeypatch):
     assert "more" in target.read_text()
 
 
+def test_atomic_replace_text_rejects_symlink_workspace_parent_after_resolution(tmp_path, monkeypatch):
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlink unavailable on this platform")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    safe_parent = workspace / "safe"
+    safe_parent.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_WORKSPACE", str(workspace))
+    resolved = subagent._resolve_workspace_path("safe/file.txt")
+    safe_parent.rmdir()
+    safe_parent.symlink_to(outside, target_is_directory=True)
+
+    try:
+        subagent._atomic_replace_text(resolved, "new content")
+    except ValueError as exc:
+        assert "non-symlink directory" in str(exc) or "escapes subagent workspace" in str(exc)
+        assert str(tmp_path) not in str(exc)
+    else:
+        raise AssertionError("expected symlink workspace write parent to be rejected")
+    assert not (outside / "file.txt").exists()
+
+
+def test_append_file_rejects_symlink_workspace_parent_after_resolution(tmp_path, monkeypatch):
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlink unavailable on this platform")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    safe_parent = workspace / "safe"
+    safe_parent.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_WORKSPACE", str(workspace))
+    resolved = subagent._resolve_workspace_path("safe/log.txt")
+    safe_parent.rmdir()
+    safe_parent.symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr(subagent, "_resolve_workspace_path", lambda _path: resolved)
+
+    result = subagent._tool_append_file("safe/log.txt", "entry")
+
+    assert "append-file error" in result
+    assert "symlink" in result or "escapes subagent workspace" in result
+    assert not (outside / "log.txt").exists()
+    assert resolved.endswith("/workspace/safe/log.txt")
+
+
 def test_read_json_file_uses_configured_size_cap(monkeypatch, tmp_path):
     path = tmp_path / "large.json"
     path.write_text(json.dumps({"payload": "x" * 2048}), encoding="utf-8")

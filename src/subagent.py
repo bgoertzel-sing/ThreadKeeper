@@ -2077,6 +2077,47 @@ def _write_json_state(f, data):
     os.fsync(f.fileno())
 
 
+def _ensure_workspace_parent_directory(resolved_path, label):
+    """Create/validate a workspace file parent without symlink ancestors.
+
+    ``_resolve_workspace_path`` checks containment before file-tool writes, but
+    the parent directory can still be swapped locally before the lock/temp-file
+    open. Walk the parent path relative to the real workspace root and reject
+    any symlink/non-directory component before writing inside it.
+    """
+    parent = os.path.dirname(resolved_path)
+    if not parent:
+        return
+    root = _subagent_workspace_root()
+    real_parent = os.path.realpath(os.path.abspath(parent))
+    if os.path.commonpath([root, real_parent]) != root:
+        raise ValueError(f"{label} parent escapes subagent workspace")
+    try:
+        os.makedirs(root, exist_ok=True)
+        root_st = os.lstat(root)
+    except OSError:
+        raise ValueError(f"{label} workspace root stat failed")
+    if stat.S_ISLNK(root_st.st_mode) or not stat.S_ISDIR(root_st.st_mode):
+        raise ValueError(f"{label} workspace root must be a real non-symlink directory")
+    rel = os.path.relpath(parent, root)
+    current = root
+    if rel == ".":
+        rel_parts = []
+    else:
+        rel_parts = [part for part in rel.split(os.sep) if part and part != "."]
+    for part in rel_parts:
+        current = os.path.join(current, part)
+        try:
+            st = os.lstat(current)
+        except FileNotFoundError:
+            os.mkdir(current, 0o700)
+            st = os.lstat(current)
+        except OSError:
+            raise ValueError(f"{label} parent directory stat failed")
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+            raise ValueError(f"{label} parent must be a real non-symlink directory")
+
+
 @contextlib.contextmanager
 def _workspace_file_lock(resolved_path):
     """Serialize updates to one workspace file when fcntl is available.
@@ -2089,7 +2130,7 @@ def _workspace_file_lock(resolved_path):
     """
     parent = os.path.dirname(resolved_path)
     if parent:
-        os.makedirs(parent, exist_ok=True)
+        _ensure_workspace_parent_directory(resolved_path, "workspace file lock")
     if fcntl is None:
         yield
         return
@@ -2106,7 +2147,7 @@ def _workspace_file_lock(resolved_path):
 def _atomic_replace_text(resolved_path, content):
     parent = os.path.dirname(resolved_path)
     if parent:
-        os.makedirs(parent, exist_ok=True)
+        _ensure_workspace_parent_directory(resolved_path, "workspace file write")
     fd, tmp = tempfile.mkstemp(
         prefix=f".{os.path.basename(resolved_path)}.", suffix=".tmp", dir=parent or None
     )
