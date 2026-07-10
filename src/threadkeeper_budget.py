@@ -363,6 +363,8 @@ class BudgetTracker:
             )
             with os.fdopen(fd, "a", encoding="utf-8") as f:
                 f.write(json.dumps(asdict(rec)) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
         except Exception:
             pass  # accounting must never break the response path
         return rec
@@ -570,6 +572,8 @@ class BudgetTracker:
             )
             with os.fdopen(fd, "a", encoding="utf-8") as f:
                 f.write(json.dumps(asdict(d)) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
         except Exception:
             pass
 

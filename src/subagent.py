@@ -550,6 +550,28 @@ def _json_bytes(data):
     return (json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
+def _fsync_parent_dir(path):
+    """Best-effort fsync of the parent directory after atomic renames.
+
+    File fsync protects the bytes written to the temp file; syncing the parent
+    directory makes the replacement/name update durable on filesystems that
+    require an explicit directory fsync. This helper is intentionally
+    best-effort so portability quirks do not break the agent response path.
+    """
+    try:
+        parent = os.path.dirname(os.path.abspath(path)) or "."
+        flags = os.O_RDONLY
+        if hasattr(os, "O_DIRECTORY"):
+            flags |= os.O_DIRECTORY
+        fd = os.open(parent, flags)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except Exception:
+        pass
+
+
 def _json_atomic_write(path, data):
     _reject_nonregular_existing_path(path, "JSON audit target")
     parent = os.path.dirname(path)
@@ -565,6 +587,7 @@ def _json_atomic_write(path, data):
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
+        _fsync_parent_dir(path)
         return hashlib.sha256(payload).hexdigest()
     finally:
         try:
@@ -592,6 +615,7 @@ def _write_transcript_integrity_sidecar(path, digest):
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, sidecar)
+        _fsync_parent_dir(sidecar)
         return sidecar
     finally:
         try:
@@ -754,6 +778,7 @@ def _rotate_run_index_if_needed(index_path, lock):
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp_path, index_path)
+            _fsync_parent_dir(index_path)
         finally:
             try:
                 if os.path.exists(tmp_path):
@@ -2039,6 +2064,7 @@ def _atomic_replace_text(resolved_path, content):
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, resolved_path)
+        _fsync_parent_dir(resolved_path)
     finally:
         try:
             if os.path.exists(tmp):

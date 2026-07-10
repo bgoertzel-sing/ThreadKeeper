@@ -85,7 +85,10 @@ audits reject symlink/non-regular `index.jsonl` and `index.jsonl.lock` paths;
 the audit scan opens the index itself through the regular non-symlink no-follow
 opener, transcript JSON reads/hashes also use regular non-symlink opens, and atomic
 JSON audit writes plus transcript checksum-sidecar writes now fail closed if the
-pre-existing destination is a symlink or other non-regular file. Index rotation
+pre-existing destination is a symlink or other non-regular file. Atomic JSON,
+transcript sidecar, index-rotation, and workspace file-tool replacements also
+fsync the replaced file and best-effort fsync the parent directory after
+`os.replace`, so local run records survive crashes more reliably. Index rotation
 rewrites through random local temp files rather than predictable
 `index.jsonl.tmp.<pid>` names, so compact audit records and referenced local
 transcripts cannot be redirected through local link tricks.
@@ -93,9 +96,10 @@ transcripts cannot be redirected through local link tricks.
 `worker_token_usage` contains aggregated `input_tokens`, `output_tokens`, and
 `total_tokens` across all worker LLM calls in the dispatch, for cost
 accounting and audit. Worker calls are also appended to the shared
-`usage.jsonl` accounting log through a regular non-symlink open so a local
-pre-existing symlink cannot redirect usage writes outside the configured
-memory directory. It is omitted from the structured return when no worker LLM
+`usage.jsonl` accounting log through a regular non-symlink open with flush/fsync
+so a local pre-existing symlink cannot redirect usage writes outside the
+configured memory directory and completed appends are pushed to disk. It is
+omitted from the structured return when no worker LLM
 calls were made (e.g., setup errors before the loop).
 
 When `OMEGACLAW_SUBAGENT_QUEUE_ONLY=1`, dispatch performs setup/contract/tool

@@ -194,7 +194,8 @@ Budget/accounting inputs are treated as local audit/control files: existing
 symlinks or non-regular log paths are ignored/fail-closed, usage-log reads are
 capped by `THREADKEEPER_MAX_BUDGET_LOG_BYTES` (default 1 MiB), and the local
 budget config is read only from a regular non-symlink file capped by
-`THREADKEEPER_MAX_BUDGET_CONFIG_BYTES` (default 64 KiB). The MeTTa escalation
+`THREADKEEPER_MAX_BUDGET_CONFIG_BYTES` (default 64 KiB). Usage and escalation
+audit appends flush and fsync their file before returning. The MeTTa escalation
 policy loader also rejects symlink/non-regular policy paths before loading, so a
 malformed local config/log/policy cannot redirect reads/writes or stall
 escalation checks.

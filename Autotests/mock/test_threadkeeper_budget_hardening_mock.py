@@ -140,3 +140,25 @@ def test_budget_usage_log_read_is_bounded(tmp_path, monkeypatch):
     )
 
     assert tracker.spent_tokens("default") == 0
+
+
+def test_budget_usage_and_escalation_appends_are_fsynced(tmp_path, monkeypatch):
+    fsync_calls = []
+    real_fsync = tb.os.fsync
+
+    def recording_fsync(fd):
+        fsync_calls.append(fd)
+        return real_fsync(fd)
+
+    monkeypatch.setattr(tb.os, "fsync", recording_fsync)
+    tracker = tb.BudgetTracker(
+        usage_log=str(tmp_path / "memory" / "usage.jsonl"),
+        escalation_log=str(tmp_path / "memory" / "escalations.jsonl"),
+    )
+
+    tracker.record("worker_loop", "unit", 3, 5)
+    tracker.should_escalate(thread_id="default", subproblem_is_hard=False)
+
+    assert (tmp_path / "memory" / "usage.jsonl").exists()
+    assert (tmp_path / "memory" / "escalations.jsonl").exists()
+    assert len(fsync_calls) >= 2

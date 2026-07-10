@@ -342,21 +342,27 @@ def test_read_file_is_bounded_before_return_to_worker_context(tmp_path, monkeypa
 def test_write_file_uses_atomic_replace_inside_workspace(tmp_path, monkeypatch):
     monkeypatch.setenv("OMEGACLAW_SUBAGENT_WORKSPACE", str(tmp_path))
     target = tmp_path / "nested" / "artifact.txt"
+    fsynced = []
+    monkeypatch.setattr(subagent, "_fsync_parent_dir", lambda path: fsynced.append(path))
 
     assert subagent._tool_write_file("nested/artifact.txt", "first") == "WRITE-FILE-SUCCESS"
     assert target.read_text() == "first"
     assert subagent._tool_write_file("nested/artifact.txt", "second") == "WRITE-FILE-SUCCESS"
     assert target.read_text() == "second"
+    assert fsynced == [str(target), str(target)]
     assert not list((tmp_path / "nested").glob(".*.tmp"))
 
 
 def test_append_file_uses_atomic_replace_inside_workspace(tmp_path, monkeypatch):
     monkeypatch.setenv("OMEGACLAW_SUBAGENT_WORKSPACE", str(tmp_path))
     target = tmp_path / "nested" / "artifact.txt"
+    fsynced = []
+    monkeypatch.setattr(subagent, "_fsync_parent_dir", lambda path: fsynced.append(path))
 
     assert subagent._tool_append_file("nested/artifact.txt", "first") == "APPEND-FILE-SUCCESS"
     assert subagent._tool_append_file("nested/artifact.txt", "second") == "APPEND-FILE-SUCCESS"
     assert target.read_text() == "first\nsecond\n"
+    assert fsynced == [str(target), str(target)]
     assert not list((tmp_path / "nested").glob(".*.tmp"))
 
 
