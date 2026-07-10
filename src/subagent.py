@@ -600,11 +600,24 @@ def _fsync_parent_dir(path):
         pass
 
 
+def _ensure_regular_directory(path, label):
+    """Create/validate a local directory without accepting symlink targets."""
+    if not path:
+        return
+    os.makedirs(path, exist_ok=True)
+    try:
+        st = os.lstat(path)
+    except OSError:
+        raise ValueError(f"{label} directory stat failed")
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+        raise ValueError(f"{label} directory must be a real non-symlink directory")
+
+
 def _json_atomic_write(path, data):
     _reject_nonregular_existing_path(path, "JSON audit target")
     parent = os.path.dirname(path)
     if parent:
-        os.makedirs(parent, exist_ok=True)
+        _ensure_regular_directory(parent, "JSON audit target parent")
     payload = _json_bytes(data)
     fd, tmp = tempfile.mkstemp(
         prefix=f".{os.path.basename(path)}.", suffix=".tmp", dir=parent or None
@@ -633,7 +646,7 @@ def _write_transcript_integrity_sidecar(path, digest):
     _reject_nonregular_existing_path(sidecar, "transcript integrity sidecar")
     parent = os.path.dirname(sidecar)
     if parent:
-        os.makedirs(parent, exist_ok=True)
+        _ensure_regular_directory(parent, "transcript integrity sidecar parent")
     fd, tmp = tempfile.mkstemp(
         prefix=f".{os.path.basename(sidecar)}.", suffix=".tmp", dir=parent or None
     )
@@ -831,7 +844,7 @@ def _append_run_index(record):
     """
     if not record:
         return ""
-    os.makedirs(SUBAGENT_RUN_DIR, exist_ok=True)
+    _ensure_regular_directory(SUBAGENT_RUN_DIR, "subagent run dir")
     index_path = os.path.join(SUBAGENT_RUN_DIR, "index.jsonl")
     lock_path = f"{index_path}.lock"
     _reject_nonregular_existing_path(index_path, "subagent run index")
@@ -1126,7 +1139,7 @@ def _enqueue_dispatch_record(record, tool_names, max_turns, max_chars):
     run the normal synchronous path under the same contracts and cancellation
     controls.
     """
-    os.makedirs(SUBAGENT_RUN_DIR, exist_ok=True)
+    _ensure_regular_directory(SUBAGENT_RUN_DIR, "subagent run dir")
     if _pending_dispatch_queue_count() >= _SUBAGENT_MAX_QUEUED_DISPATCHES:
         summary = (
             f"subagent dispatch queue backpressure: "
@@ -1139,7 +1152,7 @@ def _enqueue_dispatch_record(record, tool_names, max_turns, max_chars):
         )
 
     queue_dir, queue_path = _queued_dispatch_paths(record.get("run_id"))
-    os.makedirs(queue_dir, exist_ok=True)
+    _ensure_regular_directory(queue_dir, "subagent dispatch queue")
     queued_at = time.time()
     task = {
         "run_id": record.get("run_id", ""),
@@ -1414,7 +1427,18 @@ def run_queued_worker_loop(max_tasks=None, poll_interval_s=None, max_idle_polls=
     launch it deliberately. A best-effort lock prevents two local worker loops
     from draining the same queue concurrently when ``fcntl`` is available.
     """
-    os.makedirs(SUBAGENT_RUN_DIR, exist_ok=True)
+    try:
+        _ensure_regular_directory(SUBAGENT_RUN_DIR, "subagent run dir")
+    except Exception as e:
+        now = time.time()
+        return json.dumps({
+            "status": "worker_config_invalid",
+            "summary": f"queued subagent async worker loop config invalid: {type(e).__name__}: {e}",
+            "started_at": now,
+            "finished_at": now,
+            "total_runtime_s": 0.0,
+            "next_action": "fix local worker run directory before starting worker loop",
+        }, ensure_ascii=False, sort_keys=True)
     started_at = time.time()
     # Defaults for structured config-invalid returns if an early explicit
     # argument check fails before all resolved bounds are assigned.

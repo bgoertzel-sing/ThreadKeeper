@@ -4445,3 +4445,39 @@ def test_write_transcript_integrity_sidecar_rejects_existing_symlink(tmp_path):
     else:
         raise AssertionError("expected symlink transcript integrity sidecar to be rejected")
     assert outside.read_text(encoding="utf-8") == "old\n"
+
+
+def test_json_atomic_write_rejects_symlink_parent_directory(tmp_path):
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlink unavailable on this platform")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    symlink_parent = tmp_path / "audit-dir"
+    symlink_parent.symlink_to(outside, target_is_directory=True)
+
+    try:
+        subagent._json_atomic_write(str(symlink_parent / "record.json"), {"ok": True})
+    except ValueError as exc:
+        assert "non-symlink directory" in str(exc)
+        assert str(tmp_path) not in str(exc)
+    else:
+        raise AssertionError("expected symlink JSON audit parent to be rejected")
+    assert not (outside / "record.json").exists()
+
+
+def test_write_transcript_integrity_sidecar_rejects_symlink_parent_directory(tmp_path):
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlink unavailable on this platform")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    symlink_parent = tmp_path / "run-dir"
+    symlink_parent.symlink_to(outside, target_is_directory=True)
+
+    try:
+        subagent._write_transcript_integrity_sidecar(str(symlink_parent / "run.json"), "a" * 64)
+    except ValueError as exc:
+        assert "non-symlink directory" in str(exc)
+        assert str(tmp_path) not in str(exc)
+    else:
+        raise AssertionError("expected symlink sidecar parent to be rejected")
+    assert not (outside / "run.json.sha256").exists()

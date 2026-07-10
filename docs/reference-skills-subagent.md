@@ -85,7 +85,8 @@ audits reject symlink/non-regular `index.jsonl` and `index.jsonl.lock` paths;
 the audit scan opens the index itself through the regular non-symlink no-follow
 opener, transcript JSON reads/hashes also use regular non-symlink opens, and atomic
 JSON audit writes plus transcript checksum-sidecar writes now fail closed if the
-pre-existing destination is a symlink or other non-regular file. Workspace
+pre-existing destination or required parent directory is a symlink or other
+non-regular local filesystem object. Workspace
 `read-file` and `append-file` reads also open through a no-follow regular-file
 helper, closing a TOCTOU symlink-swap gap between `realpath` containment
 resolution and the actual file read. Atomic JSON,
