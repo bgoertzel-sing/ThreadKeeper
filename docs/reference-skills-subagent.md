@@ -85,7 +85,10 @@ audits reject symlink/non-regular `index.jsonl` and `index.jsonl.lock` paths;
 the audit scan opens the index itself through the regular non-symlink no-follow
 opener, transcript JSON reads/hashes also use regular non-symlink opens, and atomic
 JSON audit writes plus transcript checksum-sidecar writes now fail closed if the
-pre-existing destination is a symlink or other non-regular file. Atomic JSON,
+pre-existing destination is a symlink or other non-regular file. Workspace
+`read-file` and `append-file` reads also open through a no-follow regular-file
+helper, closing a TOCTOU symlink-swap gap between `realpath` containment
+resolution and the actual file read. Atomic JSON,
 transcript sidecar, index-rotation, and workspace file-tool replacements also
 fsync the replaced file and best-effort fsync the parent directory after
 `os.replace`, so local run records survive crashes more reliably. Index rotation

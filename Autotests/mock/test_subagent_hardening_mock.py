@@ -382,6 +382,60 @@ def test_workspace_file_lock_rejects_symlink_lock_files(tmp_path, monkeypatch):
     assert outside.read_text() == "external"
 
 
+def test_open_workspace_file_read_rejects_symlink(tmp_path):
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret")
+    link = tmp_path / "link.txt"
+    link.symlink_to(outside)
+
+    with pytest.raises(ValueError, match="regular non-symlink"):
+        subagent._open_workspace_file_read(str(link))
+
+
+def test_open_workspace_file_read_accepts_regular_file(tmp_path):
+    target = tmp_path / "regular.txt"
+    target.write_text("content")
+
+    fd = subagent._open_workspace_file_read(str(target))
+    with os.fdopen(fd, "r") as f:
+        assert f.read() == "content"
+
+
+def test_read_file_rejects_symlink_escape(tmp_path, monkeypatch):
+    """Symlink inside workspace pointing outside is caught by realpath containment."""
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_WORKSPACE", str(tmp_path))
+    outside = tmp_path.parent / "outside_secret.txt"
+    outside.write_text("secret")
+    try:
+        link = tmp_path / "link.txt"
+        link.symlink_to(outside)
+
+        result = subagent._tool_read_file("link.txt")
+
+        assert "read-file error" in result
+        assert "path escapes" in result
+    finally:
+        outside.unlink(missing_ok=True)
+
+
+def test_append_file_rejects_symlink_escape(tmp_path, monkeypatch):
+    """Symlink inside workspace pointing outside is caught by realpath containment."""
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_WORKSPACE", str(tmp_path))
+    outside = tmp_path.parent / "outside_secret.txt"
+    outside.write_text("original")
+    try:
+        link = tmp_path / "link.txt"
+        link.symlink_to(outside)
+
+        result = subagent._tool_append_file("link.txt", "appended")
+
+        assert "append-file error" in result
+        assert "path escapes" in result
+        assert outside.read_text() == "original"
+    finally:
+        outside.unlink(missing_ok=True)
+
+
 def test_append_file_lock_prevents_concurrent_lost_updates(tmp_path, monkeypatch):
     monkeypatch.setenv("OMEGACLAW_SUBAGENT_WORKSPACE", str(tmp_path))
     worker_count = 4

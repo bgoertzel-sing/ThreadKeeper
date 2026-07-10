@@ -541,6 +541,34 @@ def _resolve_workspace_path(path):
     return resolved
 
 
+def _open_workspace_file_read(path):
+    """Open a workspace file for reading without following symlinks.
+
+    This complements ``_resolve_workspace_path`` (which uses ``realpath`` to
+    resolve symlinks and check containment) with a defense-in-depth
+    ``O_NOFOLLOW`` open so a TOCTOU symlink swap between path resolution and
+    the actual read cannot redirect workspace file I/O outside the workspace.
+    """
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags)
+    except OSError as e:
+        if getattr(e, "errno", None) in (40, 17):  # ELOOP, EEXIST on some platforms
+            raise ValueError("workspace file is not a regular non-symlink file")
+        raise
+    try:
+        st = os.fstat(fd)
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+            os.close(fd)
+            raise ValueError("workspace file is not a regular non-symlink file")
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
 def _safe_slug(text, max_len=48):
     slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(text or "").strip()).strip("-._")
     return (slug or "run")[:max_len]
@@ -3138,7 +3166,8 @@ def _tool_read_file(path):
     try:
         resolved = _resolve_workspace_path(path)
         limit = max(1, int(_SUBAGENT_MAX_READ_FILE_CHARS))
-        with open(resolved, "r", encoding="utf-8", errors="replace") as f:
+        fd = _open_workspace_file_read(resolved)
+        with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as f:
             text = f.read(limit + 1)
         if len(text) > limit:
             return text[:limit] + f"\n...(read-file truncated at {limit} chars)..."
@@ -3188,7 +3217,8 @@ def _tool_append_file(path, content):
         with _workspace_file_lock(resolved):
             existing = ""
             if os.path.exists(resolved):
-                with open(resolved, "r", encoding="utf-8", errors="replace") as f:
+                fd = _open_workspace_file_read(resolved)
+                with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as f:
                     existing = f.read()
             new_content = existing
             if new_content and not new_content.endswith("\n"):
