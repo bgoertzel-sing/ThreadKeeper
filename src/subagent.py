@@ -970,32 +970,35 @@ def verify_subagent_run_index(index_path=None):
             raise ValueError(f"subagent run index stat failed: {type(e).__name__}")
         if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
             raise ValueError("subagent run index must be a regular non-symlink file")
-        if _SUBAGENT_MAX_INDEX_AUDIT_BYTES:
-            try:
-                index_size = os.path.getsize(path)
-            except OSError as e:
-                raise ValueError(f"subagent run index size check failed: {type(e).__name__}")
-            if index_size > _SUBAGENT_MAX_INDEX_AUDIT_BYTES:
-                return json.dumps({
-                    "status": "index_audit_too_large",
-                    "summary": (
-                        "subagent run index exceeds "
-                        f"OMEGACLAW_SUBAGENT_MAX_INDEX_AUDIT_BYTES={_SUBAGENT_MAX_INDEX_AUDIT_BYTES}"
-                    ),
-                    "index_path": path,
-                    "index_size_bytes": index_size,
-                    "entries_checked": 0,
-                    "transcripts_checked": 0,
-                    "next_action": "raise audit cap, rotate index, or inspect a bounded copy",
-                }, ensure_ascii=False, sort_keys=True)
+        def _index_too_large_response(size_bytes):
+            return json.dumps({
+                "status": "index_audit_too_large",
+                "summary": (
+                    "subagent run index exceeds "
+                    f"OMEGACLAW_SUBAGENT_MAX_INDEX_AUDIT_BYTES={_SUBAGENT_MAX_INDEX_AUDIT_BYTES}"
+                ),
+                "index_path": path,
+                "index_size_bytes": size_bytes,
+                "entries_checked": 0,
+                "transcripts_checked": 0,
+                "next_action": "raise audit cap, rotate index, or inspect a bounded copy",
+            }, ensure_ascii=False, sort_keys=True)
+
+        if _SUBAGENT_MAX_INDEX_AUDIT_BYTES and st.st_size > _SUBAGENT_MAX_INDEX_AUDIT_BYTES:
+            return _index_too_large_response(st.st_size)
 
         issues = []
         previous_hash = ""
         entries_checked = 0
         transcripts_checked = 0
+        index_bytes_read = 0
         index_fd = _open_regular_no_symlink(path, os.O_RDONLY)
-        with os.fdopen(index_fd, "r", encoding="utf-8") as f:
-            for line_no, line in enumerate(f, start=1):
+        with os.fdopen(index_fd, "rb") as f:
+            for line_no, raw_line in enumerate(f, start=1):
+                index_bytes_read += len(raw_line)
+                if _SUBAGENT_MAX_INDEX_AUDIT_BYTES and index_bytes_read > _SUBAGENT_MAX_INDEX_AUDIT_BYTES:
+                    return _index_too_large_response(index_bytes_read)
+                line = raw_line.decode("utf-8", errors="replace")
                 if not line.strip():
                     continue
                 entries_checked += 1

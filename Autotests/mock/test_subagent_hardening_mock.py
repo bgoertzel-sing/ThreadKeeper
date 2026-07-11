@@ -1191,6 +1191,11 @@ def test_verify_subagent_run_index_rejects_oversized_index_before_read(tmp_path,
     runs.mkdir(parents=True)
     index_path = runs / "index.jsonl"
     index_path.write_text("x" * 64, encoding="utf-8")
+    monkeypatch.setattr(
+        os.path,
+        "getsize",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("index audit must not use path-based getsize")),
+    )
 
     audit = json.loads(subagent.verify_subagent_run_index())
 
@@ -1198,6 +1203,49 @@ def test_verify_subagent_run_index_rejects_oversized_index_before_read(tmp_path,
     assert audit["index_size_bytes"] == 64
     assert audit["entries_checked"] == 0
     assert "OMEGACLAW_SUBAGENT_MAX_INDEX_AUDIT_BYTES=16" in audit["summary"]
+
+
+class _GrowingIndexRead:
+    def __init__(self, raw_file):
+        self._raw_file = raw_file
+        self._lines = iter([b"{}\n", b"x" * 64])
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self._raw_file.close()
+        return False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return next(self._lines)
+
+
+def test_verify_subagent_run_index_enforces_index_cap_during_read(tmp_path, monkeypatch):
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_INDEX_AUDIT_BYTES", 16)
+    runs = Path(subagent.SUBAGENT_RUN_DIR)
+    runs.mkdir(parents=True)
+    index_path = runs / "index.jsonl"
+    index_path.write_text("{}\n", encoding="utf-8")
+    original_fdopen = os.fdopen
+
+    def growing_fdopen(fd, mode="r", *args, **kwargs):
+        wrapped = original_fdopen(fd, mode, *args, **kwargs)
+        if mode == "rb":
+            return _GrowingIndexRead(wrapped)
+        return wrapped
+
+    monkeypatch.setattr(os, "fdopen", growing_fdopen)
+
+    audit = json.loads(subagent.verify_subagent_run_index())
+
+    assert audit["status"] == "index_audit_too_large"
+    assert audit["index_size_bytes"] > 16
+    assert audit["entries_checked"] == 0
 
 
 

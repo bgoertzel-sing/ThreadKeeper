@@ -85,7 +85,9 @@ chain and any recorded local transcript SHA-256s without repairing files,
 draining queues, or calling a worker LLM. Finished-run appends and read-only
 audits reject symlink/non-regular `index.jsonl` and `index.jsonl.lock` paths;
 the audit scan opens the index itself through the regular non-symlink no-follow
-opener, transcript JSON reads/hashes also use regular non-symlink opens, and atomic
+opener and enforces its byte cap while streaming lines, so a local index growth
+race after the initial stat cannot turn an audit into an unbounded read;
+transcript JSON reads/hashes also use regular non-symlink opens, and atomic
 JSON audit writes plus transcript checksum-sidecar writes now fail closed if the
 pre-existing destination, required parent directory, or any newly-created parent
 ancestor component is a symlink or other non-regular local filesystem object. Workspace
@@ -284,7 +286,7 @@ accidentally.
 | `OMEGACLAW_SUBAGENT_MAX_TURNS` | `8` | Hard cap on iterations per dispatch. |
 | `OMEGACLAW_SUBAGENT_MAX_DIGEST_CHARS` | `2000` | Length cap on the JSON digest returned to the parent. |
 | `OMEGACLAW_SUBAGENT_RUN_DIR` | `memory/subagent-runs` | Directory for persistent JSON transcript/run records, `index.jsonl`, checksum sidecars, worker rate/concurrency state, and optional queued dispatch tasks. |
-| `OMEGACLAW_SUBAGENT_MAX_INDEX_AUDIT_BYTES` | `1048576` | Maximum `index.jsonl` bytes scanned by `verify_subagent_run_index()`; returns `index_audit_too_large` before reading oversized indexes. Finished-run appends also read only a bounded tail of `index.jsonl` when linking/rotating the hash chain, so append cost does not scale with an intentionally unrotated index. `0` disables only the audit cap. |
+| `OMEGACLAW_SUBAGENT_MAX_INDEX_AUDIT_BYTES` | `1048576` | Maximum `index.jsonl` bytes scanned by `verify_subagent_run_index()`; returns `index_audit_too_large` before reading oversized indexes and also if the cap is crossed during the no-follow line scan. Finished-run appends also read only a bounded tail of `index.jsonl` when linking/rotating the hash chain, so append cost does not scale with an intentionally unrotated index. `0` disables only the audit cap. |
 | `OMEGACLAW_SUBAGENT_MAX_TRANSCRIPT_AUDIT_BYTES` | `1048576` | Maximum bytes read from each regular non-symlink transcript referenced by `verify_subagent_run_index()` while checking transcript SHA-256s; oversized transcripts are reported as `transcript_too_large`, and transcript hashes are streamed in fixed-size chunks instead of using one unbounded `read()`. `0` disables only the cap. |
 | `OMEGACLAW_SUBAGENT_MAX_SHA256_SIDECAR_BYTES` | `4096` | Maximum bytes read from required local regular non-symlink `.sha256` sidecars before parsing the digest; symlink, oversized, or malformed sidecars fail closed without echoing local paths. |
 | `OMEGACLAW_SUBAGENT_MAX_ESCALATION_POLICY_BYTES` | `1048576` | Maximum bytes read from pinned regular non-symlink `escalation.metta` before SHA-256 hashing during cloud-delegation integrity checks; size checks use the already-open no-follow fd, oversized/symlinked/non-regular policies deny escalation before worker LLM calls, and integrity errors avoid echoing local paths. `0` disables only this read cap. |
