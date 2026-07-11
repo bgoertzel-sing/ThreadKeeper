@@ -2999,6 +2999,9 @@ def _validate_task_contract(contract):
         if not re.match(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$", str(action)):
             return f"task contract forbidden_actions entry '{action}' is not a safe action identifier"
     for prefix in (contract or {}).get("allowed_paths") or []:
+        path_error = _validate_relative_workspace_path_arg(prefix, "task contract allowed_paths entry")
+        if path_error:
+            return path_error
         try:
             _resolve_workspace_path(prefix)
         except Exception as e:
@@ -3446,6 +3449,31 @@ def _tool_shell(cmd):
         return f"(shell error: {_sanitize_error_msg(e)})"
 
 
+def _validate_relative_workspace_path_arg(path, label="path argument"):
+    """Validate prompt/contract file paths before workspace resolution.
+
+    File-tool paths and task-contract ``allowed_paths`` are prompt-visible local
+    control data. Keep them workspace-relative, traversal-free, bounded, and
+    free of control characters before they reach audit records, contract checks,
+    or filesystem helpers.
+    """
+    raw_path = str(path)
+    if not raw_path.strip():
+        return f"{label} must not be empty"
+    if len(raw_path) > _SUBAGENT_MAX_PATH_ARG_CHARS:
+        return f"{label} exceeds {_SUBAGENT_MAX_PATH_ARG_CHARS} characters"
+    if any((ord(ch) < 32 or ord(ch) == 127) for ch in raw_path):
+        return f"{label} must not contain control characters"
+    if os.path.isabs(raw_path):
+        return f"{label} must be relative to the subagent workspace"
+    raw_parts = raw_path.split(os.sep)
+    normalized = os.path.normpath(raw_path)
+    normalized_parts = normalized.split(os.sep)
+    if os.pardir in raw_parts or normalized == os.pardir or os.pardir in normalized_parts:
+        return f"{label} must not contain parent-directory traversal"
+    return ""
+
+
 def _validate_tool_args(name, args):
     expected = {
         "read-file": 1,
@@ -3465,19 +3493,10 @@ def _validate_tool_args(name, args):
         return "arguments must not be null"
     if any(not isinstance(a, str) for a in args):
         return "arguments must be strings"
-    if name in ("read-file", "write-file", "append-file") and not str(args[0]).strip():
-        return "path argument must not be empty"
-    if name in ("read-file", "write-file", "append-file") and len(str(args[0])) > _SUBAGENT_MAX_PATH_ARG_CHARS:
-        return f"path argument exceeds {_SUBAGENT_MAX_PATH_ARG_CHARS} characters"
     if name in ("read-file", "write-file", "append-file"):
-        raw_path = str(args[0])
-        if os.path.isabs(raw_path):
-            return "path argument must be relative to the subagent workspace"
-        raw_parts = raw_path.split(os.sep)
-        normalized = os.path.normpath(raw_path)
-        normalized_parts = normalized.split(os.sep)
-        if os.pardir in raw_parts or normalized == os.pardir or os.pardir in normalized_parts:
-            return "path argument must not contain parent-directory traversal"
+        path_error = _validate_relative_workspace_path_arg(args[0])
+        if path_error:
+            return path_error
     if name in ("search", "tavily-search", "technical-analysis") and not str(args[0]).strip():
         return "query argument must not be empty or whitespace-only"
     if name == "shell" and not str(args[0]).strip():

@@ -3137,10 +3137,54 @@ def test_task_contract_rejects_allowed_path_escape_before_llm(tmp_path, monkeypa
     assert payload["status"] == "error"
     assert "subagent error" in payload["summary"]
     assert "allowed_paths" in payload["summary"]
-    assert "outside workspace" in payload["summary"]
+    assert "parent-directory traversal" in payload["summary"]
     saved = json.loads(Path(payload["transcript_path"]).read_text())
     assert saved["status"] == "contract_invalid"
     assert saved["task_contract"]["allowed_paths"] == ["../outside"]
+
+
+def test_task_contract_rejects_absolute_allowed_path_before_llm(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    contract_goal = json.dumps({
+        "objective": "absolute allowed path",
+        "allowed_paths": [str(tmp_path / "safe")],
+    })
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")),
+    )
+
+    result = subagent.dispatch(contract_goal, "write-file", "unit", max_turns=1)
+    payload = json.loads(result)
+
+    assert payload["status"] == "error"
+    assert "allowed_paths" in payload["summary"]
+    assert "relative to the subagent workspace" in payload["summary"]
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["status"] == "contract_invalid"
+
+
+def test_task_contract_rejects_control_chars_in_allowed_path_before_llm(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    contract_goal = json.dumps({
+        "objective": "control char allowed path",
+        "allowed_paths": ["safe\nlog-forge"],
+    })
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")),
+    )
+
+    result = subagent.dispatch(contract_goal, "write-file", "unit", max_turns=1)
+    payload = json.loads(result)
+
+    assert payload["status"] == "error"
+    assert "allowed_paths" in payload["summary"]
+    assert "control characters" in payload["summary"]
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["status"] == "contract_invalid"
 
 
 def test_task_contract_rejects_oversized_contract_before_llm(tmp_path, monkeypatch):
@@ -4123,6 +4167,23 @@ def test_validate_tool_args_rejects_parent_directory_traversal():
     assert (
         subagent._validate_tool_args("append-file", ["safe/../out.txt", "x"])
         == "path argument must not contain parent-directory traversal"
+    )
+
+
+def test_validate_tool_args_rejects_control_chars_in_file_paths():
+    """File-tool path arguments must not carry line/control characters that
+    can forge transcript/audit lines or ambiguous filesystem names."""
+    assert (
+        subagent._validate_tool_args("read-file", ["safe\nspoof.txt"])
+        == "path argument must not contain control characters"
+    )
+    assert (
+        subagent._validate_tool_args("write-file", ["safe\tspoof.txt", "x"])
+        == "path argument must not contain control characters"
+    )
+    assert (
+        subagent._validate_tool_args("append-file", ["safe\rspoof.txt", "x"])
+        == "path argument must not contain control characters"
     )
 
 

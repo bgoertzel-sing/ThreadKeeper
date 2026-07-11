@@ -51,7 +51,9 @@ and returns a single-string digest via its own `emit` instruction.
   `requires_adjudication`. The string-list fields (`allowed_paths`,
   `forbidden_actions`, `done_criteria`) must be JSON arrays of strings;
   scalar or non-string entries fail closed before any worker LLM call.
-  Contract fields are bounded and validated before any worker LLM call.
+  `allowed_paths` entries must be bounded workspace-relative paths without
+  parent-directory traversal or control characters. Contract fields are bounded
+  and validated before any worker LLM call.
 - `tools_csv` — comma-separated list of tool names the subagent may
   call. Must be a subset of the v1 registered tools (see
   [§4.5](./subagent-design.md#45-tool-registry-for-subagents-v1)).
@@ -92,8 +94,9 @@ helper, and `append-file` uses that already-open file descriptor for size checks
 before reading existing content, closing TOCTOU symlink-swap gaps between
 `realpath` containment resolution, size inspection, and the actual file read.
 Subagent file-tool arguments are now accepted only as workspace-relative paths
-without parent-directory traversal (`..`); absolute host paths fail closed during
-argument validation before any file-tool resolver/audit path is touched.
+without parent-directory traversal (`..`) or control characters; absolute host
+paths fail closed during argument validation before any file-tool resolver/audit
+path is touched.
 Workspace `write-file` / `append-file` parents are revalidated as real
 non-symlink directories under the workspace immediately before lock/temp-file
 creation, so a local parent-directory swap
