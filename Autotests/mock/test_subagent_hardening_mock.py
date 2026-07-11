@@ -1519,6 +1519,27 @@ def test_dispatch_rejects_same_line_trailing_payload_after_emit(tmp_path, monkey
     ]
 
 
+def test_dispatch_rejects_unquoted_same_line_trailing_payload_after_emit(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_a: ('(emit done) (write-file "hidden.txt" "nope")', 0, 0),
+    )
+
+    payload = json.loads(subagent.dispatch("try unquoted hidden same-line final", "write-file", "unit", max_turns=1))
+
+    assert payload["status"] == "error"
+    assert "EMIT_PROTOCOL_VIOLATION" in payload["summary"]
+    assert "emit requires exactly one" in payload["summary"]
+    assert not (tmp_path / "workspace" / "hidden.txt").exists()
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["status"] == "emit_protocol_violation"
+    assert saved["turns"][0]["tool_calls"] == [
+        {"name": "emit", "args": ["done", '(write-file "hidden.txt" "nope"']}
+    ]
+
+
 def test_dispatch_rejects_oversized_emit_before_success(tmp_path, monkeypatch):
     _write_unit_persona(tmp_path, monkeypatch)
     monkeypatch.setattr(subagent, "_SUBAGENT_MAX_EMIT_CHARS", 8)
