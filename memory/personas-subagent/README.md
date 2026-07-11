@@ -41,10 +41,10 @@ The directory path is configurable via the
 | `base_url` | optional | Endpoint URL override. When present, takes precedence. Lets a deployment point at a specific local Ollama / vLLM / private endpoint without disturbing the parent's provider config. It is no longer used to infer local/cloud safety behavior. |
 | `endpoint_kind` | yes | Explicit transport kind: `ollama_native` for Ollama `/api/chat`, or `openai_compatible` for OpenAI-style chat-completions endpoints. |
 | `node_role` | yes | Explicit safety/budget role. Local/free roles: `local`, `worker`, `worker_loop`, `control_loop`. Cloud/budget-gated roles: `cloud`, `cloud_specialist`, `specialist`, `adjudicator`. |
-| `api_key_env` | yes | Name of the env var that carries the API key. **Never embed key material here** — the dispatcher reads `os.environ[api_key_env]` at dispatch time. |
+| `api_key_env` | yes | Safe environment-variable name (`[A-Za-z_][A-Za-z0-9_]*`) that carries the API key. **Never embed key material here** — the dispatcher reads `os.environ[api_key_env]` at dispatch time. |
 | `max_output_tokens` | optional, default 1500 | Per-subagent-call output cap. |
 | `default_tool_subset` | optional | Tool subset to use when the dispatch call omits the tools argument. The dispatch call's explicit tools argument always overrides. |
-| `persona_sha256` | optional, recommended | SHA-256 of the referenced persona prompt file. When set, a prompt mismatch fails closed before any worker LLM call. |
+| `persona_sha256` | optional, recommended | 64-character hex SHA-256 of the referenced persona prompt file. When set, a prompt mismatch or malformed digest fails closed before any worker LLM call. |
 | `task_contract` | optional | Default task contract fields (`objective`, `allowed_paths`, `forbidden_actions`, `done_criteria`, optional `max_tool_calls`) merged with any JSON contract supplied as the dispatch goal. Contract text is bounded; `allowed_paths` must resolve inside the subagent workspace; `forbidden_actions` must be simple action identifiers; `max_tool_calls` must be non-negative and can only narrow the global quota. |
 | `notes` | optional | Free-form human-readable description. Not consumed by the dispatcher. |
 
@@ -57,6 +57,9 @@ The directory path is configurable via the
   information unless your deployment policy permits it.
 - Do not rely on provider names, model names, or endpoint URLs for safety
   classification. Set `node_role` and `endpoint_kind` explicitly.
+- Keep persona config control fields as short scalar strings; the dispatcher
+  rejects non-string/oversized provider, model, endpoint, env-var, prompt-file,
+  role, and transport fields before any prompt/provider setup.
 - If a persona prompt should be immutable for a deployment, set
   `persona_sha256` and rotate it deliberately when the prompt changes.
 - The `.gitignore` for this directory should be configured per

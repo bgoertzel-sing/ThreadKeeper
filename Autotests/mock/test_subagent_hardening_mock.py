@@ -740,6 +740,92 @@ def test_persona_config_rejects_symlink_before_read(tmp_path, monkeypatch):
         assert "regular non-symlink" in str(e)
 
 
+def test_persona_config_rejects_non_string_scalar_fields(tmp_path, monkeypatch):
+    persona_dir = tmp_path / "personas"
+    persona_dir.mkdir()
+    (persona_dir / "unit.txt").write_text("You are a unit-test subagent.")
+    (persona_dir / "unit.json").write_text(json.dumps({
+        "persona_file": "unit.txt",
+        "provider": "ollama",
+        "model": 123,
+        "api_key_env": "UNIT_API_KEY",
+        "node_role": "local",
+        "endpoint_kind": "ollama_native",
+    }))
+    monkeypatch.setattr(subagent, "PERSONA_DIR", str(persona_dir))
+
+    try:
+        subagent.load_persona_config("unit")
+        assert False, "non-string persona config scalars should fail closed"
+    except ValueError as e:
+        assert "field 'model' must be a non-empty string" in str(e)
+
+
+def test_persona_config_rejects_unsafe_api_key_env_name(tmp_path, monkeypatch):
+    persona_dir = tmp_path / "personas"
+    persona_dir.mkdir()
+    (persona_dir / "unit.txt").write_text("You are a unit-test subagent.")
+    (persona_dir / "unit.json").write_text(json.dumps({
+        "persona_file": "unit.txt",
+        "provider": "ollama",
+        "model": "unit-model",
+        "api_key_env": "../../TOKEN",
+        "node_role": "local",
+        "endpoint_kind": "ollama_native",
+    }))
+    monkeypatch.setattr(subagent, "PERSONA_DIR", str(persona_dir))
+
+    try:
+        subagent.load_persona_config("unit")
+        assert False, "unsafe api_key_env names should fail closed"
+    except ValueError as e:
+        assert "safe environment-variable name" in str(e)
+
+
+def test_persona_config_rejects_malformed_persona_sha256(tmp_path, monkeypatch):
+    persona_dir = tmp_path / "personas"
+    persona_dir.mkdir()
+    (persona_dir / "unit.txt").write_text("You are a unit-test subagent.")
+    (persona_dir / "unit.json").write_text(json.dumps({
+        "persona_file": "unit.txt",
+        "persona_sha256": "not-a-digest",
+        "provider": "ollama",
+        "model": "unit-model",
+        "api_key_env": "UNIT_API_KEY",
+        "node_role": "local",
+        "endpoint_kind": "ollama_native",
+    }))
+    monkeypatch.setattr(subagent, "PERSONA_DIR", str(persona_dir))
+
+    try:
+        subagent.load_persona_config("unit")
+        assert False, "malformed persona_sha256 should fail closed before prompt read"
+    except ValueError as e:
+        assert "64-character hex SHA-256" in str(e)
+
+
+def test_persona_config_rejects_oversized_scalar_fields(tmp_path, monkeypatch):
+    persona_dir = tmp_path / "personas"
+    persona_dir.mkdir()
+    (persona_dir / "unit.txt").write_text("You are a unit-test subagent.")
+    (persona_dir / "unit.json").write_text(json.dumps({
+        "persona_file": "unit.txt",
+        "provider": "ollama",
+        "model": "x" * 80,
+        "api_key_env": "UNIT_API_KEY",
+        "node_role": "local",
+        "endpoint_kind": "ollama_native",
+    }))
+    monkeypatch.setattr(subagent, "PERSONA_DIR", str(persona_dir))
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_PERSONA_SCALAR_CHARS", 64)
+
+    try:
+        subagent.load_persona_config("unit")
+        assert False, "oversized persona scalar fields should fail closed"
+    except ValueError as e:
+        assert "OMEGACLAW_SUBAGENT_MAX_PERSONA_SCALAR_CHARS=64" in str(e)
+
+
 def test_persona_prompt_read_is_bounded_without_path_leak(tmp_path, monkeypatch):
     persona_dir = tmp_path / "personas"
     persona_dir.mkdir()

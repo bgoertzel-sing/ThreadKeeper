@@ -365,6 +365,9 @@ _SUBAGENT_MAX_PERSONA_CONFIG_BYTES = _env_int(
 _SUBAGENT_MAX_PERSONA_PROMPT_BYTES = _env_int(
     "OMEGACLAW_SUBAGENT_MAX_PERSONA_PROMPT_BYTES", 262144, minimum=0,
 )
+_SUBAGENT_MAX_PERSONA_SCALAR_CHARS = _env_int(
+    "OMEGACLAW_SUBAGENT_MAX_PERSONA_SCALAR_CHARS", 2048, minimum=64,
+)
 
 # Subagent LLM call reliability controls. Keep defaults bounded so a stuck
 # worker endpoint cannot hang the parent loop indefinitely.
@@ -2516,12 +2519,44 @@ def load_persona_config(persona_key):
         raise ValueError(
             f"persona config '{persona_key}.json' is malformed JSON: {e}"
         )
-    required = ["persona_file", "provider", "model", "api_key_env", "node_role"]
+    required = ["persona_file", "provider", "model", "api_key_env", "node_role", "endpoint_kind"]
     missing = [k for k in required if k not in cfg]
     if missing:
         raise ValueError(
             f"persona config '{persona_key}.json' missing required field(s): {missing}"
         )
+    for field in ["persona_file", "provider", "model", "api_key_env", "node_role", "endpoint_kind"]:
+        value = cfg.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(
+                f"persona config '{persona_key}.json' field '{field}' must be a non-empty string"
+            )
+        if len(value) > _SUBAGENT_MAX_PERSONA_SCALAR_CHARS:
+            raise ValueError(
+                f"persona config '{persona_key}.json' field '{field}' exceeds "
+                f"OMEGACLAW_SUBAGENT_MAX_PERSONA_SCALAR_CHARS={_SUBAGENT_MAX_PERSONA_SCALAR_CHARS}"
+            )
+    if "base_url" in cfg and cfg.get("base_url") is not None:
+        value = cfg.get("base_url")
+        if not isinstance(value, str):
+            raise ValueError(
+                f"persona config '{persona_key}.json' field 'base_url' must be a string"
+            )
+        if len(value) > _SUBAGENT_MAX_PERSONA_SCALAR_CHARS:
+            raise ValueError(
+                f"persona config '{persona_key}.json' field 'base_url' exceeds "
+                f"OMEGACLAW_SUBAGENT_MAX_PERSONA_SCALAR_CHARS={_SUBAGENT_MAX_PERSONA_SCALAR_CHARS}"
+            )
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", cfg.get("api_key_env", "")):
+        raise ValueError(
+            f"persona config '{persona_key}.json' field 'api_key_env' must be a safe environment-variable name"
+        )
+    if "persona_sha256" in cfg and cfg.get("persona_sha256"):
+        value = cfg.get("persona_sha256")
+        if not isinstance(value, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", value):
+            raise ValueError(
+                f"persona config '{persona_key}.json' field 'persona_sha256' must be a 64-character hex SHA-256"
+            )
     role = _node_role(cfg)
     if role not in (_LOCAL_NODE_ROLES | _CLOUD_NODE_ROLES):
         raise ValueError(
