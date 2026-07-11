@@ -530,7 +530,20 @@ def _subagent_workspace_root():
     OMEGACLAW_SUBAGENT_WORKSPACE for a narrower or dedicated scratch root.
     """
     root = os.environ.get("OMEGACLAW_SUBAGENT_WORKSPACE") or os.getcwd()
-    return os.path.realpath(os.path.abspath(root))
+    absolute = os.path.abspath(root)
+    try:
+        st = os.lstat(absolute)
+    except FileNotFoundError:
+        # Preserve historical write-file ergonomics: a dedicated workspace root
+        # may be created lazily by the atomic write path. Existing workspace
+        # roots, however, must be real directories rather than symlinks.
+        pass
+    except OSError:
+        raise ValueError("subagent workspace root stat failed")
+    else:
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+            raise ValueError("subagent workspace root must be a real non-symlink directory")
+    return os.path.realpath(absolute)
 
 
 def _resolve_workspace_path(path):
@@ -3320,7 +3333,10 @@ def _sanitize_error_msg(e):
     receiving a structured digest.
     """
     msg = str(e)
-    root = _subagent_workspace_root()
+    try:
+        root = _subagent_workspace_root()
+    except Exception:
+        root = ""
     if root and root in msg:
         msg = msg.replace(root, "<workspace>")
     # Strip any remaining absolute Unix paths (e.g. /tmp, /home, /etc)
@@ -3474,7 +3490,10 @@ def _tool_shell(cmd):
         return "(shell error: executable must be an allowlisted command name, not a path)"
     if not allow or exe not in allow:
         return f"(shell error: executable '{exe}' is not allowlisted)"
-    workspace = _subagent_workspace_root()
+    try:
+        workspace = _subagent_workspace_root()
+    except ValueError as e:
+        return f"(shell error: {_sanitize_error_msg(e)})"
     if not os.path.isdir(workspace):
         return "(shell error: subagent workspace does not exist)"
     env = _shell_safe_env(workspace)

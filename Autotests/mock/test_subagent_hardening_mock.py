@@ -463,6 +463,20 @@ def test_workspace_file_lock_rejects_symlink_lock_files(tmp_path, monkeypatch):
     assert outside.read_text() == "external"
 
 
+def test_file_tools_reject_symlink_workspace_root(tmp_path, monkeypatch):
+    real_workspace = tmp_path / "real-workspace"
+    real_workspace.mkdir()
+    link_workspace = tmp_path / "workspace-link"
+    link_workspace.symlink_to(real_workspace, target_is_directory=True)
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_WORKSPACE", str(link_workspace))
+
+    result = subagent._tool_write_file("artifact.txt", "content")
+
+    assert "write-file error" in result
+    assert "workspace root must be a real non-symlink directory" in result
+    assert not (real_workspace / "artifact.txt").exists()
+
+
 def test_open_workspace_file_read_rejects_symlink(tmp_path):
     outside = tmp_path / "outside.txt"
     outside.write_text("secret")
@@ -546,6 +560,21 @@ def test_shell_tool_runs_from_subagent_workspace(tmp_path, monkeypatch):
     result = subagent._tool_shell("pwd")
 
     assert result.strip() == str(tmp_path)
+
+
+def test_shell_tool_rejects_symlink_workspace_root(tmp_path, monkeypatch):
+    real_workspace = tmp_path / "real-workspace"
+    real_workspace.mkdir()
+    link_workspace = tmp_path / "workspace-link"
+    link_workspace.symlink_to(real_workspace, target_is_directory=True)
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_WORKSPACE", str(link_workspace))
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_ENABLE_SHELL", "1")
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_SHELL_ALLOWLIST", "pwd")
+
+    result = subagent._tool_shell("pwd")
+
+    assert "shell error" in result
+    assert "workspace root must be a real non-symlink directory" in result
 
 
 def test_shell_tool_rejects_explicit_executable_paths(tmp_path, monkeypatch):

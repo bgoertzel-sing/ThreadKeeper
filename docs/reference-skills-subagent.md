@@ -261,7 +261,9 @@ denial reason. Errors are never raised into the parent's MeTTa interpreter.
   minimal child environment (no inherited API keys/tokens), a sanitized `PATH`
   that excludes the workspace/current directory, no stdin, bounded argv count,
   defensively parsed output/timeout caps, explicit truncation markers, and `cwd`
-  fixed to `OMEGACLAW_SUBAGENT_WORKSPACE`.
+  fixed to `OMEGACLAW_SUBAGENT_WORKSPACE`. Existing workspace roots must be
+  real non-symlink directories before file or shell tools run, so a symlinked
+  workspace cannot redirect tool effects outside the intended root.
 - The subagent persona config must reference an API key via an
   env-var name; key material is never read from the config file
   itself. OpenAI-compatible endpoints also require the local OpenAI
@@ -329,7 +331,7 @@ accidentally.
 | `OMEGACLAW_SUBAGENT_MAX_EMIT_CHARS` | `20000` | Maximum final `emit` argument length accepted as successful worker output; oversized emits return `EMIT_PROTOCOL_VIOLATION` before becoming a transcript summary/adjudication candidate. |
 | `OMEGACLAW_SUBAGENT_MAX_RESPONSE_CHARS` | `50000` | Maximum raw worker response length parsed/persisted for one turn; oversized responses return `response_too_large` before tool parsing/execution. |
 | `OMEGACLAW_SUBAGENT_MAX_LLM_HTTP_RESPONSE_BYTES` | `1048576` | Maximum raw HTTP response body read from the native Ollama-compatible worker transport before JSON decoding. `0` disables. OpenAI-compatible SDK calls remain bounded after parsed content return by `OMEGACLAW_SUBAGENT_MAX_RESPONSE_CHARS`. |
-| `OMEGACLAW_SUBAGENT_WORKSPACE` | current working directory | Sandbox root for subagent file tools. |
+| `OMEGACLAW_SUBAGENT_WORKSPACE` | current working directory | Sandbox root for subagent file tools and optional shell `cwd`; if the root already exists it must be a real non-symlink directory. |
 | `OMEGACLAW_ESCALATION_METTA_PATH` | auto-detected source `escalation.metta` | Optional explicit escalation policy path. When set for pinned cloud-delegation integrity checks, the path must name a regular non-symlink file; unsafe values fail closed instead of falling back silently. |
 | `OMEGACLAW_ESCALATION_METTA_SHA256` | unset | Optional SHA-256 pin for `escalation.metta`; mismatch or unsafe policy path denies cloud delegation. |
 
