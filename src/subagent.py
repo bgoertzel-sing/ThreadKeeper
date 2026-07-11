@@ -193,19 +193,19 @@ def _escalation_policy_integrity():
     if not path:
         return (False, "escalation.metta not found for integrity check")
     try:
-        if _SUBAGENT_MAX_ESCALATION_POLICY_BYTES:
-            policy_size = os.path.getsize(path)
-            if policy_size > _SUBAGENT_MAX_ESCALATION_POLICY_BYTES:
-                return (
-                    False,
-                    "escalation.metta exceeds "
-                    f"OMEGACLAW_SUBAGENT_MAX_ESCALATION_POLICY_BYTES={_SUBAGENT_MAX_ESCALATION_POLICY_BYTES}",
-                )
-            read_limit = _SUBAGENT_MAX_ESCALATION_POLICY_BYTES + 1
-        else:
-            read_limit = -1
         fd = _open_regular_no_symlink(path, os.O_RDONLY)
         with os.fdopen(fd, "rb") as f:
+            if _SUBAGENT_MAX_ESCALATION_POLICY_BYTES:
+                policy_size = os.fstat(f.fileno()).st_size
+                if policy_size > _SUBAGENT_MAX_ESCALATION_POLICY_BYTES:
+                    return (
+                        False,
+                        "escalation.metta exceeds "
+                        f"OMEGACLAW_SUBAGENT_MAX_ESCALATION_POLICY_BYTES={_SUBAGENT_MAX_ESCALATION_POLICY_BYTES}",
+                    )
+                read_limit = _SUBAGENT_MAX_ESCALATION_POLICY_BYTES + 1
+            else:
+                read_limit = -1
             payload = f.read(read_limit)
         if _SUBAGENT_MAX_ESCALATION_POLICY_BYTES and len(payload) > _SUBAGENT_MAX_ESCALATION_POLICY_BYTES:
             return (
@@ -2577,23 +2577,24 @@ def load_persona_prompt(persona_file, persona_key, expected_sha256=""):
     a missing/mismatched prompt hash fails closed before any worker call.
     """
     path = _resolve_persona_prompt_path(persona_file, persona_key)
-    if not os.path.isfile(path):
+    try:
+        fd = _open_regular_no_symlink(path, os.O_RDONLY)
+    except FileNotFoundError:
         raise FileNotFoundError(
             f"persona prompt '{persona_file}' for key '{persona_key}' not found"
         )
     try:
-        if _SUBAGENT_MAX_PERSONA_PROMPT_BYTES:
-            prompt_size = os.path.getsize(path)
-            if prompt_size > _SUBAGENT_MAX_PERSONA_PROMPT_BYTES:
-                raise ValueError(
-                    f"persona prompt '{persona_file}' for key '{persona_key}' exceeds "
-                    f"OMEGACLAW_SUBAGENT_MAX_PERSONA_PROMPT_BYTES={_SUBAGENT_MAX_PERSONA_PROMPT_BYTES}"
-                )
-            read_limit = _SUBAGENT_MAX_PERSONA_PROMPT_BYTES + 1
-        else:
-            read_limit = -1
-        fd = _open_regular_no_symlink(path, os.O_RDONLY)
         with os.fdopen(fd, "rb") as f:
+            if _SUBAGENT_MAX_PERSONA_PROMPT_BYTES:
+                prompt_size = os.fstat(f.fileno()).st_size
+                if prompt_size > _SUBAGENT_MAX_PERSONA_PROMPT_BYTES:
+                    raise ValueError(
+                        f"persona prompt '{persona_file}' for key '{persona_key}' exceeds "
+                        f"OMEGACLAW_SUBAGENT_MAX_PERSONA_PROMPT_BYTES={_SUBAGENT_MAX_PERSONA_PROMPT_BYTES}"
+                    )
+                read_limit = _SUBAGENT_MAX_PERSONA_PROMPT_BYTES + 1
+            else:
+                read_limit = -1
             raw = f.read(read_limit)
     except ValueError:
         raise

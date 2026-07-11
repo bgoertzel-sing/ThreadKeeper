@@ -756,6 +756,17 @@ def test_persona_prompt_read_is_bounded_without_path_leak(tmp_path, monkeypatch)
         assert str(tmp_path) not in msg
 
 
+def test_persona_prompt_size_check_uses_open_fd(tmp_path, monkeypatch):
+    persona_dir = tmp_path / "personas"
+    persona_dir.mkdir()
+    (persona_dir / "unit.txt").write_text("trusted prompt")
+    monkeypatch.setattr(subagent, "PERSONA_DIR", str(persona_dir))
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_PERSONA_PROMPT_BYTES", 64)
+    monkeypatch.setattr(os.path, "getsize", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("getsize race window")))
+
+    assert subagent.load_persona_prompt("unit.txt", "unit") == "trusted prompt"
+
+
 def test_persona_prompt_sha256_pin_fails_closed(tmp_path, monkeypatch):
     persona_dir = tmp_path / "personas"
     persona_dir.mkdir()
@@ -1503,6 +1514,20 @@ def test_escalation_policy_integrity_read_is_bounded_before_hashing(tmp_path, mo
     assert str(tmp_path) not in payload["summary"]
     saved = json.loads(Path(payload["transcript_path"]).read_text())
     assert saved["status"] == "escalation_denied"
+
+
+def test_escalation_policy_integrity_size_check_uses_open_fd(tmp_path, monkeypatch):
+    policy = tmp_path / "escalation.metta"
+    policy.write_text("trusted policy")
+    monkeypatch.setenv("OMEGACLAW_ESCALATION_METTA_PATH", str(policy))
+    monkeypatch.setenv("OMEGACLAW_ESCALATION_METTA_SHA256", hashlib.sha256(b"trusted policy").hexdigest())
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_ESCALATION_POLICY_BYTES", 64)
+    monkeypatch.setattr(os.path, "getsize", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("getsize race window")))
+
+    ok, reason = subagent._escalation_policy_integrity()
+
+    assert ok is True
+    assert reason == "escalation.metta integrity ok"
 
 
 def test_escalation_policy_integrity_rejects_symlink_policy(tmp_path, monkeypatch):
