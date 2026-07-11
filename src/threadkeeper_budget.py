@@ -112,6 +112,51 @@ def _reject_unsafe_existing_file(path: str, label: str) -> None:
         raise ValueError(f"{label} must be a regular non-symlink file")
 
 
+def _ensure_real_directory(path: str) -> None:
+    """Create/use a local directory tree without following symlink ancestors."""
+    if not path:
+        return
+    target = os.path.abspath(path)
+    parts = []
+    cur = target
+    while cur and cur != os.path.dirname(cur):
+        parts.append(cur)
+        cur = os.path.dirname(cur)
+    parts.reverse()
+    for component in parts:
+        try:
+            st = os.lstat(component)
+        except FileNotFoundError:
+            os.mkdir(component, 0o700)
+            st = os.lstat(component)
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+            raise ValueError("directory must be a real non-symlink directory")
+
+
+def _fsync_parent_dir(path: str) -> None:
+    """Best-effort fsync for audit-log parent directory metadata."""
+    parent = os.path.dirname(os.path.abspath(path))
+    if not parent:
+        return
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = None
+    try:
+        fd = os.open(parent, flags)
+        os.fsync(fd)
+    except Exception:
+        return
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+
+
 # ----------------------------------------------------------------------
 # Data records
 # ----------------------------------------------------------------------
@@ -356,7 +401,7 @@ class BudgetTracker:
             output_tokens=int(output_tokens or 0),
         )
         try:
-            os.makedirs(os.path.dirname(self.usage_log), exist_ok=True)
+            _ensure_real_directory(os.path.dirname(self.usage_log))
             _reject_unsafe_existing_file(self.usage_log, "usage log")
             fd = _open_regular_no_symlink(
                 self.usage_log, os.O_WRONLY | os.O_CREAT | os.O_APPEND
@@ -365,6 +410,7 @@ class BudgetTracker:
                 f.write(json.dumps(asdict(rec)) + "\n")
                 f.flush()
                 os.fsync(f.fileno())
+            _fsync_parent_dir(self.usage_log)
         except Exception:
             pass  # accounting must never break the response path
         return rec
@@ -565,7 +611,7 @@ class BudgetTracker:
         if not self._record_decisions:
             return
         try:
-            os.makedirs(os.path.dirname(self.escalation_log), exist_ok=True)
+            _ensure_real_directory(os.path.dirname(self.escalation_log))
             _reject_unsafe_existing_file(self.escalation_log, "escalation log")
             fd = _open_regular_no_symlink(
                 self.escalation_log, os.O_WRONLY | os.O_CREAT | os.O_APPEND
@@ -574,6 +620,7 @@ class BudgetTracker:
                 f.write(json.dumps(asdict(d)) + "\n")
                 f.flush()
                 os.fsync(f.fileno())
+            _fsync_parent_dir(self.escalation_log)
         except Exception:
             pass
 

@@ -103,6 +103,60 @@ def test_budget_escalation_log_rejects_symlink_target(tmp_path):
     assert escalation_log.is_symlink()
 
 
+def test_budget_usage_log_rejects_symlink_parent(tmp_path):
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlink unavailable on this platform")
+    outside_dir = tmp_path / "outside-memory"
+    outside_dir.mkdir()
+    memory_link = tmp_path / "memory"
+    memory_link.symlink_to(outside_dir, target_is_directory=True)
+
+    tracker = tb.BudgetTracker(
+        usage_log=str(memory_link / "usage.jsonl"),
+        escalation_log=str(tmp_path / "safe-memory" / "escalations.jsonl"),
+    )
+    tracker.record("worker_loop", "unit", 3, 5)
+
+    assert memory_link.is_symlink()
+    assert not (outside_dir / "usage.jsonl").exists()
+
+
+def test_budget_escalation_log_rejects_symlink_parent(tmp_path):
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlink unavailable on this platform")
+    outside_dir = tmp_path / "outside-memory"
+    outside_dir.mkdir()
+    memory_link = tmp_path / "memory"
+    memory_link.symlink_to(outside_dir, target_is_directory=True)
+
+    tracker = tb.BudgetTracker(
+        usage_log=str(tmp_path / "safe-memory" / "usage.jsonl"),
+        escalation_log=str(memory_link / "escalations.jsonl"),
+    )
+    tracker.should_escalate(thread_id="default", subproblem_is_hard=False)
+
+    assert memory_link.is_symlink()
+    assert not (outside_dir / "escalations.jsonl").exists()
+
+
+def test_budget_log_parent_creation_rejects_symlink_ancestor(tmp_path):
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlink unavailable on this platform")
+    outside_dir = tmp_path / "outside-memory"
+    outside_dir.mkdir()
+    memory_link = tmp_path / "memory-link"
+    memory_link.symlink_to(outside_dir, target_is_directory=True)
+
+    tracker = tb.BudgetTracker(
+        usage_log=str(memory_link / "nested" / "usage.jsonl"),
+        escalation_log=str(tmp_path / "safe-memory" / "escalations.jsonl"),
+    )
+    tracker.record("worker_loop", "unit", 3, 5)
+
+    assert memory_link.is_symlink()
+    assert not (outside_dir / "nested" / "usage.jsonl").exists()
+
+
 def test_budget_usage_log_read_rejects_symlink_source(tmp_path):
     if not hasattr(os, "symlink"):
         pytest.skip("symlink unavailable on this platform")
