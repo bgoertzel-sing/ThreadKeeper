@@ -52,6 +52,34 @@ def test_budget_config_read_is_bounded(tmp_path, monkeypatch):
     assert tracker.summary("default")["ceiling_tokens"] == 2_000_000
 
 
+def test_budget_config_read_rechecks_size_after_open(tmp_path, monkeypatch):
+    monkeypatch.setattr(tb, "_MAX_BUDGET_CONFIG_BYTES", 64)
+    config_path = tmp_path / "threadkeeper.config.yaml"
+    config_path.write_text(
+        "budget:\n  thread_token_ceiling: 7\n  min_local_iterations_before_escalation: 0\n"
+        + ("#" * 128),
+        encoding="utf-8",
+    )
+    real_lstat = tb.os.lstat
+
+    def small_lstat(path):
+        st = real_lstat(path)
+        if Path(path) == config_path:
+            values = list(st)
+            values[6] = 1
+            return os.stat_result(values)
+        return st
+
+    monkeypatch.setattr(tb.os, "lstat", small_lstat)
+
+    tracker = tb.BudgetTracker(
+        config_path=str(config_path),
+        usage_log=str(tmp_path / "memory" / "usage.jsonl"),
+        escalation_log=str(tmp_path / "memory" / "escalations.jsonl"),
+    )
+
+    assert tracker.summary("default")["ceiling_tokens"] == 2_000_000
+
 def test_budget_metta_policy_rejects_symlink_source(tmp_path, monkeypatch):
     if not hasattr(os, "symlink"):
         pytest.skip("symlink unavailable on this platform")
@@ -195,6 +223,35 @@ def test_budget_usage_log_read_is_bounded(tmp_path, monkeypatch):
 
     assert tracker.spent_tokens("default") == 0
 
+
+def test_budget_usage_log_read_rechecks_size_after_open(tmp_path, monkeypatch):
+    monkeypatch.setattr(tb, "_MAX_BUDGET_LOG_BYTES", 64)
+    usage_log = tmp_path / "memory" / "usage.jsonl"
+    usage_log.parent.mkdir()
+    usage_log.write_text(
+        json.dumps({"thread_id": "default", "input_tokens": 100, "output_tokens": 23})
+        + "\n"
+        + ("x" * 128),
+        encoding="utf-8",
+    )
+    real_lstat = tb.os.lstat
+
+    def small_lstat(path):
+        st = real_lstat(path)
+        if Path(path) == usage_log:
+            values = list(st)
+            values[6] = 1
+            return os.stat_result(values)
+        return st
+
+    monkeypatch.setattr(tb.os, "lstat", small_lstat)
+
+    tracker = tb.BudgetTracker(
+        usage_log=str(usage_log),
+        escalation_log=str(tmp_path / "memory" / "escalations.jsonl"),
+    )
+
+    assert tracker.spent_tokens("default") == 0
 
 def test_budget_usage_and_escalation_appends_are_fsynced(tmp_path, monkeypatch):
     fsync_calls = []

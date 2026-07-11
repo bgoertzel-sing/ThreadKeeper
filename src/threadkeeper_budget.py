@@ -352,8 +352,21 @@ class BudgetTracker:
             if st.st_size > _MAX_BUDGET_CONFIG_BYTES:
                 return {}
             fd = _open_regular_no_symlink(self._config_path, os.O_RDONLY)
-            with os.fdopen(fd, "r", encoding="utf-8") as f:
-                return yaml.safe_load(f) or {}
+            try:
+                opened = os.fstat(fd)
+                if not stat.S_ISREG(opened.st_mode):
+                    os.close(fd)
+                    return {}
+                if opened.st_size > _MAX_BUDGET_CONFIG_BYTES:
+                    os.close(fd)
+                    return {}
+                with os.fdopen(fd, "rb") as f:
+                    raw = f.read(_MAX_BUDGET_CONFIG_BYTES + 1)
+                if len(raw) > _MAX_BUDGET_CONFIG_BYTES:
+                    return {}
+                return yaml.safe_load(raw.decode("utf-8")) or {}
+            except UnicodeDecodeError:
+                return {}
         except Exception:
             return {}
 
@@ -436,28 +449,45 @@ class BudgetTracker:
             if st.st_size > _MAX_BUDGET_LOG_BYTES:
                 return
             fd = _open_regular_no_symlink(self.usage_log, os.O_RDONLY)
-            with os.fdopen(fd, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        d = json.loads(line)
-                    except Exception:
-                        continue
-                    if thread_id is not None:
-                        rec_tid = d.get("thread_id")
-                        # Records written without a thread_id (the worker/loop
-                        # usage log format + the dashboard's own records) belong
-                        # to the default thread — otherwise the per-thread
-                        # filter would exclude ALL real usage and the gate would
-                        # always see spent=0 (deny forever).
-                        if rec_tid is None:
-                            if thread_id != "default":
-                                continue
-                        elif rec_tid != thread_id:
+            try:
+                opened = os.fstat(fd)
+                if not stat.S_ISREG(opened.st_mode):
+                    os.close(fd)
+                    return
+                if opened.st_size > _MAX_BUDGET_LOG_BYTES:
+                    os.close(fd)
+                    return
+                with os.fdopen(fd, "rb") as f:
+                    raw = f.read(_MAX_BUDGET_LOG_BYTES + 1)
+                if len(raw) > _MAX_BUDGET_LOG_BYTES:
+                    return
+            except Exception:
+                try:
+                    os.close(fd)
+                except Exception:
+                    pass
+                return
+            for line in raw.decode("utf-8", errors="replace").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                if thread_id is not None:
+                    rec_tid = d.get("thread_id")
+                    # Records written without a thread_id (the worker/loop
+                    # usage log format + the dashboard's own records) belong
+                    # to the default thread — otherwise the per-thread
+                    # filter would exclude ALL real usage and the gate would
+                    # always see spent=0 (deny forever).
+                    if rec_tid is None:
+                        if thread_id != "default":
                             continue
-                    yield d
+                    elif rec_tid != thread_id:
+                        continue
+                yield d
         except Exception:
             return
 
