@@ -139,7 +139,13 @@ required regular non-symlink queue-task `.sha256` sidecar, revalidates the task 
 contract, re-injects that contract into the synchronous dispatch goal while
 queue-only mode is suppressed, writes a compact `*.result.json`, and leaves the
 task as `*.done` plus a refreshed `.sha256` sidecar for audit instead of
-silently re-running it. Symlink and non-regular `queue/*.json` entries are ignored by queue listing and rejected before claim; a symlink/non-directory `queue/` itself is also rejected before listing or claim, so a worker cannot be redirected outside `OMEGACLAW_SUBAGENT_RUN_DIR`. If checksum, validation, or execution fails after a task
+silently re-running it. Explicit `queue_path` arguments are bounded and reject
+NUL/control characters before any claim/rename, keeping operator inputs from
+forging multiline audit/status text. Symlink and non-regular `queue/*.json`
+entries are ignored by queue listing and rejected before claim; a
+symlink/non-directory `queue/` itself is also rejected before listing or claim,
+so a worker cannot be redirected outside `OMEGACLAW_SUBAGENT_RUN_DIR`. If
+checksum, validation, or execution fails after a task
 has been claimed, the helper retains the claimed task as `*.failed`, writes a
 fresh `.sha256` sidecar for the retained bytes when possible, and writes
 `*.failed.result.json` so malformed or tampered queued records do not vanish
@@ -357,7 +363,7 @@ end-to-end walkthrough.
 | Task contract enables `requires_adjudication` and worker emits a final answer | Structured JSON `status=needs_adjudication`; digest includes bounded `adjudication` metadata (`required`, `status`, `candidate_summary`); transcript status `adjudication_required`. |
 | Queue-only mode accepts a dispatch | Structured JSON `status=queued`; digest includes `queue_path`/`queue_sha256`/`queue_sha256_path`; transcript status `queued`; no worker LLM call is attempted. |
 | Queue-only mode is at capacity | Structured JSON `status=error`; `summary` contains `queue backpressure`; transcript status `queue_backpressure`; no worker LLM call is attempted. |
-| Queued worker sees an escaping task path | `run_queued_dispatch(...)` returns JSON `status=queue_worker_error`; no worker LLM call is attempted. |
+| Queued worker sees an escaping, oversized, or control-character task path | `run_queued_dispatch(...)` returns JSON `status=queue_worker_error`; no queue task is claimed and no worker LLM call is attempted. |
 | Queued worker sees a missing/mismatched queue-task checksum sidecar after claiming a task | `run_queued_dispatch(...)` returns JSON `status=queue_worker_error`; claimed task is retained as `*.failed` with a fresh checksum sidecar when possible; no worker LLM call is attempted. |
 | Queued worker sees a symlink, oversized, or malformed queue-task checksum sidecar | `run_queued_dispatch(...)` returns JSON `status=queue_worker_error`; the sidecar must be regular/non-symlink and reads are bounded by `OMEGACLAW_SUBAGENT_MAX_SHA256_SIDECAR_BYTES`; no worker LLM call is attempted. |
 | Queued worker sees bad queued JSON/shape after claiming a task | `run_queued_dispatch(...)` returns JSON `status=queue_worker_error`; claimed task is retained as `*.failed` with `*.failed.result.json`; no worker LLM call is attempted for validation failures. |

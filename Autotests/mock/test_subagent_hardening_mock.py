@@ -2153,6 +2153,41 @@ def test_run_queued_dispatch_rejects_path_escape(tmp_path, monkeypatch):
     assert "escapes queue dir" in result["summary"]
 
 
+def test_run_queued_dispatch_rejects_control_character_path_before_claim(tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs"
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(run_dir))
+    queue_dir = run_dir / "queue"
+    queue_dir.mkdir(parents=True)
+    task = queue_dir / "task.json"
+    task.write_text('{"status":"queued"}', encoding="utf-8")
+
+    result = json.loads(subagent.run_queued_dispatch(str(task) + "\n"))
+
+    assert result["status"] == "queue_worker_error"
+    assert "control characters" in result["summary"]
+    assert task.exists()
+    assert not Path(str(task) + ".claimed").exists()
+    assert not Path(str(task) + ".failed").exists()
+
+
+def test_run_queued_dispatch_rejects_oversized_path_before_claim(tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs"
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(run_dir))
+    queue_dir = run_dir / "queue"
+    queue_dir.mkdir(parents=True)
+    task = queue_dir / "task.json"
+    task.write_text('{"status":"queued"}', encoding="utf-8")
+
+    too_long = str(task) + ("x" * (subagent._SUBAGENT_MAX_PATH_ARG_CHARS + 1))
+    result = json.loads(subagent.run_queued_dispatch(too_long))
+
+    assert result["status"] == "queue_worker_error"
+    assert "bounded path string" in result["summary"]
+    assert task.exists()
+    assert not Path(str(task) + ".claimed").exists()
+    assert not Path(str(task) + ".failed").exists()
+
+
 def test_run_queued_dispatch_rejects_result_sidecar_without_renaming(tmp_path, monkeypatch):
     run_dir = tmp_path / "runs"
     monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(run_dir))

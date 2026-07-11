@@ -1263,13 +1263,22 @@ def _sha256_file_bounded(path, max_bytes=0, chunk_size=65536):
 
 
 def _resolve_queue_task_path(queue_path):
-    if not queue_path or "\x00" in str(queue_path):
+    if not queue_path:
         raise ValueError("invalid queued dispatch path")
+    raw_queue_path = str(queue_path)
+    if (
+        "\x00" in raw_queue_path
+        or len(raw_queue_path) > _SUBAGENT_MAX_PATH_ARG_CHARS
+        or any((ord(ch) < 32 or ord(ch) == 127) for ch in raw_queue_path)
+    ):
+        raise ValueError(
+            "queued dispatch path must be a bounded path string without control characters"
+        )
     _ensure_regular_directory(SUBAGENT_RUN_DIR, "subagent run dir")
     queue_dir_path = _dispatch_queue_dir()
     _ensure_regular_directory(queue_dir_path, "subagent dispatch queue")
     queue_dir = os.path.realpath(os.path.abspath(queue_dir_path))
-    raw_candidate = os.path.abspath(str(queue_path))
+    raw_candidate = os.path.abspath(raw_queue_path)
     candidate = os.path.realpath(raw_candidate)
     if os.path.commonpath([queue_dir, candidate]) != queue_dir:
         raise ValueError(f"queued dispatch path escapes queue dir ({queue_dir}): {queue_path}")
