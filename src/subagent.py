@@ -3569,10 +3569,18 @@ def _validate_tool_args(name, args):
         path_error = _validate_relative_workspace_path_arg(args[0])
         if path_error:
             return path_error
-    if name in ("search", "tavily-search", "technical-analysis") and not str(args[0]).strip():
-        return "query argument must not be empty or whitespace-only"
-    if name == "shell" and not str(args[0]).strip():
-        return "shell command must not be empty or whitespace-only"
+    if name in ("search", "tavily-search", "technical-analysis"):
+        query = str(args[0])
+        if not query.strip():
+            return "query argument must not be empty or whitespace-only"
+        if any((ord(ch) < 32 or ord(ch) == 127) for ch in query):
+            return "query argument must not contain control characters"
+    if name == "shell":
+        command = str(args[0])
+        if not command.strip():
+            return "shell command must not be empty or whitespace-only"
+        if any((ord(ch) < 32 or ord(ch) == 127) for ch in command):
+            return "shell command must not contain control characters"
     too_long = [i + 1 for i, arg in enumerate(args) if len(str(arg)) > _SUBAGENT_MAX_TOOL_ARG_CHARS]
     if too_long:
         return f"argument(s) {too_long} exceed {_SUBAGENT_MAX_TOOL_ARG_CHARS} characters"

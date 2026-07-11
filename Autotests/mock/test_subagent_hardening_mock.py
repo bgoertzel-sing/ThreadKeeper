@@ -4330,6 +4330,18 @@ def test_validate_tool_args_shell_accepts_nonempty_command():
     assert subagent._validate_tool_args("shell", ["ls -la"]) is None
 
 
+def test_validate_tool_args_shell_rejects_control_characters():
+    """Shell command strings must stay single-line/plain for transcript clarity."""
+    assert (
+        subagent._validate_tool_args("shell", ["echo safe\nwhoami"])
+        == "shell command must not contain control characters"
+    )
+    assert (
+        subagent._validate_tool_args("shell", ["echo safe\x7f"])
+        == "shell command must not contain control characters"
+    )
+
+
 def test_validate_tool_args_rejects_non_string_arguments():
     """Tool calls must use strongly typed string arguments, not JSON arrays,
     objects, booleans, or numbers coerced with str()."""
@@ -4408,6 +4420,19 @@ def test_validate_tool_args_search_rejects_empty_query():
         assert subagent._validate_tool_args(tool, [""]) == "query argument must not be empty or whitespace-only"
         assert subagent._validate_tool_args(tool, ["   "]) == "query argument must not be empty or whitespace-only"
         assert subagent._validate_tool_args(tool, ["\t\n"]) == "query argument must not be empty or whitespace-only"
+
+
+def test_validate_tool_args_search_rejects_control_characters():
+    """External query tools reject control characters before provider calls."""
+    for tool in ("search", "tavily-search", "technical-analysis"):
+        assert (
+            subagent._validate_tool_args(tool, ["normal query\nforged line"])
+            == "query argument must not contain control characters"
+        )
+        assert (
+            subagent._validate_tool_args(tool, ["normal query\x7f"])
+            == "query argument must not contain control characters"
+        )
 
 
 def test_validate_tool_args_search_accepts_nonempty_query():
