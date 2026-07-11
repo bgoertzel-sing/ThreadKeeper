@@ -2485,6 +2485,31 @@ def test_run_queued_dispatch_rejects_cancel_file_escape_before_worker_llm(tmp_pa
     assert Path(str(queue_path) + ".failed").exists()
 
 
+def test_run_queued_dispatch_rejects_cancel_file_control_chars_before_worker_llm(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_QUEUE_ONLY", "1")
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_QUEUED_DISPATCHES", 4)
+    payload = json.loads(subagent.dispatch("queue forged cancel", "write-file", "unit", max_turns=2))
+    queue_path = Path(payload["queue_path"])
+    queued = json.loads(queue_path.read_text())
+    queued["cancel_file"] = "safe.cancel\nforged-status: cancelled"
+    digest = subagent._json_atomic_write(str(queue_path), queued)
+    subagent._write_transcript_integrity_sidecar(str(queue_path), digest)
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")),
+    )
+
+    result = json.loads(subagent.run_queued_dispatch(str(queue_path)))
+
+    assert result["status"] == "queue_worker_error"
+    assert "cancel_file" in result["summary"]
+    assert "control characters" in result["summary"]
+    assert not queue_path.exists()
+    assert Path(str(queue_path) + ".failed").exists()
+
+
 def test_run_queued_dispatch_rejects_expired_task_age_before_worker_llm(tmp_path, monkeypatch):
     _write_unit_persona(tmp_path, monkeypatch)
     monkeypatch.setenv("OMEGACLAW_SUBAGENT_QUEUE_ONLY", "1")
@@ -2840,6 +2865,22 @@ def test_run_queued_worker_loop_rejects_stop_file_escape_before_lock(tmp_path, m
     assert result["tasks_attempted"] == 0
     assert "stop_file" in result["summary"]
     assert "run dir" in result["summary"]
+    assert not (run_dir / ".async-worker.lock").exists()
+
+
+def test_run_queued_worker_loop_rejects_stop_file_control_chars_before_lock(tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs"
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(run_dir))
+
+    result = json.loads(subagent.run_queued_worker_loop(
+        max_tasks=1, poll_interval_s=0, max_idle_polls=0,
+        stop_file="safe.stop\nforged-status: idle",
+    ))
+
+    assert result["status"] == "worker_config_invalid"
+    assert result["tasks_attempted"] == 0
+    assert "stop_file" in result["summary"]
+    assert "control characters" in result["summary"]
     assert not (run_dir / ".async-worker.lock").exists()
 
 

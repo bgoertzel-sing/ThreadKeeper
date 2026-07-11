@@ -1105,13 +1105,19 @@ def _resolve_run_control_file_path(value, label):
     """
     if not value:
         return ""
-    raw = str(value).strip()
+    raw_value = str(value)
+    if (
+        "\x00" in raw_value
+        or any((ord(ch) < 32 or ord(ch) == 127) for ch in raw_value)
+        or len(raw_value) > _SUBAGENT_MAX_PATH_ARG_CHARS
+    ):
+        raise ValueError(
+            f"{label} must be a bounded path string without control characters "
+            f"(max {_SUBAGENT_MAX_PATH_ARG_CHARS} chars)"
+        )
+    raw = raw_value.strip()
     if not raw:
         return ""
-    if "\x00" in raw or len(raw) > _SUBAGENT_MAX_PATH_ARG_CHARS:
-        raise ValueError(
-            f"{label} must be a bounded path string (max {_SUBAGENT_MAX_PATH_ARG_CHARS} chars)"
-        )
     base = os.path.realpath(os.path.abspath(SUBAGENT_RUN_DIR))
     candidate = raw if os.path.isabs(raw) else os.path.join(base, raw)
     candidate_abs = os.path.abspath(candidate)

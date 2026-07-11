@@ -157,10 +157,12 @@ does not daemonize, sleep, poll forever, or auto-start from `dispatch`.
 `subagent.run_queued_worker_loop(...)` is the corresponding supervised async
 worker loop: it repeatedly claims pending queue records until an explicit bound
 is reached (`max_tasks`, `max_idle_polls`, `max_runtime_s`, `max_consecutive_errors`, or a `stop_file`).
-Worker stop-token and queued dispatch cancellation-token paths are resolved under
+Worker stop-token and queued dispatch cancellation-token paths are bounded,
+reject NUL/control characters, and are resolved under
 `OMEGACLAW_SUBAGENT_RUN_DIR` (relative values are interpreted there, absolute
-values must remain there), and token checks only honor regular non-symlink files
-so queued records/operator arguments cannot probe arbitrary host paths.
+values must remain there). Token checks only honor regular non-symlink files
+so queued records/operator arguments cannot probe arbitrary host paths or forge
+multiline status/audit text.
 The loop uses a best-effort local lock (`.async-worker.lock`) to avoid two local
 workers draining the same queue concurrently when `fcntl` is available. While
 held, the lock file contains compact JSON metadata (`pid`, `started_at`, bounds,
