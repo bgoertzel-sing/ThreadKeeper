@@ -1022,9 +1022,12 @@ def verify_subagent_run_index(index_path=None):
                         resolved_transcript = _resolve_subagent_transcript_path(transcript_path)
                         if _SUBAGENT_MAX_TRANSCRIPT_AUDIT_BYTES:
                             try:
-                                transcript_size = os.path.getsize(resolved_transcript)
+                                transcript_stat = os.lstat(resolved_transcript)
                             except OSError as e:
                                 raise ValueError(f"transcript size check failed: {type(e).__name__}")
+                            if stat.S_ISLNK(transcript_stat.st_mode) or not stat.S_ISREG(transcript_stat.st_mode):
+                                raise ValueError("transcript audit record must be a regular non-symlink file")
+                            transcript_size = transcript_stat.st_size
                             if transcript_size > _SUBAGENT_MAX_TRANSCRIPT_AUDIT_BYTES:
                                 issues.append({
                                     "line": line_no,
@@ -1222,8 +1225,9 @@ def _sha256_file_bounded(path, max_bytes=0, chunk_size=65536):
 
     ``max_bytes=0`` preserves the existing explicit opt-out semantics for audit
     caps, but still streams in fixed-size chunks. When a cap is set, enforce it
-    during the read as well as via any caller-side size check so races/truncation
-    between ``getsize`` and ``open`` do not turn an audit into an unbounded read.
+    during the read as well as via any caller-side size check so local file
+    growth after stat/open validation does not turn an audit into an unbounded
+    read.
     """
     cap_bytes = max(0, int(max_bytes or 0))
     chunk = max(1, int(chunk_size or 65536))
