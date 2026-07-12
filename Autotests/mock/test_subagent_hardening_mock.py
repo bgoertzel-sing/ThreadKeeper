@@ -3354,6 +3354,23 @@ def test_run_subagent_worker_loop_env_file_uses_open_fd_metadata(tmp_path, monke
     assert os.environ["OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_TASKS"] == "0"
 
 
+def test_run_subagent_worker_loop_env_file_bounds_read_after_fstat(tmp_path, monkeypatch):
+    script = ROOT / "scripts" / "run-subagent-worker-loop"
+    module = runpy.run_path(str(script), run_name="threadkeeper_worker_loop_script_read_cap_test")
+    env_file = tmp_path / "grown.env"
+    env_file.write_bytes(b"A=" + b"x" * (64 * 1024))
+    real_fstat = os.fstat
+
+    def underreport_size(fd):
+        result = real_fstat(fd)
+        return os.stat_result((*result[:6], 0, *result[7:]))
+
+    monkeypatch.setattr(os, "fstat", underreport_size)
+
+    with pytest.raises(ValueError, match="too large while reading"):
+        module["_load_env_file"](str(env_file))
+
+
 def test_artifact_local_worker_loop_one_task_smoke_script(tmp_path):
     script = ROOT / "Autotests" / "mock" / "run_worker_loop_one_task_smoke.py"
     completed = subprocess.run(
