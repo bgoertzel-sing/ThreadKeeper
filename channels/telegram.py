@@ -165,6 +165,37 @@ def should_skip_response():
     return _last_skip_response
 
 
+def _should_skip_group_response(message, msg):
+    """Return whether a group message is addressed only to another bot.
+
+    An explicit mention of this bot takes precedence over incidental mentions
+    of collaborators (for example, "@Protomegabot ... from @Protocosmobot").
+    """
+    mentions = []
+    for ent in message.get("entities", []) or []:
+        if ent.get("type") != "mention":
+            continue
+        start = ent.get("offset", 0)
+        length = ent.get("length", 0)
+        mentioned = msg[start:start + length].lstrip("@").lower()
+        if mentioned:
+            mentions.append(mentioned)
+
+    self_mentioned = any(
+        any(name in mentioned for name in ("protomega", "protom"))
+        for mentioned in mentions
+    )
+    if self_mentioned:
+        return False
+
+    if mentions:
+        return True
+
+    reply_to = message.get("reply_to_message") or {}
+    reply_from = reply_to.get("from") or {}
+    return bool(reply_from.get("is_bot") and str(reply_from.get("id", "")))
+
+
 def _parse_auth_candidate(msg):
     text = msg.strip()
     lower = text.lower()
@@ -698,33 +729,10 @@ def _handle_updates(updates):
         if not chat_id:
             continue
 
-        # In group chats, skip messages explicitly addressed to another bot.
-        # ProtoMegaBot should see all messages (for context/bot-bot discussion)
-        # but only respond to messages addressed to it, to Ben, or to nobody in particular.
-        # Messages starting with @OtherBot or replying to another bot are ignored.
+        # In group chats, ingest messages addressed to other bots for context,
+        # but suppress a response unless this bot is also explicitly mentioned.
         if chat_type != "private":
-            msg_lower = msg.strip().lower()
-            # Check if message starts with an @mention of someone else
-            mentioned_bots = message.get("entities", []) or []
-            reply_to = message.get("reply_to_message") or {}
-            reply_to_user = (reply_to.get("from") or {}).get("is_bot", False)
-            reply_to_id = str((reply_to.get("from") or {}).get("id", ""))
-            # If this is a reply to another bot, or starts with @AnotherBot, skip responding
-            # (but still ingest for context — we just won't trigger triage/ack/response)
-            _skip_response = False
-            for ent in mentioned_bots:
-                if ent.get("type") == "mention":
-                    # Extract the mentioned handle
-                    start = ent.get("offset", 0)
-                    length = ent.get("length", 0)
-                    mentioned = msg[start:start+length].lstrip("@").lower()
-                    # If the mention is not @Protomegabot/@ProtomegaTron, skip responding
-                    if mentioned and not any(name in mentioned for name in ("protomega", "protom")):
-                        _skip_response = True
-                        break
-            if reply_to_user and reply_to_id:
-                # Reply to a bot that isn't us — skip responding
-                _skip_response = True
+            _skip_response = _should_skip_group_response(message, msg)
 
         state = _is_allowed_message(chat_id, user_id, auth_text, chat_type)
         display_name = _display_name(user, chat)
