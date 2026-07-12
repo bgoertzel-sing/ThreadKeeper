@@ -3288,15 +3288,27 @@ def _parse_args(skill_name, rest):
                 return [rest]
             filename = rest[1:end]
             content = rest[end + 1:].strip()
-            if content.startswith('"') and content.endswith('"'):
-                content = content[1:-1]
+            if content.startswith('"'):
+                content_end = _find_close_quote(content, 1)
+                if content_end == -1:
+                    return [filename, content, ""]
+                trailing = content[content_end + 1:].strip()
+                if trailing:
+                    return [filename, content[1:content_end], trailing]
+                content = content[1:content_end]
             return [filename, content]
         parts = rest.split(None, 1)
         if len(parts) == 1:
             return [parts[0], ""]
         filename, content = parts[0], parts[1].strip()
-        if content.startswith('"') and content.endswith('"'):
-            content = content[1:-1]
+        if content.startswith('"'):
+            content_end = _find_close_quote(content, 1)
+            if content_end == -1:
+                return [filename, content, ""]
+            trailing = content[content_end + 1:].strip()
+            if trailing:
+                return [filename, content[1:content_end], trailing]
+            content = content[1:content_end]
         return [filename, content]
     # Single-arg skills. If the worker starts a quoted single argument,
     # require that the closing quote ends the argument (modulo whitespace).

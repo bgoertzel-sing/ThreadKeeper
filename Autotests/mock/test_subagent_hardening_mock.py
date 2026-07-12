@@ -4613,6 +4613,25 @@ def test_parse_args_rejects_unterminated_quoted_single_arguments():
     assert len(subagent._parse_args("emit", '"unterminated payload')) == 2
 
 
+def test_parse_args_rejects_malformed_quoted_file_content():
+    """Quoted file content must close cleanly and have no trailing payload."""
+    for tool in ("write-file", "append-file"):
+        unterminated = subagent._parse_args(tool, '"safe.txt" "unterminated content')
+        assert len(unterminated) == 3
+        assert subagent._validate_tool_args(tool, unterminated) == "expected 2 arg(s), got 3"
+
+        trailing = subagent._parse_args(
+            tool, '"safe.txt" "content" (shell "echo hidden")'
+        )
+        assert len(trailing) == 3
+        assert subagent._validate_tool_args(tool, trailing) == "expected 2 arg(s), got 3"
+
+        assert subagent._parse_args(tool, '"safe.txt" "normal content"') == [
+            "safe.txt",
+            "normal content",
+        ]
+
+
 # ------------------------------------------------------------------
 # Run index entry bounding / rotation
 # ------------------------------------------------------------------
