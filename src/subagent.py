@@ -3325,17 +3325,14 @@ def _parse_args(skill_name, rest):
         if trailing:
             return [rest[1:end], trailing]
         return [rest[1:end]]
-    # The prompt requires quoted final emits, but older workers may still emit
-    # bare text. Keep accepting a bare single-argument emit, while refusing the
-    # same-line multi-call smuggling form `(emit done) (write-file ...)` by
-    # surfacing it as an argument-count protocol violation.
-    if skill_name == "emit":
-        for idx, ch in enumerate(rest):
-            if ch == ")":
-                trailing = rest[idx + 1:].strip()
-                if trailing:
-                    return [rest[:idx].strip(), trailing]
-                break
+    # Unquoted arguments remain supported for older workers, but a closing
+    # call followed by another opening parenthesis is an ambiguous same-line
+    # multi-call payload. Reject it for every single-argument skill before a
+    # provider, subprocess, file read, or final emit can consume the text.
+    # Ordinary parentheses inside prose remain valid unless they form `) (`.
+    trailing_call = re.search(r"\)\s+\(", rest)
+    if trailing_call:
+        return [rest[:trailing_call.start()].strip(), rest[trailing_call.start() + 1:].strip()]
     return [rest]
 
 

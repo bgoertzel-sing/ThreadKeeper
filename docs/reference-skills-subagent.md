@@ -95,6 +95,10 @@ ancestor component is a symlink or other non-regular local filesystem object. Wo
 helper, and `append-file` uses that already-open file descriptor for size checks
 before reading existing content, closing TOCTOU symlink-swap gaps between
 `realpath` containment resolution, size inspection, and the actual file read.
+Single-argument worker calls reject unterminated quotes and ambiguous unquoted
+same-line trailing calls such as `(search safe) (emit hidden)` before tool
+execution. Ordinary parenthesized prose remains accepted.
+
 Subagent file-tool arguments are now accepted only as workspace-relative paths
 without parent-directory traversal (`..`) or control characters; absolute host
 paths fail closed during argument validation before any file-tool resolver/audit

@@ -5219,3 +5219,15 @@ def test_write_transcript_integrity_sidecar_rejects_symlink_parent_directory(tmp
     else:
         raise AssertionError("expected symlink sidecar parent to be rejected")
     assert not (outside / "run.json.sha256").exists()
+
+
+def test_parse_args_rejects_unquoted_trailing_calls_for_single_arg_tools():
+    """Same-line call payloads must not reach any one-argument tool."""
+    for tool in ("read-file", "shell", "search", "tavily-search", "technical-analysis"):
+        args = subagent._parse_args(tool, "safe-value) (emit hidden")
+        assert len(args) == 2
+        assert subagent._validate_tool_args(tool, args) == "expected 1 arg(s), got 2"
+
+
+def test_parse_args_keeps_unquoted_parenthesized_prose_without_trailing_call():
+    assert subagent._parse_args("search", "model (small) comparison") == ["model (small) comparison"]
