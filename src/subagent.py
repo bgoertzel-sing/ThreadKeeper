@@ -3305,7 +3305,10 @@ def _parse_args(skill_name, rest):
     if rest.startswith('"'):
         end = _find_close_quote(rest, 1)
         if end == -1:
-            return [rest]
+            # Surface malformed quoted calls as an argument-count violation.
+            # Returning the raw text as one argument would let single-argument
+            # provider tools execute with an unterminated worker payload.
+            return [rest, ""]
         trailing = rest[end + 1:].strip()
         if trailing:
             return [rest[1:end], trailing]

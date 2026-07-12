@@ -4604,6 +4604,15 @@ def test_validate_tool_args_technical_analysis_rejects_non_symbol_queries():
         )
 
 
+def test_parse_args_rejects_unterminated_quoted_single_arguments():
+    """Malformed quoted calls must not become executable one-argument tools."""
+    for tool in ("shell", "search", "tavily-search", "technical-analysis", "read-file"):
+        args = subagent._parse_args(tool, '"unterminated payload')
+        assert len(args) == 2
+        assert subagent._validate_tool_args(tool, args) == "expected 1 arg(s), got 2"
+    assert len(subagent._parse_args("emit", '"unterminated payload')) == 2
+
+
 # ------------------------------------------------------------------
 # Run index entry bounding / rotation
 # ------------------------------------------------------------------
