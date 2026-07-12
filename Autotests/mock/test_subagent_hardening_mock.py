@@ -403,6 +403,27 @@ def test_read_file_is_bounded_before_return_to_worker_context(tmp_path, monkeypa
     assert "fghij" not in result
 
 
+def test_append_file_enforces_cap_during_fd_read(tmp_path, monkeypatch):
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_WORKSPACE", str(tmp_path))
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_FILE_SIZE_CHARS", 5)
+    target = tmp_path / "growing.txt"
+    target.write_text("abcdef")
+    real_fstat = subagent.os.fstat
+
+    def underreported_fstat(fd):
+        st = real_fstat(fd)
+        values = list(st)
+        values[6] = 1
+        return os.stat_result(values)
+
+    monkeypatch.setattr(subagent.os, "fstat", underreported_fstat)
+
+    result = subagent._tool_append_file("growing.txt", "x")
+
+    assert "existing file exceeds max file size 5 chars during read" in result
+    assert target.read_text() == "abcdef"
+
+
 def test_write_file_uses_atomic_replace_inside_workspace(tmp_path, monkeypatch):
     monkeypatch.setenv("OMEGACLAW_SUBAGENT_WORKSPACE", str(tmp_path))
     target = tmp_path / "nested" / "artifact.txt"

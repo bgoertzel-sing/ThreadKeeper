@@ -3419,7 +3419,21 @@ def _tool_append_file(path, content):
                             f"max file size {cap_size} chars)"
                         )
                     with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as f:
-                        existing = f.read()
+                        # Re-enforce the cap while reading: the file can grow after
+                        # fstat, and an initial size check alone must not permit an
+                        # unbounded read or an oversized atomic replacement.
+                        existing = f.read(cap_size + 1) if cap_size > 0 else f.read()
+                    if cap_size > 0 and len(existing) > cap_size:
+                        return (
+                            f"(append-file error: existing file exceeds "
+                            f"max file size {cap_size} chars during read)"
+                        )
+                    if cap_size > 0 and len(existing) + len(content) + 1 > cap_size:
+                        return (
+                            f"(append-file error: resulting file size "
+                            f"{len(existing) + len(content) + 1} would exceed "
+                            f"max file size {cap_size} chars)"
+                        )
                 except Exception:
                     with contextlib.suppress(Exception):
                         os.close(fd)

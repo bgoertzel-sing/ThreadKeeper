@@ -343,6 +343,8 @@ accidentally.
 | `OMEGACLAW_SUBAGENT_MAX_EMIT_CHARS` | `20000` | Maximum final `emit` argument length accepted as successful worker output; oversized emits return `EMIT_PROTOCOL_VIOLATION` before becoming a transcript summary/adjudication candidate. |
 | `OMEGACLAW_SUBAGENT_MAX_RESPONSE_CHARS` | `50000` | Maximum raw worker response length parsed/persisted for one turn; oversized responses return `response_too_large` before tool parsing/execution. |
 | `OMEGACLAW_SUBAGENT_MAX_LLM_HTTP_RESPONSE_BYTES` | `1048576` | Maximum raw HTTP response body read from the native Ollama-compatible worker transport before JSON decoding. `0` disables. OpenAI-compatible SDK calls remain bounded after parsed content return by `OMEGACLAW_SUBAGENT_MAX_RESPONSE_CHARS`. |
+
+Workspace `append-file` also enforces `OMEGACLAW_SUBAGENT_MAX_FILE_SIZE_CHARS` during the opened-fd read, not only through the initial `fstat`, so concurrent file growth cannot produce an unbounded read or oversized atomic replacement.
 | `OMEGACLAW_SUBAGENT_WORKSPACE` | current working directory | Sandbox root for subagent file tools and optional shell `cwd`; if the root already exists it must be a real non-symlink directory. |
 | `OMEGACLAW_ESCALATION_METTA_PATH` | auto-detected source `escalation.metta` | Optional explicit escalation policy path. When set for pinned cloud-delegation integrity checks, the path must name a regular non-symlink file; unsafe values fail closed instead of falling back silently. |
 | `OMEGACLAW_ESCALATION_METTA_SHA256` | unset | Optional SHA-256 pin for `escalation.metta`; mismatch or unsafe policy path denies cloud delegation. |
