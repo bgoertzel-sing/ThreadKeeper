@@ -4568,10 +4568,20 @@ def test_validate_tool_args_search_rejects_control_characters():
 
 
 def test_validate_tool_args_search_accepts_nonempty_query():
-    """Non-empty search/tavily-search/technical-analysis queries pass validation."""
+    """Search tools accept queries, while technical analysis accepts symbols."""
     assert subagent._validate_tool_args("search", ["latest AI news"]) is None
     assert subagent._validate_tool_args("tavily-search", ["quantum computing breakthroughs"]) is None
-    assert subagent._validate_tool_args("technical-analysis", ["RSI analysis of AAPL"]) is None
+    for ticker in ("AAPL", "BRK.B", "BTC-USD", "ES=F", "^GSPC"):
+        assert subagent._validate_tool_args("technical-analysis", [ticker]) is None
+
+
+def test_validate_tool_args_technical_analysis_rejects_non_symbol_queries():
+    """Technical analysis is narrower than free-form search and fails closed."""
+    for ticker in ("RSI analysis of AAPL", "$AAPL", ".AAPL", "A" * 33):
+        assert (
+            subagent._validate_tool_args("technical-analysis", [ticker])
+            == "ticker argument must be a 1-32 character market symbol"
+        )
 
 
 # ------------------------------------------------------------------

@@ -101,7 +101,9 @@ paths fail closed during argument validation before any file-tool resolver/audit
 path is touched. Query tools (`search`, `tavily-search`, `technical-analysis`)
 and the optional `shell` command string also reject control characters before
 provider/subprocess execution, keeping tool calls single-line and avoiding
-transcript/audit line-forging ambiguity.
+transcript/audit line-forging ambiguity. `technical-analysis` is additionally
+restricted to a 1-32 character market-symbol grammar rather than accepting
+free-form query text.
 Workspace `write-file` / `append-file` parents are revalidated as real
 non-symlink directories under the workspace immediately before lock/temp-file
 creation, so a local parent-directory swap

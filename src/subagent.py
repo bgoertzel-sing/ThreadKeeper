@@ -3604,6 +3604,10 @@ def _validate_tool_args(name, args):
             return "query argument must not be empty or whitespace-only"
         if any((ord(ch) < 32 or ord(ch) == 127) for ch in query):
             return "query argument must not contain control characters"
+    if name == "technical-analysis":
+        ticker = args[0]
+        if not re.fullmatch(r"[A-Za-z0-9^][A-Za-z0-9.^=_-]{0,31}", ticker):
+            return "ticker argument must be a 1-32 character market symbol"
     if name == "shell":
         command = str(args[0])
         if not command.strip():
