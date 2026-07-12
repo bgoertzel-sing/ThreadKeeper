@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import sys
 
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -51,37 +52,46 @@ def _load_env_file(path: str) -> None:
     if raw_path.is_symlink():
         raise ValueError(f"{raw_path}: worker env files must not be symlinks")
     env_path = raw_path.resolve()
-    stat = env_path.stat()
-    if not env_path.is_file():
-        raise ValueError(f"{env_path}: worker env file is not a regular file")
-    if stat.st_size > _ENV_FILE_MAX_BYTES:
-        raise ValueError(
-            f"{env_path}: worker env file is too large ({stat.st_size} bytes > {_ENV_FILE_MAX_BYTES})"
-        )
-    with env_path.open("r", encoding="utf-8") as handle:
-        for lineno, raw_line in enumerate(handle, start=1):
-            if len(raw_line) > _ENV_FILE_MAX_LINE_CHARS:
-                raise ValueError(
-                    f"{env_path}:{lineno}: environment line is too long "
-                    f"({len(raw_line)} characters > {_ENV_FILE_MAX_LINE_CHARS})"
-                )
-            line = raw_line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if "=" not in line:
-                raise ValueError(f"{env_path}:{lineno}: expected KEY=VALUE")
-            key, value = line.split("=", 1)
-            key = key.strip()
-            value = value.strip()
-            _validate_env_file_key(key, env_path, lineno)
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-                value = value[1:-1]
-            if len(value) > _ENV_FILE_MAX_VALUE_CHARS:
-                raise ValueError(
-                    f"{env_path}:{lineno}: environment value for {key!r} is too long "
-                    f"({len(value)} characters > {_ENV_FILE_MAX_VALUE_CHARS})"
-                )
-            os.environ[key] = value
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(str(env_path), flags)
+    try:
+        file_stat = os.fstat(fd)
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise ValueError(f"{env_path}: worker env file is not a regular file")
+        if file_stat.st_size > _ENV_FILE_MAX_BYTES:
+            raise ValueError(
+                f"{env_path}: worker env file is too large ({file_stat.st_size} bytes > {_ENV_FILE_MAX_BYTES})"
+            )
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            fd = -1
+            for lineno, raw_line in enumerate(handle, start=1):
+                if len(raw_line) > _ENV_FILE_MAX_LINE_CHARS:
+                    raise ValueError(
+                        f"{env_path}:{lineno}: environment line is too long "
+                        f"({len(raw_line)} characters > {_ENV_FILE_MAX_LINE_CHARS})"
+                    )
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    raise ValueError(f"{env_path}:{lineno}: expected KEY=VALUE")
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip()
+                _validate_env_file_key(key, env_path, lineno)
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+                    value = value[1:-1]
+                if len(value) > _ENV_FILE_MAX_VALUE_CHARS:
+                    raise ValueError(
+                        f"{env_path}:{lineno}: environment value for {key!r} is too long "
+                        f"({len(value)} characters > {_ENV_FILE_MAX_VALUE_CHARS})"
+                    )
+                os.environ[key] = value
+    finally:
+        if fd >= 0:
+            os.close(fd)
 
 
 def _repo_root() -> Path:

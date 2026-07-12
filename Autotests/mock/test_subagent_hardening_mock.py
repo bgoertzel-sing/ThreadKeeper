@@ -5,6 +5,7 @@ import importlib
 import json
 import multiprocessing
 import os
+import runpy
 import subprocess
 import sys
 import time
@@ -3334,6 +3335,23 @@ def test_run_subagent_worker_loop_script_rejects_symlink_and_oversized_env_files
 
     assert completed.returncode != 0
     assert "is too long" in completed.stderr
+
+
+def test_run_subagent_worker_loop_env_file_uses_open_fd_metadata(tmp_path, monkeypatch):
+    script = ROOT / "scripts" / "run-subagent-worker-loop"
+    module = runpy.run_path(str(script), run_name="threadkeeper_worker_loop_script_for_test")
+    env_file = tmp_path / "worker.env"
+    env_file.write_text("OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_TASKS=0\n", encoding="utf-8")
+
+    def fail_path_open(*args, **kwargs):  # noqa: ANN001, ANN002, ANN003 - local monkeypatch helper
+        raise AssertionError("env loader should read via os.open/os.fdopen after fstat")
+
+    monkeypatch.setattr(Path, "open", fail_path_open)
+    monkeypatch.delenv("OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_TASKS", raising=False)
+
+    module["_load_env_file"](str(env_file))
+
+    assert os.environ["OMEGACLAW_SUBAGENT_ASYNC_WORKER_MAX_TASKS"] == "0"
 
 
 def test_artifact_local_worker_loop_one_task_smoke_script(tmp_path):
