@@ -5222,11 +5222,12 @@ def test_write_transcript_integrity_sidecar_rejects_symlink_parent_directory(tmp
 
 
 def test_parse_args_rejects_unquoted_trailing_calls_for_single_arg_tools():
-    """Same-line call payloads must not reach any one-argument tool."""
+    """Spaced or compact same-line payloads must not reach one-argument tools."""
     for tool in ("read-file", "shell", "search", "tavily-search", "technical-analysis"):
-        args = subagent._parse_args(tool, "safe-value) (emit hidden")
-        assert len(args) == 2
-        assert subagent._validate_tool_args(tool, args) == "expected 1 arg(s), got 2"
+        for payload in ("safe-value) (emit hidden", "safe-value)(emit hidden"):
+            args = subagent._parse_args(tool, payload)
+            assert len(args) == 2
+            assert subagent._validate_tool_args(tool, args) == "expected 1 arg(s), got 2"
 
 
 def test_parse_args_keeps_unquoted_parenthesized_prose_without_trailing_call():

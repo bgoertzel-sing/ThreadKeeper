@@ -3329,8 +3329,10 @@ def _parse_args(skill_name, rest):
     # call followed by another opening parenthesis is an ambiguous same-line
     # multi-call payload. Reject it for every single-argument skill before a
     # provider, subprocess, file read, or final emit can consume the text.
-    # Ordinary parentheses inside prose remain valid unless they form `) (`.
-    trailing_call = re.search(r"\)\s+\(", rest)
+    # No whitespace is required: compact payloads such as `done)(emit hidden`
+    # are just as ambiguous as `done) (emit hidden`. Ordinary balanced prose
+    # remains valid unless a close parenthesis is followed by an open one.
+    trailing_call = re.search(r"\)\s*\(", rest)
     if trailing_call:
         return [rest[:trailing_call.start()].strip(), rest[trailing_call.start() + 1:].strip()]
     return [rest]
