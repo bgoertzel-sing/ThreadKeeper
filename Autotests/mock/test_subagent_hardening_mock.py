@@ -5232,3 +5232,21 @@ def test_parse_args_rejects_unquoted_trailing_calls_for_single_arg_tools():
 
 def test_parse_args_keeps_unquoted_parenthesized_prose_without_trailing_call():
     assert subagent._parse_args("search", "model (small) comparison") == ["model (small) comparison"]
+
+
+def test_parse_args_rejects_unquoted_trailing_calls_in_file_content():
+    """Unquoted file content must not hide a second same-line worker call."""
+    for tool in ("write-file", "append-file"):
+        for payload in (
+            "notes.txt safe content) (emit hidden",
+            "notes.txt safe content)(emit hidden",
+        ):
+            args = subagent._parse_args(tool, payload)
+            assert len(args) == 3
+            assert subagent._validate_tool_args(tool, args) == "expected 2 arg(s), got 3"
+
+
+def test_parse_args_keeps_unquoted_parenthesized_file_content():
+    assert subagent._parse_args(
+        "write-file", "notes.txt model (small) comparison"
+    ) == ["notes.txt", "model (small) comparison"]

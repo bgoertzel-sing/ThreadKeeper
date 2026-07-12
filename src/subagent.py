@@ -3309,6 +3309,18 @@ def _parse_args(skill_name, rest):
             if trailing:
                 return [filename, content[1:content_end], trailing]
             content = content[1:content_end]
+        else:
+            # Legacy unquoted content remains supported, but do not let an
+            # ambiguous same-line trailing call be persisted as file content.
+            # Returning a third argument makes validation fail closed before
+            # write-file/append-file can mutate the workspace.
+            trailing_call = re.search(r"\)\s*\(", content)
+            if trailing_call:
+                return [
+                    filename,
+                    content[:trailing_call.start()].strip(),
+                    content[trailing_call.start() + 1:].strip(),
+                ]
         return [filename, content]
     # Single-arg skills. If the worker starts a quoted single argument,
     # require that the closing quote ends the argument (modulo whitespace).
