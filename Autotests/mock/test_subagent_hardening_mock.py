@@ -4575,6 +4575,16 @@ def test_validate_tool_args_search_accepts_nonempty_query():
         assert subagent._validate_tool_args("technical-analysis", [ticker]) is None
 
 
+def test_validate_tool_args_search_rejects_oversized_query(monkeypatch):
+    """External query inputs have a tighter cap than general tool content."""
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_QUERY_ARG_CHARS", 8)
+    for tool in ("search", "tavily-search", "technical-analysis"):
+        assert (
+            subagent._validate_tool_args(tool, ["A" * 9])
+            == "query argument exceeds 8 characters"
+        )
+
+
 def test_validate_tool_args_technical_analysis_rejects_non_symbol_queries():
     """Technical analysis is narrower than free-form search and fails closed."""
     for ticker in ("RSI analysis of AAPL", "$AAPL", ".AAPL", "A" * 33):

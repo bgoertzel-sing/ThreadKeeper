@@ -386,6 +386,7 @@ _SUBAGENT_MAX_TOOL_CALLS_PER_TURN = _env_int("OMEGACLAW_SUBAGENT_MAX_TOOL_CALLS_
 _SUBAGENT_CANCEL_FILE = os.environ.get("OMEGACLAW_SUBAGENT_CANCEL_FILE", "")
 _SUBAGENT_MAX_PATH_ARG_CHARS = _env_int("OMEGACLAW_SUBAGENT_MAX_PATH_ARG_CHARS", 512, minimum=1)
 _SUBAGENT_MAX_TOOL_ARG_CHARS = _env_int("OMEGACLAW_SUBAGENT_MAX_TOOL_ARG_CHARS", 20000, minimum=1)
+_SUBAGENT_MAX_QUERY_ARG_CHARS = _env_int("OMEGACLAW_SUBAGENT_MAX_QUERY_ARG_CHARS", 4096, minimum=1)
 _SUBAGENT_MAX_READ_FILE_CHARS = _env_int("OMEGACLAW_SUBAGENT_MAX_READ_FILE_CHARS", 20000, minimum=1)
 _SUBAGENT_MAX_CONTRACT_ITEMS = _env_int("OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEMS", 32, minimum=0)
 _SUBAGENT_MAX_CONTRACT_ITEM_CHARS = _env_int("OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEM_CHARS", 512, minimum=1)
@@ -3602,6 +3603,8 @@ def _validate_tool_args(name, args):
         query = str(args[0])
         if not query.strip():
             return "query argument must not be empty or whitespace-only"
+        if len(query) > _SUBAGENT_MAX_QUERY_ARG_CHARS:
+            return f"query argument exceeds {_SUBAGENT_MAX_QUERY_ARG_CHARS} characters"
         if any((ord(ch) < 32 or ord(ch) == 127) for ch in query):
             return "query argument must not contain control characters"
     if name == "technical-analysis":
