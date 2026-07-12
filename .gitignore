@@ -28,3 +28,4 @@ Autotests/logs/
 .idea/
 *.env
 telegram.env
+memory/subagent-runs/
