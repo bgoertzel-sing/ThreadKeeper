@@ -4585,6 +4585,16 @@ def test_validate_tool_args_search_rejects_oversized_query(monkeypatch):
         )
 
 
+def test_validate_tool_args_shell_rejects_oversized_command(monkeypatch):
+    """Shell input has a dedicated cap before parsing or subprocess execution."""
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_SHELL_ARG_CHARS", 8)
+    assert subagent._validate_tool_args("shell", ["echo ok"]) is None
+    assert (
+        subagent._validate_tool_args("shell", ["A" * 9])
+        == "shell command exceeds 8 characters"
+    )
+
+
 def test_validate_tool_args_technical_analysis_rejects_non_symbol_queries():
     """Technical analysis is narrower than free-form search and fails closed."""
     for ticker in ("RSI analysis of AAPL", "$AAPL", ".AAPL", "A" * 33):

@@ -105,7 +105,10 @@ transcript/audit line-forging ambiguity. `technical-analysis` is additionally
 restricted to a 1-32 character market-symbol grammar rather than accepting
 free-form query text. External query arguments also have a dedicated bounded
 length (`OMEGACLAW_SUBAGENT_MAX_QUERY_ARG_CHARS`, default 4096) before any
-provider call; the broader per-tool argument cap remains a second ceiling.
+provider call; the broader per-tool argument cap remains a second ceiling. The
+optional shell command has its own bounded length
+(`OMEGACLAW_SUBAGENT_MAX_SHELL_ARG_CHARS`, default 4096) before command parsing
+or subprocess execution.
 Workspace `write-file` / `append-file` parents are revalidated as real
 non-symlink directories under the workspace immediately before lock/temp-file
 creation, so a local parent-directory swap
@@ -333,6 +336,7 @@ accidentally.
 | `OMEGACLAW_SUBAGENT_MAX_PATH_ARG_CHARS` | `512` | Maximum path argument length for file tools. |
 | `OMEGACLAW_SUBAGENT_MAX_TOOL_ARG_CHARS` | `20000` | Maximum string length for any single tool argument. Tool arguments must already be strings; JSON arrays/objects/numbers/booleans are rejected before tool execution rather than coerced with `str()`. |
 | `OMEGACLAW_SUBAGENT_MAX_QUERY_ARG_CHARS` | `4096` | Maximum input length for `search`, `tavily-search`, and `technical-analysis` before provider execution. |
+| `OMEGACLAW_SUBAGENT_MAX_SHELL_ARG_CHARS` | `4096` | Maximum optional `shell` command length before command parsing or subprocess execution. |
 | `OMEGACLAW_SUBAGENT_SHELL_MAX_ARGV` | `32` | Maximum argv token count for the optional allowlisted `shell` tool. |
 | `OMEGACLAW_SUBAGENT_SHELL_OUTPUT_CAP` | `4000` | Maximum combined stdout/stderr preview returned by one optional shell call before a truncation marker is appended; subprocess output is captured to a temporary file and only `cap + 1` bytes are read back into memory. |
 | `OMEGACLAW_SUBAGENT_SHELL_TIMEOUT_S` | `30.0` | Timeout in seconds for one optional shell subprocess; below-minimum or malformed values use a safe bounded value. |

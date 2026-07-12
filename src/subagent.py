@@ -387,6 +387,7 @@ _SUBAGENT_CANCEL_FILE = os.environ.get("OMEGACLAW_SUBAGENT_CANCEL_FILE", "")
 _SUBAGENT_MAX_PATH_ARG_CHARS = _env_int("OMEGACLAW_SUBAGENT_MAX_PATH_ARG_CHARS", 512, minimum=1)
 _SUBAGENT_MAX_TOOL_ARG_CHARS = _env_int("OMEGACLAW_SUBAGENT_MAX_TOOL_ARG_CHARS", 20000, minimum=1)
 _SUBAGENT_MAX_QUERY_ARG_CHARS = _env_int("OMEGACLAW_SUBAGENT_MAX_QUERY_ARG_CHARS", 4096, minimum=1)
+_SUBAGENT_MAX_SHELL_ARG_CHARS = _env_int("OMEGACLAW_SUBAGENT_MAX_SHELL_ARG_CHARS", 4096, minimum=1)
 _SUBAGENT_MAX_READ_FILE_CHARS = _env_int("OMEGACLAW_SUBAGENT_MAX_READ_FILE_CHARS", 20000, minimum=1)
 _SUBAGENT_MAX_CONTRACT_ITEMS = _env_int("OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEMS", 32, minimum=0)
 _SUBAGENT_MAX_CONTRACT_ITEM_CHARS = _env_int("OMEGACLAW_SUBAGENT_MAX_CONTRACT_ITEM_CHARS", 512, minimum=1)
@@ -3615,6 +3616,8 @@ def _validate_tool_args(name, args):
         command = str(args[0])
         if not command.strip():
             return "shell command must not be empty or whitespace-only"
+        if len(command) > _SUBAGENT_MAX_SHELL_ARG_CHARS:
+            return f"shell command exceeds {_SUBAGENT_MAX_SHELL_ARG_CHARS} characters"
         if any((ord(ch) < 32 or ord(ch) == 127) for ch in command):
             return "shell command must not contain control characters"
     too_long = [i + 1 for i, arg in enumerate(args) if len(str(arg)) > _SUBAGENT_MAX_TOOL_ARG_CHARS]
