@@ -2548,6 +2548,14 @@ def load_persona_config(persona_key):
         raise ValueError(
             f"persona config '{persona_key}.json' is malformed JSON: {e}"
         )
+    if not isinstance(cfg, dict):
+        raise ValueError(
+            f"persona config '{persona_key}.json' must be a JSON object"
+        )
+    if "task_contract" in cfg and not isinstance(cfg.get("task_contract"), dict):
+        raise ValueError(
+            f"persona config '{persona_key}.json' field 'task_contract' must be a JSON object"
+        )
     required = ["persona_file", "provider", "model", "api_key_env", "node_role", "endpoint_kind"]
     missing = [k for k in required if k not in cfg]
     if missing:
@@ -3004,7 +3012,13 @@ def _normalize_task_contract(goal, cfg=None):
     except Exception:
         parsed = None
     if isinstance(parsed, dict):
-        inline = parsed.get("task_contract") if isinstance(parsed.get("task_contract"), dict) else parsed
+        nested_contract = parsed.get("task_contract")
+        if "task_contract" in parsed and not isinstance(nested_contract, dict):
+            # Preserve the malformed value in the run record and let strict
+            # validation fail closed instead of silently treating the outer
+            # JSON object as an inline contract.
+            contract["task_contract"] = nested_contract
+        inline = nested_contract if isinstance(nested_contract, dict) else parsed
         if isinstance(inline, dict):
             for key in (
                 "allowed_paths", "forbidden_actions", "done_criteria",
@@ -3034,6 +3048,8 @@ def _validate_task_contract(contract):
     same bounded-shape treatment as tool arguments. `allowed_paths` also gets a
     dry-run workspace resolution now, rather than waiting until a tool call.
     """
+    if "task_contract" in (contract or {}):
+        return "task contract field must be a JSON object"
     objective = (contract or {}).get("objective", "")
     if not isinstance(objective, str):
         return "task contract objective must be a string"

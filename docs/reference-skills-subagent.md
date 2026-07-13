@@ -106,6 +106,9 @@ return always contains a meaningful non-empty summary.
 Task-contract objectives must be JSON strings; typed values such as arrays,
 objects, numbers, booleans, or null fail closed before a worker LLM call rather
 than being silently stringified into prompt text.
+Persona configuration roots and persona/inline nested `task_contract` values
+must be JSON objects. Other JSON types fail closed before provider setup or a
+worker LLM call rather than being ignored or raising from contract normalization.
 
 Subagent file-tool arguments are now accepted only as workspace-relative paths
 without parent-directory traversal (`..`), control characters, Unicode line

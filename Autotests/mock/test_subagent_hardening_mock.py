@@ -769,6 +769,31 @@ def test_persona_config_read_is_bounded_without_path_leak(tmp_path, monkeypatch)
         assert str(tmp_path) not in msg
 
 
+@pytest.mark.parametrize("root", [None, True, 123, [], ["not", "an", "object"]])
+def test_persona_config_requires_json_object_root(tmp_path, monkeypatch, root):
+    persona_dir = tmp_path / "personas"
+    persona_dir.mkdir()
+    (persona_dir / "unit.json").write_text(json.dumps(root))
+    monkeypatch.setattr(subagent, "PERSONA_DIR", str(persona_dir))
+
+    with pytest.raises(ValueError, match="must be a JSON object"):
+        subagent.load_persona_config("unit")
+
+
+@pytest.mark.parametrize("task_contract", [None, True, 123, [], "objective=unsafe"])
+def test_persona_config_task_contract_requires_json_object(
+    tmp_path, monkeypatch, task_contract
+):
+    persona_dir = _write_unit_persona(tmp_path, monkeypatch)
+    config_path = persona_dir / "unit.json"
+    config = json.loads(config_path.read_text())
+    config["task_contract"] = task_contract
+    config_path.write_text(json.dumps(config))
+
+    with pytest.raises(ValueError, match="field 'task_contract' must be a JSON object"):
+        subagent.load_persona_config("unit")
+
+
 def test_persona_config_rejects_symlink_before_read(tmp_path, monkeypatch):
     persona_dir = tmp_path / "personas"
     persona_dir.mkdir()
@@ -2064,6 +2089,34 @@ def test_inline_task_contract_rejects_non_string_objective_before_llm(
     saved = json.loads(Path(payload["transcript_path"]).read_text())
     assert saved["status"] == "contract_invalid"
     assert saved["task_contract"]["objective"] == objective
+
+
+@pytest.mark.parametrize("task_contract", [None, True, 123, [], "not-an-object"])
+def test_inline_nested_task_contract_requires_json_object_before_llm(
+    tmp_path, monkeypatch, task_contract
+):
+    """Malformed nested contracts must not be ignored in favor of the outer object."""
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")),
+    )
+
+    payload = json.loads(
+        subagent.dispatch(
+            json.dumps({"objective": "typed nested contract", "task_contract": task_contract}),
+            "read-file",
+            "unit",
+            max_turns=1,
+        )
+    )
+
+    assert payload["status"] == "error"
+    assert "task contract field must be a JSON object" in payload["summary"]
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["status"] == "contract_invalid"
+    assert saved["task_contract"]["task_contract"] == task_contract
 
 
 def test_task_contract_requires_adjudication_marks_candidate_not_final(tmp_path, monkeypatch):
