@@ -3034,6 +3034,8 @@ def _validate_task_contract(contract):
             "task contract objective exceeds "
             f"{_SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS} characters"
         )
+    if _contains_text_control(objective):
+        return "task contract objective must not contain control characters"
     for field in ("allowed_paths", "forbidden_actions", "done_criteria"):
         values = (contract or {}).get(field) or []
         if not isinstance(values, list):
@@ -3041,13 +3043,15 @@ def _validate_task_contract(contract):
         if len(values) > _SUBAGENT_MAX_CONTRACT_ITEMS:
             return f"task contract {field} has {len(values)} item(s), max {_SUBAGENT_MAX_CONTRACT_ITEMS}"
         for value in values:
-            if not isinstance(value, str) or "\x00" in value:
-                return f"task contract {field} entries must be strings without NUL bytes"
+            if not isinstance(value, str):
+                return f"task contract {field} entries must be strings"
             if len(value) > _SUBAGENT_MAX_CONTRACT_ITEM_CHARS:
                 return (
                     f"task contract {field} item exceeds "
                     f"{_SUBAGENT_MAX_CONTRACT_ITEM_CHARS} characters"
                 )
+            if _contains_text_control(value):
+                return f"task contract {field} entries must not contain control characters"
     if "max_tool_calls" in (contract or {}):
         raw_quota = (contract or {}).get("max_tool_calls")
         if isinstance(raw_quota, bool):
@@ -3624,6 +3628,20 @@ def _contains_text_control(value):
     )
 
 
+def _escape_text_controls(value):
+    """Render unsafe text controls visibly for failed-input audit records."""
+    if isinstance(value, dict):
+        return {key: _escape_text_controls(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_escape_text_controls(item) for item in value]
+    if not isinstance(value, str):
+        return value
+    return "".join(
+        f"\\u{ord(ch):04x}" if _contains_text_control(ch) else ch
+        for ch in value
+    )
+
+
 def _validate_tool_args(name, args):
     expected = {
         "read-file": 1,
@@ -3866,9 +3884,10 @@ def _structured_setup_error(msg, persona_key, goal, max_chars,
     invisible to transcript/audit tooling. Persist enough local context for the
     parent/operator to debug without making any worker LLM call.
     """
-    record = _new_run_record(persona_key or "unknown", goal)
+    safe_goal = _escape_text_controls(goal)
+    record = _new_run_record(persona_key or "unknown", safe_goal)
     if task_contract is not None:
-        record["task_contract"] = dict(task_contract)
+        record["task_contract"] = _escape_text_controls(dict(task_contract))
     summary = error(msg)
     _finish_run_record(record, record_status, summary)
     return _structured_return(

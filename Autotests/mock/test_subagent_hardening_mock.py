@@ -3562,6 +3562,41 @@ def test_task_contract_rejects_control_chars_in_allowed_path_before_llm(tmp_path
     assert saved["status"] == "contract_invalid"
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("objective", "audit\u2028forgery"),
+        ("done_criteria", ["write safe output\ud800"]),
+    ],
+)
+def test_task_contract_rejects_unsafe_unicode_text_before_llm(
+    tmp_path, monkeypatch, field, value
+):
+    """Prompt/audit contract text fails closed before provider handling."""
+    _write_unit_persona(tmp_path, monkeypatch)
+    contract = {"objective": "safe objective", field: value}
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")),
+    )
+
+    payload = json.loads(
+        subagent.dispatch(json.dumps(contract), "write-file", "unit", max_turns=1)
+    )
+
+    assert payload["status"] == "error"
+    assert field in payload["summary"]
+    assert "control characters" in payload["summary"]
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["status"] == "contract_invalid"
+    escaped = saved["task_contract"][field]
+    if field == "objective":
+        assert escaped == "audit\\u2028forgery"
+    else:
+        assert escaped == ["write safe output\\ud800"]
+
+
 def test_task_contract_rejects_oversized_contract_before_llm(tmp_path, monkeypatch):
     _write_unit_persona(tmp_path, monkeypatch)
     monkeypatch.setattr(subagent, "_SUBAGENT_MAX_CONTRACT_ITEMS", 1)
