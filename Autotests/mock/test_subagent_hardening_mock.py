@@ -1617,6 +1617,30 @@ def test_extract_final_emit_rejects_non_string_argument():
     assert error == "EMIT_PROTOCOL_VIOLATION: emit argument must be a string"
 
 
+@pytest.mark.parametrize("control", ["\u2028", "\u202e", "\u2060", "\ud800"])
+def test_dispatch_rejects_unsafe_unicode_emit_before_success(
+    tmp_path, monkeypatch, control
+):
+    """Final returns cannot inject invisible audit/prompt controls."""
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_a: (f'(emit "safe{control}spoof")', 0, 0),
+    )
+
+    payload = json.loads(
+        subagent.dispatch("reject unsafe final", "read-file", "unit", max_turns=1)
+    )
+
+    assert payload["status"] == "error"
+    assert "EMIT_PROTOCOL_VIOLATION" in payload["summary"]
+    assert "control characters" in payload["summary"]
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["status"] == "emit_protocol_violation"
+    assert saved["summary"].startswith("EMIT_PROTOCOL_VIOLATION")
+
+
 def test_dispatch_rejects_non_string_emit_before_success(tmp_path, monkeypatch):
     _write_unit_persona(tmp_path, monkeypatch)
     monkeypatch.setattr(

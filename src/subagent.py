@@ -3252,7 +3252,10 @@ def parse_calls(adapted_text):
     text = _strip_thinking(adapted_text)
     text = _strip_fences(text)
     calls = []
-    for raw_line in text.splitlines():
+    # Split only on the protocol's ASCII newline. ``str.splitlines()`` also
+    # treats Unicode line/paragraph separators as record boundaries, which can
+    # hide an unsafe separator inside an otherwise parseable tool argument.
+    for raw_line in text.split("\n"):
         line = raw_line.strip()
         if not line or not line.startswith("("):
             continue
@@ -3840,8 +3843,11 @@ def _extract_final_emit(calls):
         return (None, "EMIT_PROTOCOL_VIOLATION: emit requires exactly one non-null argument")
     if not isinstance(args[0], str):
         return (None, "EMIT_PROTOCOL_VIOLATION: emit argument must be a string")
-    if "\x00" in args[0]:
-        return (None, "EMIT_PROTOCOL_VIOLATION: emit argument must not contain NUL bytes")
+    if _contains_text_control(args[0]):
+        return (
+            None,
+            "EMIT_PROTOCOL_VIOLATION: emit argument must not contain control characters",
+        )
     if len(args[0]) > _SUBAGENT_MAX_EMIT_CHARS:
         return (
             None,
@@ -4127,6 +4133,10 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
         emit_value, emit_error = _extract_final_emit(calls)
         if emit_error:
             turn_record["tool_results"] = emit_error
+            # Malformed worker arguments can contain characters that are not
+            # safe to encode or render in transcript/audit JSON. Preserve the
+            # evidence visibly rather than letting transcript persistence fail.
+            turn_record = _escape_text_controls(turn_record)
             run_record.setdefault("turns", []).append(turn_record)
             _stamp_token_usage()
             _finish_run_record(run_record, "emit_protocol_violation", emit_error)
