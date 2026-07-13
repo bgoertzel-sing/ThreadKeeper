@@ -69,6 +69,23 @@ def _is_self_message(event, self_id):
     return sender_id == self_id
 
 
+def _bot_api_chat_id(peer_id):
+    """Convert an MTProto Peer* into Telegram Bot API's marked chat ID.
+
+    Bot API IDs use positive user IDs, negative basic-group IDs, and
+    ``-100<channel_id>`` for supergroups/channels.  Passing raw MTProto IDs
+    caused every group event to miss the configured allowlist.
+    """
+    peer_type = type(peer_id).__name__
+    if peer_type == "PeerUser" and hasattr(peer_id, "user_id"):
+        return peer_id.user_id
+    if peer_type == "PeerChat" and hasattr(peer_id, "chat_id"):
+        return -peer_id.chat_id
+    if peer_type == "PeerChannel" and hasattr(peer_id, "channel_id"):
+        return int(f"-100{peer_id.channel_id}")
+    raise ValueError(f"unsupported Telegram peer type: {type(peer_id).__name__}")
+
+
 def _convert_message(event):
     from telethon.tl.types import (
         PeerUser, PeerChat, PeerChannel,
@@ -78,12 +95,7 @@ def _convert_message(event):
     chat = message.chat or message.peer_id
     sender = message.sender
 
-    chat_dict = {}
-    if hasattr(chat, "id"):
-        chat_dict["id"] = chat.id
-    else:
-        cid = getattr(chat, "user_id", None) or getattr(chat, "channel_id", None) or getattr(chat, "chat_id", None)
-        chat_dict["id"] = cid or 0
+    chat_dict = {"id": _bot_api_chat_id(message.peer_id)}
 
     if isinstance(message.peer_id, PeerUser):
         chat_dict["type"] = "private"

@@ -120,6 +120,27 @@ def test_duplicate_live_bridge_is_rejected(monkeypatch):
         mtproto.start_mtproto()
 
 
+def test_mtproto_peer_ids_convert_to_bot_api_chat_ids():
+    bridge = importlib.import_module("channels.telegram_mtproto_bridge")
+
+    PeerUser = type("PeerUser", (), {"__init__": lambda self, value: setattr(self, "user_id", value)})
+    PeerChat = type("PeerChat", (), {"__init__": lambda self, value: setattr(self, "chat_id", value)})
+    PeerChannel = type("PeerChannel", (), {"__init__": lambda self, value: setattr(self, "channel_id", value)})
+
+    assert bridge._bot_api_chat_id(PeerUser(402314199)) == 402314199
+    assert bridge._bot_api_chat_id(PeerChat(5459676079)) == -5459676079
+    assert bridge._bot_api_chat_id(PeerChannel(3983157420)) == -1003983157420
+
+
+def test_group_chat_id_matches_botbot_allowlist():
+    bridge = importlib.import_module("channels.telegram_mtproto_bridge")
+    PeerChat = type("PeerChat", (), {"__init__": lambda self, value: setattr(self, "chat_id", value)})
+
+    configured = {"402314199", "-1003983157420", "-5459676079", "-5437945421"}
+    converted = str(bridge._bot_api_chat_id(PeerChat(5459676079)))
+    assert converted in configured
+
+
 def test_self_message_filter_rejects_outgoing_and_own_sender():
     bridge = importlib.import_module("channels.telegram_mtproto_bridge")
 
