@@ -103,7 +103,8 @@ Subagent file-tool arguments are now accepted only as workspace-relative paths
 without parent-directory traversal (`..`) or control characters; absolute host
 paths fail closed during argument validation before any file-tool resolver/audit
 path is touched. Query tools (`search`, `tavily-search`, `technical-analysis`)
-and the optional `shell` command string also reject control characters before
+and the optional `shell` command string also reject ASCII/C1 controls and
+Unicode line/paragraph separators before
 provider/subprocess execution, keeping tool calls single-line and avoiding
 transcript/audit line-forging ambiguity. `technical-analysis` is additionally
 restricted to a 1-32 character market-symbol grammar rather than accepting

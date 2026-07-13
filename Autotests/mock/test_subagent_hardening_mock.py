@@ -5250,3 +5250,17 @@ def test_parse_args_keeps_unquoted_parenthesized_file_content():
     assert subagent._parse_args(
         "write-file", "notes.txt model (small) comparison"
     ) == ["notes.txt", "model (small) comparison"]
+
+
+def test_validate_tool_args_rejects_unicode_line_separators():
+    """Unicode separators must not create hidden prompt/audit lines."""
+    for separator in ("\u0085", "\u2028", "\u2029"):
+        assert subagent._validate_tool_args("read-file", [f"safe{separator}spoof.txt"]) == (
+            "path argument must not contain control characters"
+        )
+        assert subagent._validate_tool_args("search", [f"safe{separator}spoof"]) == (
+            "query argument must not contain control characters"
+        )
+        assert subagent._validate_tool_args("shell", [f"echo{separator}spoof"]) == (
+            "shell command must not contain control characters"
+        )

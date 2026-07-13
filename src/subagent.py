@@ -49,6 +49,7 @@ import contextlib
 import math
 import random
 import signal as _signal_module
+import unicodedata
 try:
     import fcntl
 except Exception:  # pragma: no cover - non-Unix fallback
@@ -3591,7 +3592,7 @@ def _validate_relative_workspace_path_arg(path, label="path argument"):
         return f"{label} must not be empty"
     if len(raw_path) > _SUBAGENT_MAX_PATH_ARG_CHARS:
         return f"{label} exceeds {_SUBAGENT_MAX_PATH_ARG_CHARS} characters"
-    if any((ord(ch) < 32 or ord(ch) == 127) for ch in raw_path):
+    if _contains_text_control(raw_path):
         return f"{label} must not contain control characters"
     if os.path.isabs(raw_path):
         return f"{label} must be relative to the subagent workspace"
@@ -3601,6 +3602,17 @@ def _validate_relative_workspace_path_arg(path, label="path argument"):
     if os.pardir in raw_parts or normalized == os.pardir or os.pardir in normalized_parts:
         return f"{label} must not contain parent-directory traversal"
     return ""
+
+
+def _contains_text_control(value):
+    """Reject ASCII/C1 controls and Unicode line/paragraph separators.
+
+    ``str`` arguments can contain non-ASCII separators that split rendered log
+    or prompt lines even though they are not covered by the usual ``ord < 32``
+    check. Treat all Unicode ``Cc`` characters plus ``Zl``/``Zp`` as control
+    data at tool/control boundaries.
+    """
+    return any(unicodedata.category(ch) in ("Cc", "Zl", "Zp") for ch in str(value))
 
 
 def _validate_tool_args(name, args):
@@ -3632,7 +3644,7 @@ def _validate_tool_args(name, args):
             return "query argument must not be empty or whitespace-only"
         if len(query) > _SUBAGENT_MAX_QUERY_ARG_CHARS:
             return f"query argument exceeds {_SUBAGENT_MAX_QUERY_ARG_CHARS} characters"
-        if any((ord(ch) < 32 or ord(ch) == 127) for ch in query):
+        if _contains_text_control(query):
             return "query argument must not contain control characters"
     if name == "technical-analysis":
         ticker = args[0]
@@ -3644,7 +3656,7 @@ def _validate_tool_args(name, args):
             return "shell command must not be empty or whitespace-only"
         if len(command) > _SUBAGENT_MAX_SHELL_ARG_CHARS:
             return f"shell command exceeds {_SUBAGENT_MAX_SHELL_ARG_CHARS} characters"
-        if any((ord(ch) < 32 or ord(ch) == 127) for ch in command):
+        if _contains_text_control(command):
             return "shell command must not contain control characters"
     too_long = [i + 1 for i, arg in enumerate(args) if len(str(arg)) > _SUBAGENT_MAX_TOOL_ARG_CHARS]
     if too_long:
