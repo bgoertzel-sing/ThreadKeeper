@@ -22,13 +22,13 @@
 (= (shouldSkipResponse)
    (py-call (telegram.should_skip_response)))
 
-;Send a message to all communication channels:
-!(change-state! &lastsend "")
+;Send a message to all communication channels.
+;The Python transport owns bounded, per-chat deduplication and send logging.
+;Do not deduplicate here: MeTTa's nondeterministic evaluation can update state
+;on one branch without executing the transport call, silently losing a reply.
 (= (send $msg)
-   (if (!= $msg (get-state &lastsend))
-       (progn (change-state! &lastsend $msg)
-              (let $safemsg (string-replace $msg  "\n" "\\n")
-                   (let $temp (cut) (py-call (telegram.send_message $safemsg))))) _))
+   (let $safemsg (string-replace $msg  "\n" "\\n")
+        (let $temp (cut) (py-call (telegram.send_message $safemsg)))))
 
 ;Search the internet for some information:
 (= (search $msg)
