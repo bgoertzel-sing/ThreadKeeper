@@ -153,8 +153,9 @@ contract, re-injects that contract into the synchronous dispatch goal while
 queue-only mode is suppressed, writes a compact `*.result.json`, and leaves the
 task as `*.done` plus a refreshed `.sha256` sidecar for audit instead of
 silently re-running it. Explicit `queue_path` arguments are bounded and reject
-NUL/control characters before any claim/rename, keeping operator inputs from
-forging multiline audit/status text. Symlink and non-regular `queue/*.json`
+ASCII/Unicode controls, separators, unsafe invisible formatting characters,
+and lone surrogates before any claim/rename, keeping operator inputs from
+forging or visually reordering audit/status text. Symlink and non-regular `queue/*.json`
 entries are ignored by queue listing and rejected before claim; a
 symlink/non-directory `queue/` itself is also rejected before listing or claim,
 so a worker cannot be redirected outside `OMEGACLAW_SUBAGENT_RUN_DIR`. If
@@ -171,7 +172,8 @@ does not daemonize, sleep, poll forever, or auto-start from `dispatch`.
 worker loop: it repeatedly claims pending queue records until an explicit bound
 is reached (`max_tasks`, `max_idle_polls`, `max_runtime_s`, `max_consecutive_errors`, or a `stop_file`).
 Worker stop-token and queued dispatch cancellation-token paths are bounded,
-reject NUL/control characters, and are resolved under
+apply the same ASCII/Unicode control, separator, unsafe-format, and surrogate
+rejection, and are resolved under
 `OMEGACLAW_SUBAGENT_RUN_DIR` (relative values are interpreted there, absolute
 values must remain there). Token checks only honor regular non-symlink files
 so queued records/operator arguments cannot probe arbitrary host paths or forge

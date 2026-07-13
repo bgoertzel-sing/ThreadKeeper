@@ -1110,8 +1110,7 @@ def _resolve_run_control_file_path(value, label):
         return ""
     raw_value = str(value)
     if (
-        "\x00" in raw_value
-        or any((ord(ch) < 32 or ord(ch) == 127) for ch in raw_value)
+        _contains_text_control(raw_value)
         or len(raw_value) > _SUBAGENT_MAX_PATH_ARG_CHARS
     ):
         raise ValueError(
@@ -1276,9 +1275,8 @@ def _resolve_queue_task_path(queue_path):
         raise ValueError("invalid queued dispatch path")
     raw_queue_path = str(queue_path)
     if (
-        "\x00" in raw_queue_path
-        or len(raw_queue_path) > _SUBAGENT_MAX_PATH_ARG_CHARS
-        or any((ord(ch) < 32 or ord(ch) == 127) for ch in raw_queue_path)
+        len(raw_queue_path) > _SUBAGENT_MAX_PATH_ARG_CHARS
+        or _contains_text_control(raw_queue_path)
     ):
         raise ValueError(
             "queued dispatch path must be a bounded path string without control characters"

@@ -2192,6 +2192,23 @@ def test_run_queued_dispatch_rejects_control_character_path_before_claim(tmp_pat
     assert not Path(str(task) + ".failed").exists()
 
 
+def test_run_queued_dispatch_rejects_unicode_control_path_before_claim(tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs"
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(run_dir))
+    queue_dir = run_dir / "queue"
+    queue_dir.mkdir(parents=True)
+    task = queue_dir / "task.json"
+    task.write_text('{"status":"queued"}', encoding="utf-8")
+
+    for control in ("\u202e", "\u2060", "\ud800"):
+        result = json.loads(subagent.run_queued_dispatch(str(task) + control))
+        assert result["status"] == "queue_worker_error"
+        assert "control characters" in result["summary"]
+        assert task.exists()
+        assert not Path(str(task) + ".claimed").exists()
+        assert not Path(str(task) + ".failed").exists()
+
+
 def test_run_queued_dispatch_rejects_oversized_path_before_claim(tmp_path, monkeypatch):
     run_dir = tmp_path / "runs"
     monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(run_dir))
@@ -2904,6 +2921,22 @@ def test_run_queued_worker_loop_rejects_stop_file_control_chars_before_lock(tmp_
     assert "stop_file" in result["summary"]
     assert "control characters" in result["summary"]
     assert not (run_dir / ".async-worker.lock").exists()
+
+
+def test_run_queued_worker_loop_rejects_unicode_stop_file_controls_before_lock(tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs"
+    monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(run_dir))
+
+    for control in ("\u202e", "\u2060", "\ud800"):
+        result = json.loads(subagent.run_queued_worker_loop(
+            max_tasks=1, poll_interval_s=0, max_idle_polls=0,
+            stop_file=f"safe.stop{control}spoof",
+        ))
+        assert result["status"] == "worker_config_invalid"
+        assert result["tasks_attempted"] == 0
+        assert "stop_file" in result["summary"]
+        assert "control characters" in result["summary"]
+        assert not (run_dir / ".async-worker.lock").exists()
 
 
 def test_run_control_symlink_tokens_are_ignored(tmp_path, monkeypatch):
