@@ -3605,22 +3605,23 @@ def _validate_relative_workspace_path_arg(path, label="path argument"):
 
 
 def _contains_text_control(value):
-    """Reject controls, line separators, and bidirectional format controls.
+    """Reject controls, separators, surrogates, and unsafe format characters.
 
     ``str`` arguments can contain non-ASCII separators that split rendered log
     or prompt lines even though they are not covered by the usual ``ord < 32``
-    check. Bidirectional format controls can also make paths, commands, or
-    audit text render in a misleading order. Treat Unicode ``Cc`` characters,
-    ``Zl``/``Zp``, and the bidi formatting/isolate code points as control data
-    at tool/control boundaries while preserving ordinary format characters
-    such as emoji joiners.
+    check. Invisible formatting characters can make paths, commands, or audit
+    text misleading, while lone surrogates can fail later during UTF-8 encoding.
+    Treat Unicode ``Cc``/``Cs``/``Zl``/``Zp`` and ``Cf`` characters as control
+    data at tool/control boundaries, except for the common linguistic joiners
+    U+200C/U+200D.
     """
-    bidi_controls = {
-        "\u061c", "\u200e", "\u200f", "\u202a", "\u202b", "\u202c",
-        "\u202d", "\u202e", "\u2066", "\u2067", "\u2068", "\u2069",
-    }
+    allowed_format_characters = {"\u200c", "\u200d"}
     return any(
-        unicodedata.category(ch) in ("Cc", "Zl", "Zp") or ch in bidi_controls
+        unicodedata.category(ch) in ("Cc", "Cs", "Zl", "Zp")
+        or (
+            unicodedata.category(ch) == "Cf"
+            and ch not in allowed_format_characters
+        )
         for ch in str(value)
     )
 

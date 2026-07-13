@@ -5280,6 +5280,20 @@ def test_validate_tool_args_rejects_unicode_bidi_controls():
         )
 
 
-def test_validate_tool_args_preserves_ordinary_unicode_format_characters():
-    """Do not reject benign joiners used in normal Unicode query text."""
-    assert subagent._validate_tool_args("search", ["family: 👩‍👩‍👧‍👦"]) is None
+def test_validate_tool_args_rejects_invisible_format_and_surrogate_chars():
+    """Unsafe invisible formats and lone surrogates fail before tool handling."""
+    for control in ("\u00ad", "\u2060", "\ufeff", "\ud800"):
+        assert subagent._validate_tool_args("read-file", [f"safe{control}spoof.txt"]) == (
+            "path argument must not contain control characters"
+        )
+        assert subagent._validate_tool_args("search", [f"safe{control}spoof"]) == (
+            "query argument must not contain control characters"
+        )
+        assert subagent._validate_tool_args("shell", [f"echo{control}spoof"]) == (
+            "shell command must not contain control characters"
+        )
+
+
+def test_validate_tool_args_preserves_unicode_joiners():
+    """Keep common linguistic and emoji joiners usable in query text."""
+    assert subagent._validate_tool_args("search", ["می‌روم family: 👩‍👩‍👧‍👦"]) is None

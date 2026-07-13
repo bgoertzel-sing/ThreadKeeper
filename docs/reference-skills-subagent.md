@@ -101,12 +101,12 @@ execution. Ordinary parenthesized prose remains accepted.
 
 Subagent file-tool arguments are now accepted only as workspace-relative paths
 without parent-directory traversal (`..`), control characters, Unicode line
-separators, or bidirectional formatting controls; absolute host
-paths fail closed during argument validation before any file-tool resolver/audit
-path is touched. Query tools (`search`, `tavily-search`, `technical-analysis`)
-and the optional `shell` command string also reject ASCII/C1 controls and
-Unicode line/paragraph separators before
-provider/subprocess execution, keeping tool calls single-line and avoiding
+separators, unsafe invisible formatting characters, or lone surrogates; common
+linguistic/emoji joiners remain accepted. Absolute host paths fail closed during
+argument validation before any file-tool resolver/audit path is touched. Query
+tools (`search`, `tavily-search`, `technical-analysis`) and the optional `shell`
+command string apply the same character controls before provider/subprocess
+execution, keeping tool calls single-line and avoiding
 transcript/audit line-forging ambiguity. `technical-analysis` is additionally
 restricted to a 1-32 character market-symbol grammar rather than accepting
 free-form query text. External query arguments also have a dedicated bounded
