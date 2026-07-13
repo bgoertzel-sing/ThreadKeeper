@@ -120,6 +120,30 @@ def test_duplicate_live_bridge_is_rejected(monkeypatch):
         mtproto.start_mtproto()
 
 
+def test_self_message_filter_rejects_outgoing_and_own_sender():
+    bridge = importlib.import_module("channels.telegram_mtproto_bridge")
+
+    class Obj:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    assert bridge._is_self_message(Obj(out=True, message=Obj(out=True)), 42)
+    assert bridge._is_self_message(
+        Obj(out=False, sender_id=42, message=Obj(out=False, sender_id=42)), 42
+    )
+    assert not bridge._is_self_message(
+        Obj(out=False, sender_id=7, message=Obj(out=False, sender_id=7)), 42
+    )
+
+
+def test_bridge_handler_is_incoming_only():
+    bridge_source = (ROOT / "channels" / "telegram_mtproto_bridge.py").read_text(
+        encoding="utf-8"
+    )
+    assert "@client.on(events.NewMessage(incoming=True))" in bridge_source
+    assert "if _is_self_message(event, me.id):" in bridge_source
+
+
 def test_singleton_lock_rejects_second_owner(tmp_path):
     bridge = importlib.import_module("channels.telegram_mtproto_bridge")
     session = str(tmp_path / "session")

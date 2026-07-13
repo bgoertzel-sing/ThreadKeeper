@@ -58,6 +58,17 @@ def _emit(obj):
     except Exception:
         pass
 
+def _is_self_message(event, self_id):
+    """Fail closed against re-ingesting this bot's own outbound messages."""
+    message = getattr(event, "message", None)
+    if bool(getattr(event, "out", False)) or bool(getattr(message, "out", False)):
+        return True
+    sender_id = getattr(event, "sender_id", None)
+    if sender_id is None and message is not None:
+        sender_id = getattr(message, "sender_id", None)
+    return sender_id == self_id
+
+
 def _convert_message(event):
     from telethon.tl.types import (
         PeerUser, PeerChat, PeerChannel,
@@ -166,9 +177,11 @@ async def main():
     _emit({"type": "status", "message": f"Connected as @{getattr(me, 'username', None) or '(unknown)'} (id={me.id})"})
     _emit({"type": "status", "message": "MTProto receive mode active; delivery capabilities require canary validation"})
 
-    @client.on(events.NewMessage())
+    @client.on(events.NewMessage(incoming=True))
     async def _on_new_message(event):
         try:
+            if _is_self_message(event, me.id):
+                return
             update_dict = _convert_message(event)
             _emit({"type": "message", "update": update_dict})
         except Exception as exc:
