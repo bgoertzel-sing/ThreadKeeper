@@ -29,6 +29,7 @@ _authenticated_user_id = None
 _allowed_user_ids = set()
 _private_only = False
 _sync_poll = False
+_receive_transport = "bot_api"
 
 _attachment_dir = "/home/openclaw/tmp/omegaclaw-telegram-attachments"
 _download_attachments = True
@@ -143,7 +144,7 @@ def _set_last(msg, chat_id="", skip_response=False):
 
 def getLastMessage():
     global _last_message, _reply_chat_id, _last_skip_response
-    if _sync_poll and _running:
+    if _receive_transport == "bot_api" and _sync_poll and _running:
         _poll_once()
     with _msg_lock:
         if _pending_messages:
@@ -748,6 +749,10 @@ def _handle_updates(updates):
 
 def _poll_once(timeout=0):
     global _connected
+    if _receive_transport != "bot_api":
+        raise RuntimeError(
+            f"Bot API getUpdates is disabled for receive transport {_receive_transport!r}"
+        )
     try:
         params = {"timeout": int(timeout)}
         with _state_lock:
@@ -774,8 +779,37 @@ def _poll_loop():
     print("[TELEGRAM] Polling stopped")
 
 
+def _configured_receive_transport():
+    """Return the one authoritative inbound Telegram transport.
+
+    TG_RECEIVE_TRANSPORT supersedes the legacy TG_USE_MTPROTO switch.  The
+    latter remains accepted so existing launchers fail safely while migrating.
+    """
+    configured = os.environ.get("TG_RECEIVE_TRANSPORT", "").strip().lower()
+    aliases = {
+        "botapi": "bot_api",
+        "bot-api": "bot_api",
+        "poll": "bot_api",
+        "polling": "bot_api",
+        "telethon": "mtproto",
+    }
+    configured = aliases.get(configured, configured)
+    if configured:
+        if configured not in {"bot_api", "mtproto"}:
+            raise ValueError(
+                "TG_RECEIVE_TRANSPORT must be 'bot_api' or 'mtproto'"
+            )
+        legacy_mtproto = _parse_bool_env("TG_USE_MTPROTO", False)
+        if "TG_USE_MTPROTO" in os.environ and legacy_mtproto != (configured == "mtproto"):
+            raise ValueError(
+                "TG_RECEIVE_TRANSPORT conflicts with legacy TG_USE_MTPROTO"
+            )
+        return configured
+    return "mtproto" if _parse_bool_env("TG_USE_MTPROTO", False) else "bot_api"
+
+
 def start_telegram(chat_id="", poll_timeout=20):
-    global _running, _bot_token, _api_base, _poll_timeout, _offset, _connected, _sync_poll
+    global _running, _bot_token, _api_base, _poll_timeout, _offset, _connected, _sync_poll, _receive_transport
 
     proxy = auth.get_proxy_url()
     if proxy:
@@ -798,11 +832,29 @@ def start_telegram(chat_id="", poll_timeout=20):
     _offset = None
     _running = True
     _connected = False
-    _sync_poll = _parse_bool_env("TG_SYNC_POLL", False)
+    _receive_transport = _configured_receive_transport()
+    _sync_poll = _parse_bool_env("TG_SYNC_POLL", False) if _receive_transport == "bot_api" else False
     allowed = ",".join(sorted(_allowed_user_ids)) or "any"
     private_desc = "private-only" if _private_only else "all-chat-types"
-    poll_desc = "sync" if _sync_poll else "threaded"
     chat_desc = ",".join(sorted(_allowed_chat_ids)) if _allowed_chat_ids else (_chat_id or "auto-bind")
+
+    if _receive_transport == "mtproto":
+        print(f"[TELEGRAM] Starting adapter with chat target(s): {chat_desc}, allowed users: {allowed}, mode: {private_desc}, receive: MTProto (Telethon)")
+        # Bot API getUpdates must remain unreachable in MTProto mode.  Bot API
+        # sendMessage/getFile operations are still permitted.
+        _connected = False
+        try:
+            import telegram_mtproto
+            bridge = telegram_mtproto.start_mtproto()
+            if bridge is None:
+                raise RuntimeError("MTProto bridge did not start")
+            print("[TELEGRAM] MTProto receive mode started; Bot API polling disabled")
+            return bridge
+        except Exception as exc:
+            _running = False
+            raise RuntimeError(f"MTProto receive startup failed: {exc}") from exc
+
+    poll_desc = "sync" if _sync_poll else "threaded"
     print(f"[TELEGRAM] Starting adapter with chat target(s): {chat_desc}, allowed users: {allowed}, mode: {private_desc}, polling: {poll_desc}")
     if _skip_initial_offset():
         print("[TELEGRAM] Preserving existing pending updates on startup")
@@ -822,6 +874,12 @@ def start_telegram(chat_id="", poll_timeout=20):
 def stop_telegram():
     global _running
     _running = False
+    # Stop MTProto client if running
+    try:
+        import telegram_mtproto
+        telegram_mtproto.stop_mtproto()
+    except Exception:
+        pass
 
 
 def _send_message_to(text, target_chat):
