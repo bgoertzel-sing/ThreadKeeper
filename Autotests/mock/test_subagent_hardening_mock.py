@@ -1549,6 +1549,33 @@ def test_dispatch_rejects_mixed_emit_and_tool_response(tmp_path, monkeypatch):
     assert saved["status"] == "emit_protocol_violation"
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        'narration that the parser ignores\n(emit "done")',
+        '(emit "done")\n(write-file "hidden.txt" "unterminated"',
+    ],
+)
+def test_dispatch_rejects_unparsed_text_beside_final_emit(tmp_path, monkeypatch, raw):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_a: (raw, 0, 0),
+    )
+
+    payload = json.loads(
+        subagent.dispatch("reject hidden final text", "write-file", "unit", max_turns=1)
+    )
+
+    assert payload["status"] == "error"
+    assert "EMIT_PROTOCOL_VIOLATION" in payload["summary"]
+    assert "unparsed text or additional records" in payload["summary"]
+    assert not (tmp_path / "workspace" / "hidden.txt").exists()
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["status"] == "emit_protocol_violation"
+
+
 def test_dispatch_rejects_same_line_trailing_payload_after_emit(tmp_path, monkeypatch):
     _write_unit_persona(tmp_path, monkeypatch)
     monkeypatch.setattr(

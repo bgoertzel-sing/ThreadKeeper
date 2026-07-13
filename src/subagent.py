@@ -3857,6 +3857,28 @@ def _extract_final_emit(calls):
     return (args[0], "")
 
 
+def _validate_final_emit_envelope(raw_response, emit_value):
+    """Require a successful emit to be the response's only protocol record.
+
+    ``parse_calls`` intentionally skips prose and malformed lines so ordinary
+    tool turns can recover.  That tolerance must not let a final response hide
+    ignored text or a malformed second call beside an otherwise valid emit.
+    Thinking blocks and markdown fences are stripped using the same rules as
+    the call parser; after that, exactly one non-empty ASCII-newline record is
+    allowed.
+    """
+    if emit_value is None:
+        return ""
+    text = _strip_fences(_strip_thinking(str(raw_response)))
+    records = [line.strip() for line in text.split("\n") if line.strip()]
+    if len(records) != 1:
+        return (
+            "EMIT_PROTOCOL_VIOLATION: emit response must not contain "
+            "unparsed text or additional records"
+        )
+    return ""
+
+
 # ----------------------------------------------------------------------
 # Result post-processing
 # ----------------------------------------------------------------------
@@ -4131,6 +4153,8 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
         calls = parse_calls(raw)
         turn_record["tool_calls"] = [{"name": n, "args": a} for (n, a) in calls]
         emit_value, emit_error = _extract_final_emit(calls)
+        if not emit_error:
+            emit_error = _validate_final_emit_envelope(raw, emit_value)
         if emit_error:
             turn_record["tool_results"] = emit_error
             # Malformed worker arguments can contain characters that are not

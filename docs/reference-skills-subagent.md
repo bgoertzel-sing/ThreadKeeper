@@ -97,7 +97,10 @@ before reading existing content, closing TOCTOU symlink-swap gaps between
 `realpath` containment resolution, size inspection, and the actual file read.
 Single-argument worker calls reject unterminated quotes and ambiguous unquoted
 same-line trailing calls such as `(search safe) (emit hidden)` before tool
-execution. Ordinary parenthesized prose remains accepted.
+execution. Ordinary parenthesized prose remains accepted. A successful final
+`emit` must also be the only non-empty protocol record after thinking blocks and
+markdown fences are removed; ignored narration or malformed extra call lines
+fail closed as `EMIT_PROTOCOL_VIOLATION` instead of becoming a parent digest.
 
 Subagent file-tool arguments are now accepted only as workspace-relative paths
 without parent-directory traversal (`..`), control characters, Unicode line
