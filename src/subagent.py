@@ -3605,14 +3605,24 @@ def _validate_relative_workspace_path_arg(path, label="path argument"):
 
 
 def _contains_text_control(value):
-    """Reject ASCII/C1 controls and Unicode line/paragraph separators.
+    """Reject controls, line separators, and bidirectional format controls.
 
     ``str`` arguments can contain non-ASCII separators that split rendered log
     or prompt lines even though they are not covered by the usual ``ord < 32``
-    check. Treat all Unicode ``Cc`` characters plus ``Zl``/``Zp`` as control
-    data at tool/control boundaries.
+    check. Bidirectional format controls can also make paths, commands, or
+    audit text render in a misleading order. Treat Unicode ``Cc`` characters,
+    ``Zl``/``Zp``, and the bidi formatting/isolate code points as control data
+    at tool/control boundaries while preserving ordinary format characters
+    such as emoji joiners.
     """
-    return any(unicodedata.category(ch) in ("Cc", "Zl", "Zp") for ch in str(value))
+    bidi_controls = {
+        "\u061c", "\u200e", "\u200f", "\u202a", "\u202b", "\u202c",
+        "\u202d", "\u202e", "\u2066", "\u2067", "\u2068", "\u2069",
+    }
+    return any(
+        unicodedata.category(ch) in ("Cc", "Zl", "Zp") or ch in bidi_controls
+        for ch in str(value)
+    )
 
 
 def _validate_tool_args(name, args):

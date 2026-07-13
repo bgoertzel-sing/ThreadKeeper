@@ -100,7 +100,8 @@ same-line trailing calls such as `(search safe) (emit hidden)` before tool
 execution. Ordinary parenthesized prose remains accepted.
 
 Subagent file-tool arguments are now accepted only as workspace-relative paths
-without parent-directory traversal (`..`) or control characters; absolute host
+without parent-directory traversal (`..`), control characters, Unicode line
+separators, or bidirectional formatting controls; absolute host
 paths fail closed during argument validation before any file-tool resolver/audit
 path is touched. Query tools (`search`, `tavily-search`, `technical-analysis`)
 and the optional `shell` command string also reject ASCII/C1 controls and
