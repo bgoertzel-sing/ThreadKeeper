@@ -3843,6 +3843,11 @@ def _extract_final_emit(calls):
         return (None, "EMIT_PROTOCOL_VIOLATION: emit requires exactly one non-null argument")
     if not isinstance(args[0], str):
         return (None, "EMIT_PROTOCOL_VIOLATION: emit argument must be a string")
+    if not args[0].strip():
+        return (
+            None,
+            "EMIT_PROTOCOL_VIOLATION: emit argument must not be empty or whitespace-only",
+        )
     if _contains_text_control(args[0]):
         return (
             None,

@@ -101,6 +101,8 @@ execution. Ordinary parenthesized prose remains accepted. A successful final
 `emit` must also be the only non-empty protocol record after thinking blocks and
 markdown fences are removed; ignored narration or malformed extra call lines
 fail closed as `EMIT_PROTOCOL_VIOLATION` instead of becoming a parent digest.
+Empty or whitespace-only final emits fail closed too, so a successful structured
+return always contains a meaningful non-empty summary.
 
 Subagent file-tool arguments are now accepted only as workspace-relative paths
 without parent-directory traversal (`..`), control characters, Unicode line

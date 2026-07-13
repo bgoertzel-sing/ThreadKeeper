@@ -1644,6 +1644,26 @@ def test_extract_final_emit_rejects_non_string_argument():
     assert error == "EMIT_PROTOCOL_VIOLATION: emit argument must be a string"
 
 
+@pytest.mark.parametrize("raw", ['(emit "")', '(emit "   ")'])
+def test_dispatch_rejects_empty_emit_before_success(tmp_path, monkeypatch, raw):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_a: (raw, 0, 0),
+    )
+
+    payload = json.loads(
+        subagent.dispatch("reject empty final", "read-file", "unit", max_turns=1)
+    )
+
+    assert payload["status"] == "error"
+    assert "EMIT_PROTOCOL_VIOLATION" in payload["summary"]
+    assert "must not be empty or whitespace-only" in payload["summary"]
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["status"] == "emit_protocol_violation"
+
+
 @pytest.mark.parametrize("control", ["\u2028", "\u202e", "\u2060", "\ud800"])
 def test_dispatch_rejects_unsafe_unicode_emit_before_success(
     tmp_path, monkeypatch, control
