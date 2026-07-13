@@ -48,6 +48,16 @@ _last_sent_key = ""
 _last_sent_time = 0.0
 _last_sent_lock = threading.Lock()
 
+# --- Bot-to-bot loop-prevention safeguards (Bot API 10.0 requirement) ---
+_self_bot_id = None  # populated at start_telegram() from getMe
+_bot_sender_last_ts = {}  # user_id -> last reply timestamp
+_bot_sender_lock = threading.Lock()
+_bot_interaction_chain = []  # list of (timestamp, sender_id) for recent bot-bot replies
+_bot_interaction_lock = threading.Lock()
+_BOT_RATE_LIMIT_S = 3.0  # min seconds between replies to the same bot sender
+_BOT_MAX_CHAIN_DEPTH = 8  # max consecutive bot-to-bot replies in window
+_BOT_CHAIN_WINDOW_S = 60.0  # sliding window for chain counting
+
 
 def _looks_like_long_request(msg):
     """Heuristic for requests that should get an immediate model-independent ack.
@@ -191,6 +201,49 @@ def getLastMessage():
 def should_skip_response():
     global _last_skip_response
     return _last_skip_response
+
+
+def _is_self_bot_message(user):
+    """True when the message was sent by this bot itself."""
+    if not _self_bot_id:
+        return False
+    return str(user.get("id", "")) == str(_self_bot_id)
+
+
+def _bot_to_bot_loop_guard(user, chat_id):
+    """Return True when this bot-to-bot reply should be suppressed.
+
+    Telegram Bot API 10.0 bot-to-bot mode requires loop prevention.
+    Enforces:
+    1. Per-sender rate limit (_BOT_RATE_LIMIT_S seconds between replies).
+    2. Global interaction-depth cap (_BOT_MAX_CHAIN_DEPTH in _BOT_CHAIN_WINDOW_S).
+    Returns True (suppress) when either limit is exceeded.
+    """
+    sender_id = str(user.get("id", ""))
+    if not sender_id or not user.get("is_bot"):
+        return False  # only guard bot-originated traffic
+
+    now = time.time()
+
+    # 1. Per-sender rate limit
+    with _bot_sender_lock:
+        last = _bot_sender_last_ts.get(sender_id, 0.0)
+        if (now - last) < _BOT_RATE_LIMIT_S:
+            print(f"[TELEGRAM] Bot-to-bot rate limit for sender {sender_id}; suppressing.")
+            return True
+        _bot_sender_last_ts[sender_id] = now
+
+    # 2. Global interaction-depth cap
+    with _bot_interaction_lock:
+        _bot_interaction_chain.append((now, sender_id))
+        cutoff = now - _BOT_CHAIN_WINDOW_S
+        while _bot_interaction_chain and _bot_interaction_chain[0][0] < cutoff:
+            _bot_interaction_chain.pop(0)
+        if len(_bot_interaction_chain) > _BOT_MAX_CHAIN_DEPTH:
+            print(f"[TELEGRAM] Bot-to-bot chain depth {len(_bot_interaction_chain)} exceeds {_BOT_MAX_CHAIN_DEPTH}; suppressing.")
+            return True
+
+    return False
 
 
 def _should_skip_group_response(message, msg):
@@ -757,6 +810,14 @@ def _handle_updates(updates):
         if not chat_id:
             continue
 
+        # --- Bot-to-bot safeguards (Bot API 10.0 requirement) ---
+        # 1. Never process our own outgoing messages (self-echo prevention).
+        if _is_self_bot_message(user):
+            continue
+        # 2. Rate-limit and depth-cap bot-originated traffic to prevent loops.
+        if user.get("is_bot") and _bot_to_bot_loop_guard(user, chat_id):
+            continue
+
         # In group chats, ingest messages addressed to other bots for context,
         # but suppress a response unless this bot is also explicitly mentioned.
         if chat_type != "private":
@@ -857,7 +918,7 @@ def _configured_receive_transport():
 
 
 def start_telegram(chat_id="", poll_timeout=20):
-    global _running, _bot_token, _api_base, _poll_timeout, _offset, _connected, _sync_poll, _receive_transport
+    global _running, _bot_token, _api_base, _poll_timeout, _offset, _connected, _sync_poll, _receive_transport, _self_bot_id
 
     proxy = auth.get_proxy_url()
     if proxy:
@@ -901,6 +962,15 @@ def start_telegram(chat_id="", poll_timeout=20):
         except Exception as exc:
             _running = False
             raise RuntimeError(f"MTProto receive startup failed: {exc}") from exc
+
+    # Resolve our own bot ID for self-message filtering (bot-to-bot mode safety)
+    try:
+        me = _api_call("getMe", {}, timeout=10) or {}
+        _self_bot_id = str(me.get("id", ""))
+        if _self_bot_id:
+            print(f"[TELEGRAM] Bot identity: @{me.get('username', '?')} (id={_self_bot_id})")
+    except Exception as exc:
+        print(f"[TELEGRAM] Warning: could not resolve bot identity: {exc}")
 
     poll_desc = "sync" if _sync_poll else "threaded"
     print(f"[TELEGRAM] Starting adapter with chat target(s): {chat_desc}, allowed users: {allowed}, mode: {private_desc}, polling: {poll_desc}")
