@@ -8,6 +8,12 @@ import time
 import urllib.parse
 import urllib.request
 import auth
+from message_envelope import (
+    MessageEnvelope,
+    set_current_envelope,
+    get_current_envelope,
+    require_current_envelope,
+)
 
 _running = False
 _last_message = ""
@@ -18,9 +24,9 @@ _bot_token = ""
 _api_base = ""
 _chat_id = ""
 _allowed_chat_ids = set()
-_reply_chat_id = ""
-_active_chat_id = ""
-_pending_messages = []
+_reply_chat_id = ""  # legacy fallback, not used for ordinary replies
+_active_chat_id = ""  # legacy fallback, not used for ordinary replies
+_pending_messages = []  # now stores MessageEnvelope objects
 _poll_timeout = 20
 _offset = None
 _connected = False
@@ -132,10 +138,20 @@ def _set_active_chat(chat_id):
         _reply_chat_id = chat_id
 _last_skip_response = False
 
-def _set_last(msg, chat_id="", skip_response=False):
+def _set_last(msg, chat_id="", skip_response=False, *, envelope=None):
+    """Enqueue a message for the OmegaClaw loop.
+
+    If *envelope* is provided it is stored and later used as the immutable
+    routing context for send_message.  The legacy (msg, chat_id, skip) tuple
+    path is kept only for backward compatibility with code paths that have
+    not been migrated yet.
+    """
     global _last_message, _pending_messages, _last_skip_response
     with _msg_lock:
-        _pending_messages.append((msg, chat_id, skip_response))
+        if envelope is not None:
+            _pending_messages.append(envelope)
+        else:
+            _pending_messages.append((msg, chat_id, skip_response))
         if _last_message == "":
             _last_message = msg
         else:
@@ -148,9 +164,19 @@ def getLastMessage():
         _poll_once()
     with _msg_lock:
         if _pending_messages:
-            msg, cid, skip = _pending_messages.pop(0)
+            item = _pending_messages.pop(0)
+            if hasattr(item, "source_chat_id") and hasattr(item, "response_policy"):
+                _last_message = ""
+                _last_skip_response = item.response_policy == "skip"
+                set_current_envelope(item)
+                # Keep legacy globals in sync for unmigrated code paths
+                _set_active_chat(item.source_chat_id)
+                return item.text
+            # Legacy tuple path
+            msg, cid, skip = item
             _last_message = ""
             _last_skip_response = skip
+            set_current_envelope(None)
             if cid:
                 _set_active_chat(cid)
             return msg
@@ -158,6 +184,7 @@ def getLastMessage():
         tmp = _last_message
         _last_message = ""
         _last_skip_response = False
+        set_current_envelope(None)
         return tmp
 
 
@@ -737,13 +764,34 @@ def _handle_updates(updates):
 
         state = _is_allowed_message(chat_id, user_id, auth_text, chat_type)
         display_name = _display_name(user, chat)
+        source_message_id = int(message.get("message_id", 0) or 0)
+        policy = "skip" if (_skip_response and chat_type != "private") else "ordinary"
         if state == "allow":
             _set_reply_chat(chat_id)
-            _set_last(f"{display_name}: {msg}", chat_id, skip_response=_skip_response if chat_type != "private" else False)
-            if not (_skip_response if chat_type != "private" else False):
+            env = MessageEnvelope.from_ingress(
+                update_id=int(update_id or 0),
+                source_chat_id=chat_id,
+                source_message_id=source_message_id,
+                sender_id=user_id,
+                sender_display=display_name,
+                text=f"{display_name}: {msg}",
+                response_policy=policy,
+            )
+            _set_last(f"{display_name}: {msg}", chat_id, skip_response=policy == "skip", envelope=env)
+            if policy != "skip":
                 _maybe_send_preack(display_name, auth_text or msg, chat_id=chat_id)
         elif state == "auth_bound":
             _set_reply_chat(chat_id)
+            env = MessageEnvelope.from_ingress(
+                update_id=int(update_id or 0),
+                source_chat_id=chat_id,
+                source_message_id=source_message_id,
+                sender_id=user_id,
+                sender_display=display_name,
+                text=f"Authentication successful for {display_name}.",
+                response_policy="auth_broadcast",
+            )
+            set_current_envelope(env)
             send_message(f"Authentication successful for {display_name}.")
 
 
@@ -922,6 +970,16 @@ def _send_message_to(text, target_chat):
 
 
 def send_message(text):
+    """Send a reply using the active envelope's source_chat_id.
+
+    Falls back to legacy globals only if no envelope is active (e.g.
+    administrative broadcasts).  For ordinary replies, the envelope is
+    authoritative and immutable.
+    """
+    env = get_current_envelope()
+    if env is not None:
+        return _send_message_to(text, env.source_chat_id)
+    # Legacy/administrative fallback
     with _state_lock:
         target_chat = _active_chat_id or _reply_chat_id or _chat_id
     return _send_message_to(text, target_chat)
