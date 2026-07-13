@@ -3012,13 +3012,19 @@ def _normalize_task_contract(goal, cfg=None):
             ):
                 if key in inline:
                     contract[key] = inline[key]
-            objective = str(inline.get("objective") or parsed.get("objective") or objective)
-    objective = str(objective or "").strip()
-    contract["objective"] = objective
+            if "objective" in inline:
+                objective = inline["objective"]
+            elif "objective" in parsed:
+                objective = parsed["objective"]
+    # Preserve an explicitly supplied non-string objective in the persisted
+    # contract so validation can fail closed instead of silently stringifying
+    # typed JSON (for example, a list or object) into worker prompt text.
+    contract["objective"] = objective.strip() if isinstance(objective, str) else objective
     contract["allowed_paths"] = _contract_string_list(contract.get("allowed_paths"))
     contract["forbidden_actions"] = _contract_string_list(contract.get("forbidden_actions"))
     contract["done_criteria"] = _contract_string_list(contract.get("done_criteria"))
-    return objective, contract
+    objective_text = contract["objective"] if isinstance(contract["objective"], str) else ""
+    return objective_text, contract
 
 
 def _validate_task_contract(contract):
@@ -3028,7 +3034,9 @@ def _validate_task_contract(contract):
     same bounded-shape treatment as tool arguments. `allowed_paths` also gets a
     dry-run workspace resolution now, rather than waiting until a tool call.
     """
-    objective = str((contract or {}).get("objective") or "")
+    objective = (contract or {}).get("objective", "")
+    if not isinstance(objective, str):
+        return "task contract objective must be a string"
     if len(objective) > _SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS:
         return (
             "task contract objective exceeds "

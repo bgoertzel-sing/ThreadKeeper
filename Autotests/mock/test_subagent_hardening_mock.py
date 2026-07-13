@@ -2039,6 +2039,33 @@ def test_inline_task_contract_rejects_non_string_list_items_before_llm(tmp_path,
     assert saved["task_contract"]["done_criteria"] == ["file exists", 123]
 
 
+@pytest.mark.parametrize(
+    "objective", [None, True, 123, ["typed", "objective"], {"typed": "objective"}]
+)
+def test_inline_task_contract_rejects_non_string_objective_before_llm(
+    tmp_path, monkeypatch, objective
+):
+    """Typed JSON objectives must not be coerced into worker prompt strings."""
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")),
+    )
+
+    payload = json.loads(
+        subagent.dispatch(
+            json.dumps({"objective": objective}), "read-file", "unit", max_turns=1
+        )
+    )
+
+    assert payload["status"] == "error"
+    assert "objective must be a string" in payload["summary"]
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["status"] == "contract_invalid"
+    assert saved["task_contract"]["objective"] == objective
+
+
 def test_task_contract_requires_adjudication_marks_candidate_not_final(tmp_path, monkeypatch):
     _write_unit_persona(tmp_path, monkeypatch)
     contract_goal = json.dumps({

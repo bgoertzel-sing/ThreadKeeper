@@ -103,6 +103,9 @@ markdown fences are removed; ignored narration or malformed extra call lines
 fail closed as `EMIT_PROTOCOL_VIOLATION` instead of becoming a parent digest.
 Empty or whitespace-only final emits fail closed too, so a successful structured
 return always contains a meaningful non-empty summary.
+Task-contract objectives must be JSON strings; typed values such as arrays,
+objects, numbers, booleans, or null fail closed before a worker LLM call rather
+than being silently stringified into prompt text.
 
 Subagent file-tool arguments are now accepted only as workspace-relative paths
 without parent-directory traversal (`..`), control characters, Unicode line
