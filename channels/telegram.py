@@ -54,7 +54,7 @@ _bot_sender_last_ts = {}  # user_id -> last reply timestamp
 _bot_sender_lock = threading.Lock()
 _bot_interaction_chain = []  # list of (timestamp, sender_id) for recent bot-bot replies
 _bot_interaction_lock = threading.Lock()
-_BOT_RATE_LIMIT_S = 3.0  # min seconds between replies to the same bot sender
+_BOT_RATE_LIMIT_S = 1.0  # min seconds between replies to the same bot sender
 _BOT_MAX_CHAIN_DEPTH = 8  # max consecutive bot-to-bot replies in window
 _BOT_CHAIN_WINDOW_S = 60.0  # sliding window for chain counting
 
