@@ -251,16 +251,41 @@ def _should_skip_group_response(message, msg):
 
     An explicit mention of this bot takes precedence over incidental mentions
     of collaborators (for example, "@Protomegabot ... from @Protocosmobot").
+
+    Mentions can arrive in two independent entity lists whose offsets index
+    into two different source strings:
+      * ``entities``          -> offsets into ``message['text']``
+      * ``caption_entities``  -> offsets into ``message['caption']``
+    A document/photo/PDF sent with a caption like "@Protomegabot look" carries
+    the mention only in ``caption_entities``.  Reading ``entities`` alone (and
+    slicing the composite ``msg`` string with caption offsets) silently drops
+    those mentions, so which bot responds ends up depending on incidental
+    reply framing rather than on who was actually @-mentioned.  Read both
+    lists, each against its own source string, and also honour ``text_mention``
+    entities that name a user object without a literal ``@``.
     """
     mentions = []
-    for ent in message.get("entities", []) or []:
-        if ent.get("type") != "mention":
-            continue
-        start = ent.get("offset", 0)
-        length = ent.get("length", 0)
-        mentioned = msg[start:start + length].lstrip("@").lower()
-        if mentioned:
-            mentions.append(mentioned)
+
+    def _collect(entities, source):
+        source = source or ""
+        for ent in entities or []:
+            etype = ent.get("type")
+            if etype not in ("mention", "text_mention"):
+                continue
+            start = ent.get("offset", 0)
+            length = ent.get("length", 0)
+            token = source[start:start + length].lstrip("@").lower()
+            if token:
+                mentions.append(token)
+            if etype == "text_mention":
+                user = ent.get("user") or {}
+                for key in ("username", "first_name", "last_name"):
+                    val = str(user.get(key, "") or "").strip().lower()
+                    if val:
+                        mentions.append(val)
+
+    _collect(message.get("entities"), message.get("text") or "")
+    _collect(message.get("caption_entities"), message.get("caption") or "")
 
     self_mentioned = any(
         any(name in mentioned for name in ("protomega", "protom"))
