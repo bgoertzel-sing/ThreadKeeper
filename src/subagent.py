@@ -3053,6 +3053,8 @@ def _validate_task_contract(contract):
     objective = (contract or {}).get("objective", "")
     if not isinstance(objective, str):
         return "task contract objective must be a string"
+    if not objective.strip():
+        return "task contract objective must be a non-empty string"
     if len(objective) > _SUBAGENT_MAX_CONTRACT_OBJECTIVE_CHARS:
         return (
             "task contract objective exceeds "
@@ -3069,6 +3071,8 @@ def _validate_task_contract(contract):
         for value in values:
             if not isinstance(value, str):
                 return f"task contract {field} entries must be strings"
+            if not value.strip():
+                return f"task contract {field} entries must be non-empty strings"
             if len(value) > _SUBAGENT_MAX_CONTRACT_ITEM_CHARS:
                 return (
                     f"task contract {field} item exceeds "
@@ -3125,9 +3129,9 @@ def _contract_string_list(value):
     out = []
     for item in value:
         if isinstance(item, str):
-            text = item.strip()
-            if text:
-                out.append(text)
+            # Preserve blank entries after trimming so strict validation can
+            # reject malformed contracts instead of silently dropping data.
+            out.append(item.strip())
         else:
             out.append(item)
     return out

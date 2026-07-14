@@ -2091,6 +2091,60 @@ def test_inline_task_contract_rejects_non_string_objective_before_llm(
     assert saved["task_contract"]["objective"] == objective
 
 
+@pytest.mark.parametrize("objective", ["", "   ", "\t"])
+def test_inline_task_contract_rejects_blank_objective_before_llm(
+    tmp_path, monkeypatch, objective
+):
+    """A bounded child task must still contain a meaningful objective."""
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")),
+    )
+
+    payload = json.loads(
+        subagent.dispatch(
+            json.dumps({"objective": objective}), "read-file", "unit", max_turns=1
+        )
+    )
+
+    assert payload["status"] == "error"
+    assert "objective must be a non-empty string" in payload["summary"]
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["status"] == "contract_invalid"
+    assert saved["task_contract"]["objective"] == objective.strip()
+
+
+@pytest.mark.parametrize("field", ["allowed_paths", "forbidden_actions", "done_criteria"])
+@pytest.mark.parametrize("entry", ["", "   ", "\t"])
+def test_inline_task_contract_rejects_blank_string_list_entries_before_llm(
+    tmp_path, monkeypatch, field, entry
+):
+    """Blank contract constraints must not disappear during normalization."""
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")),
+    )
+
+    payload = json.loads(
+        subagent.dispatch(
+            json.dumps({"objective": "bounded task", field: [entry]}),
+            "read-file",
+            "unit",
+            max_turns=1,
+        )
+    )
+
+    assert payload["status"] == "error"
+    assert f"{field} entries must be non-empty strings" in payload["summary"]
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["status"] == "contract_invalid"
+    assert saved["task_contract"][field] == [""]
+
+
 @pytest.mark.parametrize("task_contract", [None, True, 123, [], "not-an-object"])
 def test_inline_nested_task_contract_requires_json_object_before_llm(
     tmp_path, monkeypatch, task_contract
