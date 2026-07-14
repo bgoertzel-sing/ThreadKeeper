@@ -66,13 +66,15 @@
                              ($_ (if $msgnew
                                      (change-state! &loops (maxNewInputLoops)) _)))
                             (if (> (get-state &loops) 0)
-                                (let* (($lastmessage (if $msgnew (HUMAN-MSG: $msg) (CONTINUATION-MSG: You previously sent an acknowledgement and requested a continuation turn. Now produce your full substantive response using (send "...") and optionally (continue-thinking "reason") if another turn is needed. Do not repeat the acknowledgement.)))
+                                (let* (($lastmessage (if $msgnew (HUMAN-MSG: $msg) (CONTINUATION-MSG: You previously sent an acknowledgement and requested a continuation turn. Now provide the full substantive answer as ordinary user-facing prose only. Do not emit tool calls, parenthesized action syntax, status text, ellipses, or another acknowledgement.)))
                                        ($_ (change-state! &nextWakeAt (+ (get_time) (wakeupInterval))))
                                        ($_ (println! $lastmessage))
                                        ($send (py-str ($prompt :-:-:-: $lastmessage)))
                                        ($_ (println! (CHARS_SENT: (string_length $send) $send)))
                                        ($respi (py-call (lib_llm_ext.callProvider (provider) $send (maxOutputToken) (reasoningMode))))
-                                       ($resp (py-call (helper.balance_parentheses_for_message $respi $msgnew)))
+                                       ; A continuation is still part of the user-request burst and
+                                       ; therefore requires a visible reply just like the first turn.
+                                       ($resp (py-call (helper.balance_parentheses_for_message $respi (or $msgnew (get-state &continueRequested)))))
                                        ($response (if (== "(" (first_char $resp)) $resp (progn (println! $resp) (repr (REMEMBER:OUTPUT_NOTHING_ELSE_THAN: ((skill arg) ...))))))
                                        ($sexpr (catch (sread $response)))
                                        ($_ (change-state! &error ()))
