@@ -604,8 +604,29 @@ def _message_text_and_attachments(message, *, _depth=0, include_reply_content=Tr
         # Include replied-to text and attachment metadata, but not extracted
         # document/PDF bodies. Large quoted docs should be explicit context,
         # not silently injected into router/main prompts.
+        #
+        # Exception: when this bot is explicitly @-mentioned in the reply
+        # text/caption, extract full attachment content from the replied-to
+        # message so the bot can actually read the document it's being asked
+        # about. This closes the framing asymmetry where a direct post with
+        # attachment works but a reply-with-mention only shows metadata.
+        reply_mentioned = False
+        if _self_bot_id:
+            for ent_list_key, src_key in (("entities", "text"), ("caption_entities", "caption")):
+                for ent in message.get(ent_list_key, []) or []:
+                    if ent.get("type") in ("mention", "text_mention"):
+                        src = message.get(src_key, "") or ""
+                        token = src[ent.get("offset", 0):ent.get("offset", 0) + ent.get("length", 0)].lstrip("@").lower()
+                        if any(n in token for n in ("protomega", "protom")):
+                            reply_mentioned = True
+                        if ent.get("type") == "text_mention":
+                            u = ent.get("user") or {}
+                            for k in ("username", "first_name", "last_name"):
+                                v = str(u.get(k, "") or "").strip().lower()
+                                if v and any(n in v for n in ("protomega", "protom")):
+                                    reply_mentioned = True
         reply_text, _ = _message_text_and_attachments(
-            reply, _depth=_depth + 1, include_reply_content=False
+            reply, _depth=_depth + 1, include_reply_content=reply_mentioned
         )
         if reply_text:
             attachments.append(
