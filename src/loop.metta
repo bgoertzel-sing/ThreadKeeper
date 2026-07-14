@@ -66,7 +66,7 @@
                              ($_ (if $msgnew
                                      (change-state! &loops (maxNewInputLoops)) _)))
                             (if (> (get-state &loops) 0)
-                                (let* (($lastmessage (if $msgnew (HUMAN-MSG: $msg) (CONTINUATION-MSG: continue-only-if-explicitly-requested)))
+                                (let* (($lastmessage (if $msgnew (HUMAN-MSG: $msg) (CONTINUATION-MSG: You previously sent an acknowledgement and requested a continuation turn. Now produce your full substantive response using (send "...") and optionally (continue-thinking "reason") if another turn is needed. Do not repeat the acknowledgement.)))
                                        ($_ (change-state! &nextWakeAt (+ (get_time) (wakeupInterval))))
                                        ($_ (println! $lastmessage))
                                        ($send (py-str ($prompt :-:-:-: $lastmessage)))

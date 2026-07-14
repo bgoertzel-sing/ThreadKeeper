@@ -250,7 +250,7 @@ class OpenClawProvider(AIProvider):
         if detail:
             text += "\nDiagnostic: " + detail
         text += "\nZeroBot/OpenClaw should inspect logs or retry with a longer/health-checked backend call."
-        return f"(send {json.dumps(text)})"
+        return f"(send {json.dumps(text, ensure_ascii=False)})"
 
     def _is_context_overflow(self, error_text: str) -> bool:
         """Check whether an error indicates context-length overflow."""
@@ -574,7 +574,7 @@ sys.stdout.write(content)
                     _log_raw(self._name + ":triage", self._triage_model, f"COMPLEX -> ack: {ack}")
                     # Return ack + continue-thinking so OmegaClaw sends the ack
                     # and then calls chat() again for the full response
-                    return f'(send {json.dumps(ack)}) (continue-thinking "preparing fuller response")'
+                    return f'(send {json.dumps(ack, ensure_ascii=False)}) (continue-thinking "preparing fuller response")'
                 elif triage.startswith("SIMPLE"):
                     _log_raw(self._name + ":triage", self._triage_model, "SIMPLE -> full call")
                     # Fall through to full call
