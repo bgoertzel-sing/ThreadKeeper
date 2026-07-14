@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 import re
 import subprocess
@@ -47,6 +48,8 @@ _last_preack_time = 0.0
 _last_sent_key = ""
 _last_sent_time = 0.0
 _last_sent_lock = threading.Lock()
+_send_attempt_lock = threading.Lock()
+_partial_send_chunks = {}
 
 # --- Bot-to-bot loop-prevention safeguards (Bot API 10.0 requirement) ---
 _self_bot_id = None  # populated at start_telegram() from getMe
@@ -115,10 +118,15 @@ def _maybe_send_preack(display_name, msg, chat_id=""):
     _last_preack_time = now
 
     target_chat = str(chat_id or "").strip()
-    if target_chat:
-        _send_message_to(f"{display_name}: Got it — I’m reading this and will answer substantively.", target_chat)
-    else:
-        send_message(f"{display_name}: Got it — I’m reading this and will answer substantively.")
+    try:
+        if target_chat:
+            _send_message_to(f"{display_name}: Got it — I’m reading this and will answer substantively.", target_chat)
+        else:
+            send_message(f"{display_name}: Got it — I’m reading this and will answer substantively.")
+    except RuntimeError as exc:
+        # A courtesy acknowledgement must never prevent the actual inbound
+        # request from entering the model pipeline.
+        print(f"[TELEGRAM] Pre-ack failed without dropping inbound message: {exc}")
 
 
 def _set_reply_chat(chat_id):
@@ -201,6 +209,12 @@ def getLastMessage():
 def should_skip_response():
     global _last_skip_response
     return _last_skip_response
+
+
+def current_message_correlation_id():
+    """Return the immutable ID of the message currently owned by the loop."""
+    env = get_current_envelope()
+    return env.correlation_id if env is not None else ""
 
 
 def _is_self_bot_message(user):
@@ -667,8 +681,6 @@ def _is_duplicate_send(text, target_chat):
     so make it idempotent for the same target/text over a short window while
     still allowing an intentional repeated message later.
     """
-    global _last_sent_key, _last_sent_time
-
     window_s = _send_dedupe_window_s()
     if window_s <= 0:
         return False
@@ -680,9 +692,16 @@ def _is_duplicate_send(text, target_chat):
         if key and key == _last_sent_key and (now - _last_sent_time) < window_s:
             print(f"[TELEGRAM] Suppressed duplicate send within {window_s:g}s window chat_id={target_chat}")
             return True
-        _last_sent_key = key
-        _last_sent_time = now
     return False
+
+
+def _record_successful_send(text, target_chat):
+    global _last_sent_key, _last_sent_time
+    normalized_text = re.sub(r"\s+", " ", str(text or "").strip())
+    key = f"{target_chat}\0{normalized_text}"
+    with _last_sent_lock:
+        _last_sent_key = key
+        _last_sent_time = time.time()
 
 
 def _parse_csv_values(raw):
@@ -1013,44 +1032,71 @@ def _send_message_to(text, target_chat):
     text = _re.sub(r'(?<![A-Za-z0-9_])u([0-9a-fA-F]{4})(?![A-Za-z0-9_])', _decode_u_esc, text)
     target_chat = str(target_chat or "").strip()
     if not text:
-        return
+        print("[TELEGRAM] Send skipped: empty message")
+        return "TELEGRAM_SEND_SKIPPED_EMPTY"
 
-    if not _connected or not target_chat:
-        print(f"[TELEGRAM] Send skipped: connected={_connected} chat_id={'set' if target_chat else 'unset'}")
-        return
+    if not target_chat:
+        print("[TELEGRAM] Send failed before transport: chat_id=unset")
+        raise RuntimeError("Telegram send unavailable (chat_id=unset)")
 
-    if _is_duplicate_send(text, target_chat):
-        return
+    # `_connected` is receive-poll health, not outbound Bot API health. A
+    # transient getUpdates failure must not suppress an otherwise viable
+    # sendMessage attempt.
 
-    max_len = 3900
-    for i in range(0, len(text), max_len):
-        chunk = text[i:i + max_len]
-        if not chunk:
-            continue
-        try:
-            _api_call(
-                "sendMessage",
-                {"chat_id": target_chat, "text": chunk},
-                timeout=15,
-                use_post=True,
-            )
-            print(f"[TELEGRAM] Sent message chunk chars={len(chunk)} chat_id={target_chat}")
-        except Exception as exc:
-            print(f"[TELEGRAM] Send failed: {exc}")
-            return
+    with _send_attempt_lock:
+        if _is_duplicate_send(text, target_chat):
+            return "TELEGRAM_SEND_DEDUPLICATED"
+
+        max_len = 3900
+        chunks = [text[i:i + max_len] for i in range(0, len(text), max_len)]
+        delivery_key = f"{target_chat}\0{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
+        completed_chunks = int(_partial_send_chunks.get(delivery_key, 0) or 0)
+        chunks_sent = completed_chunks
+        for chunk_index, chunk in enumerate(chunks):
+            if chunk_index < completed_chunks:
+                continue
+            if not chunk:
+                continue
+            try:
+                _api_call(
+                    "sendMessage",
+                    {"chat_id": target_chat, "text": chunk},
+                    timeout=15,
+                    use_post=True,
+                )
+                chunks_sent += 1
+                _partial_send_chunks[delivery_key] = chunks_sent
+                print(f"[TELEGRAM] Sent message chunk chars={len(chunk)} chat_id={target_chat}")
+            except Exception as exc:
+                error_name = type(exc).__name__
+                print(f"[TELEGRAM] Send failed: {error_name}")
+                raise RuntimeError(f"Telegram send failed ({error_name})") from exc
+
+        _record_successful_send(text, target_chat)
+        _partial_send_chunks.pop(delivery_key, None)
+        return f"TELEGRAM_SEND_OK chunks={chunks_sent} chars={len(text)}"
 
 
 def send_message(text):
     """Send a reply using the active envelope's source_chat_id.
 
-    Falls back to legacy globals only if no envelope is active (e.g.
-    administrative broadcasts).  For ordinary replies, the envelope is
-    authoritative and immutable.
+    The active message envelope is authoritative and immutable. Administrative
+    callers without an envelope must use ``send_admin_message`` explicitly.
     """
     env = get_current_envelope()
     if env is not None:
         return _send_message_to(text, env.source_chat_id)
-    # Legacy/administrative fallback
-    with _state_lock:
-        target_chat = _active_chat_id or _reply_chat_id or _chat_id
-    return _send_message_to(text, target_chat)
+
+    raise RuntimeError(
+        "Telegram send refused without an active message envelope; "
+        "use send_admin_message for an explicit administrative target"
+    )
+
+
+def send_admin_message(text, target_chat=""):
+    """Explicit administrative broadcast path, separate from ordinary replies."""
+    target = str(target_chat or "").strip()
+    if not target:
+        with _state_lock:
+            target = _chat_id
+    return _send_message_to(text, target)
