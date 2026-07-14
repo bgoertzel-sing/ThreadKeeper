@@ -820,6 +820,7 @@ def _handle_updates(updates):
 
         # In group chats, ingest messages addressed to other bots for context,
         # but suppress a response unless this bot is also explicitly mentioned.
+        _skip_response = False
         if chat_type != "private":
             _skip_response = _should_skip_group_response(message, msg)
 
