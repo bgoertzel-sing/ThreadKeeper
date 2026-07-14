@@ -58,6 +58,26 @@ def test_envelope_from_ingress_populates_ids():
     assert env.text == "hello"
 
 
+def test_current_message_correlation_id_tracks_dequeued_envelope(monkeypatch):
+    telegram = _telegram()
+    me = _envelope_module()
+
+    monkeypatch.setattr(telegram, "_receive_transport", "mtproto")
+    monkeypatch.setattr(telegram, "_sync_poll", False)
+    monkeypatch.setattr(telegram, "_running", True)
+    monkeypatch.setattr(telegram, "_pending_messages", [])
+    monkeypatch.setattr(telegram, "_last_message", "")
+
+    env = me.MessageEnvelope.from_ingress(
+        update_id=2, source_chat_id="111", source_message_id=10,
+        sender_id="7", sender_display="ben", text="same text",
+    )
+    telegram._set_last("same text", "111", envelope=env)
+    telegram.getLastMessage()
+
+    assert telegram.current_message_correlation_id() == env.correlation_id
+
+
 def test_envelope_debug_dict_has_no_message_body():
     me = _envelope_module()
     env = me.MessageEnvelope.from_ingress(
@@ -152,9 +172,8 @@ def test_delayed_reply_uses_correct_envelope(monkeypatch):
     assert sent_targets[-1] == "999", "reply should go to chat 999, not 888"
 
 
-def test_send_without_envelope_uses_legacy_fallback(monkeypatch):
-    """Administrative sends without an envelope should still work via
-    legacy fallback, not crash."""
+def test_send_without_envelope_fails_closed(monkeypatch):
+    """Ordinary replies cannot silently fall back to stale mutable routing."""
     telegram = _telegram()
     me = _envelope_module()
 
@@ -165,5 +184,19 @@ def test_send_without_envelope_uses_legacy_fallback(monkeypatch):
     monkeypatch.setattr(telegram, "_chat_id", "fallback-chat")
 
     me.set_current_envelope(None)
-    telegram.send_message("admin broadcast")
+    with pytest.raises(RuntimeError, match="without an active message envelope"):
+        telegram.send_message("admin broadcast")
+    assert sent_targets == []
+
+
+def test_explicit_admin_send_uses_configured_target(monkeypatch):
+    telegram = _telegram()
+    me = _envelope_module()
+
+    sent_targets = []
+    monkeypatch.setattr(telegram, "_send_message_to", lambda t, c: sent_targets.append(c) or True)
+    monkeypatch.setattr(telegram, "_chat_id", "fallback-chat")
+
+    me.set_current_envelope(None)
+    telegram.send_admin_message("admin broadcast")
     assert sent_targets == ["fallback-chat"]
