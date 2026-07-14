@@ -167,6 +167,16 @@ def balance_parentheses_for_message(s, is_new_message=False):
         text = s.strip()
         if text:
             return f'((send {json.dumps(text, ensure_ascii=False)}))'
+    if _truthy(is_new_message):
+        # Text contains some command-like substrings, but may be substantive prose.
+        # Try parsing as commands; if no (send ...) results, wrap the original as send.
+        parsed = balance_parentheses(s)
+        if 'send' in parsed:
+            return parsed
+        text = s.strip()
+        if text:
+            return f'((send {json.dumps(text, ensure_ascii=False)}))'
+        return "()"
     return balance_parentheses(s)
 
 
