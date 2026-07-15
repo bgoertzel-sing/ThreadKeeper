@@ -2309,6 +2309,44 @@ def test_queue_only_dispatch_persists_task_without_worker_llm(tmp_path, monkeypa
     assert Path(payload["queue_sha256_path"]).read_text().startswith(payload["queue_sha256"])
 
 
+def test_persistent_enqueue_uses_validated_queue_and_task_cancel_path(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_QUEUED_DISPATCHES", 4)
+    monkeypatch.setattr(
+        subagent, "_call_subagent_llm",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")),
+    )
+
+    payload = json.loads(subagent.enqueue_persistent_dispatch(
+        "task-1", "persistent queue fixture", "read-file", "unit", 2, 1000
+    ))
+
+    assert payload["status"] == "queued"
+    assert Path(payload["queue_path"]).name == "persistent-task-1.json"
+    queued = json.loads(Path(payload["queue_path"]).read_text())
+    assert queued["cancel_file"] == subagent.persistent_dispatch_cancel_path("task-1")
+    assert not Path(queued["cancel_file"]).exists()
+
+
+def test_persistent_cancel_token_blocks_queue_worker_provider_effect(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_QUEUED_DISPATCHES", 4)
+    payload = json.loads(subagent.enqueue_persistent_dispatch(
+        "task-1", "cancel before effects", "read-file", "unit", 2, 1000
+    ))
+    calls = []
+    monkeypatch.setattr(subagent, "_call_subagent_llm", lambda *_args: calls.append(True))
+
+    cancel_path = subagent.request_persistent_dispatch_cancel("task-1")
+    replay_path = subagent.request_persistent_dispatch_cancel("task-1")
+    result = json.loads(subagent.run_queued_dispatch(payload["queue_path"]))
+
+    assert replay_path == cancel_path
+    assert Path(cancel_path).is_file()
+    assert calls == []
+    assert result["status"] == "cancelled"
+
+
 def test_run_queued_dispatch_claims_task_and_runs_once(tmp_path, monkeypatch):
     _write_unit_persona(tmp_path, monkeypatch)
     monkeypatch.setenv("OMEGACLAW_SUBAGENT_QUEUE_ONLY", "1")

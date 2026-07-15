@@ -439,3 +439,130 @@ def list_worker_statuses(root, limit=100):
             if len(statuses) >= limit:
                 break
     return statuses
+
+
+def _subagent_module():
+    # Lazy import keeps lifecycle/status inspection provider-free and makes the
+    # queue effects seam explicit in tests.
+    import subagent
+    return subagent
+
+
+def _same_manifest(existing, requested):
+    for field in (
+        "task_id", "deployment_id", "created_at", "objective", "persona_key",
+        "tool_subset", "task_contract", "budgets", "provenance",
+    ):
+        if existing.get(field) != requested.get(field):
+            return False
+    return True
+
+
+def spawn_persistent(root, manifest, *, spawn_id, actor="parent",
+                     enqueue=None):
+    """Create and queue a persistent task through validated bounded dispatch.
+
+    This stops at the existing queue boundary: it never claims work, starts a
+    process, calls a provider, or runs a tool. A failed enqueue leaves a
+    visible CREATED manifest that the same idempotent spawn request may retry.
+    """
+    _validate_id(spawn_id, "spawn id")
+    if not isinstance(manifest, dict):
+        raise ValueError("task manifest must be an object")
+    task_id = _validate_id(manifest.get("task_id"), "task id")
+    try:
+        stored = create_task_manifest(root, manifest)
+    except FileExistsError:
+        stored = _read_manifest(root, task_id)
+        if not _same_manifest(stored, manifest):
+            raise ValueError("conflicting persistent task spawn replay")
+    status = worker_status(root, task_id)
+    if status["state"] == "QUEUED":
+        return status
+    if status["state"] != "CREATED":
+        raise ValueError("persistent task is not spawnable")
+    adapter = enqueue or _subagent_module().enqueue_persistent_dispatch
+    result_text = adapter(
+        task_id,
+        stored["objective"],
+        ",".join(stored["tool_subset"]),
+        stored["persona_key"],
+        stored["budgets"].get("max_turns"),
+        stored["budgets"].get("max_result_chars"),
+    )
+    try:
+        result = json.loads(result_text) if isinstance(result_text, str) else result_text
+    except json.JSONDecodeError as error:
+        raise ValueError("persistent enqueue returned invalid JSON") from error
+    if not isinstance(result, dict) or result.get("status") != "queued":
+        raise ValueError("persistent enqueue did not produce a queued task")
+    payload_sha256 = result.get("queue_sha256", "")
+    if not _SHA256_RE.fullmatch(str(payload_sha256)):
+        raise ValueError("persistent enqueue omitted queue integrity digest")
+    append_task_event(
+        root, task_id, event_id=spawn_id, expected_version=0,
+        prior_state="CREATED", new_state="QUEUED", actor=actor,
+        payload_sha256=payload_sha256,
+    )
+    return worker_status(root, task_id)
+
+
+def cancel_persistent(root, task_id, *, cancel_id, actor="parent",
+                      request_cancel=None):
+    """Durably request cancellation before recording the lifecycle event."""
+    _validate_id(cancel_id, "cancel id")
+    status = worker_status(root, task_id)
+    if status["terminal"] or status["state"] == "CANCEL_REQUESTED":
+        return status
+    if status["state"] == "CREATED":
+        append_task_event(
+            root, task_id, event_id=cancel_id, expected_version=status["version"],
+            prior_state="CREATED", new_state="CANCELLED", actor=actor,
+        )
+        return worker_status(root, task_id)
+    adapter = request_cancel or _subagent_module().request_persistent_dispatch_cancel
+    adapter(task_id)  # safety first: a crash here can only leave cancellation stricter
+    # Cancellation may race a claim. The token is already durable, so retry
+    # the lifecycle CAS from the winning nonterminal state; this records the
+    # intervention without permitting a later provider/tool effect.
+    for _attempt in range(3):
+        status = worker_status(root, task_id)
+        if status["terminal"] or status["state"] == "CANCEL_REQUESTED":
+            return status
+        try:
+            append_task_event(
+                root, task_id, event_id=cancel_id,
+                expected_version=status["version"],
+                prior_state=status["state"], new_state="CANCEL_REQUESTED",
+                actor=actor,
+            )
+            return worker_status(root, task_id)
+        except ValueError as error:
+            if "compare-and-swap" not in str(error):
+                raise
+    raise ValueError("persistent cancellation compare-and-swap retry exhausted")
+
+
+def run_persistent_queued_dispatch(root, task_id, *, claim_id,
+                                   cancel_present=None, run_queued=None):
+    """Claim through lifecycle CAS only if cancellation has not won the race."""
+    _validate_id(claim_id, "claim id")
+    status = worker_status(root, task_id)
+    if status["state"] != "QUEUED":
+        return {"status": "not_claimed", "task": status}
+    subagent = _subagent_module() if cancel_present is None or run_queued is None else None
+    cancel_check = cancel_present or (
+        lambda value: os.path.isfile(subagent.persistent_dispatch_cancel_path(value))
+    )
+    if cancel_check(task_id):
+        return {"status": "cancelled_before_claim", "task": worker_status(root, task_id)}
+    append_task_event(
+        root, task_id, event_id=claim_id, expected_version=status["version"],
+        prior_state="QUEUED", new_state="CLAIMED", actor="worker",
+    )
+    runner = run_queued or subagent.run_queued_dispatch
+    queue_path = os.path.join(
+        subagent._dispatch_queue_dir(), f"persistent-{task_id}.json"
+    ) if subagent is not None else f"persistent-{task_id}.json"
+    return {"status": "claimed", "task": worker_status(root, task_id),
+            "queue_result": runner(queue_path)}

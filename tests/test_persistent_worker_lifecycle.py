@@ -186,6 +186,106 @@ class PersistentWorkerStorageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "byte limit"):
             lifecycle.worker_status(self.root, "task-2")
 
+    def queued_result(self, task_id, *_args):
+        return json.dumps({
+            "status": "queued",
+            "queue_sha256": "a" * 64,
+            "queue_path": f"queue/persistent-{task_id}.json",
+        })
+
+    def test_spawn_is_provider_free_idempotent_and_uses_enqueue_seam(self):
+        calls = []
+
+        def enqueue(*args):
+            calls.append(args)
+            return self.queued_result(*args)
+
+        first = lifecycle.spawn_persistent(
+            self.root, self.manifest(), spawn_id="spawn-1", enqueue=enqueue
+        )
+        replay = lifecycle.spawn_persistent(
+            self.root, self.manifest(), spawn_id="spawn-1", enqueue=enqueue
+        )
+        self.assertEqual(first, replay)
+        self.assertEqual((first["state"], first["version"]), ("QUEUED", 1))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0:4], (
+            "task-1", "Provider-free fixture", "read-file", "researcher"
+        ))
+
+    def test_failed_enqueue_remains_created_and_can_retry(self):
+        with self.assertRaisesRegex(ValueError, "did not produce"):
+            lifecycle.spawn_persistent(
+                self.root, self.manifest(), spawn_id="spawn-1",
+                enqueue=lambda *_args: json.dumps({"status": "error"}),
+            )
+        self.assertEqual(lifecycle.worker_status(self.root, "task-1")["state"], "CREATED")
+        status = lifecycle.spawn_persistent(
+            self.root, self.manifest(), spawn_id="spawn-1",
+            enqueue=self.queued_result,
+        )
+        self.assertEqual(status["state"], "QUEUED")
+
+    def test_cancel_is_idempotent_and_prevents_later_claim_or_effect(self):
+        lifecycle.spawn_persistent(
+            self.root, self.manifest(), spawn_id="spawn-1",
+            enqueue=self.queued_result,
+        )
+        interventions = []
+        cancelled = lifecycle.cancel_persistent(
+            self.root, "task-1", cancel_id="cancel-1",
+            request_cancel=lambda task_id: interventions.append(task_id),
+        )
+        replay = lifecycle.cancel_persistent(
+            self.root, "task-1", cancel_id="cancel-1",
+            request_cancel=lambda task_id: interventions.append("duplicate"),
+        )
+        effects = []
+        result = lifecycle.run_persistent_queued_dispatch(
+            self.root, "task-1", claim_id="claim-1",
+            cancel_present=lambda _task_id: True,
+            run_queued=lambda path: effects.append(path),
+        )
+        self.assertEqual(cancelled, replay)
+        self.assertEqual(interventions, ["task-1"])
+        self.assertEqual(result["status"], "not_claimed")
+        self.assertEqual(effects, [])
+        self.assertEqual(lifecycle.worker_status(self.root, "task-1")["state"],
+                         "CANCEL_REQUESTED")
+
+    def test_cancel_token_observed_before_claim_prevents_effect(self):
+        lifecycle.spawn_persistent(
+            self.root, self.manifest(), spawn_id="spawn-1",
+            enqueue=self.queued_result,
+        )
+        effects = []
+        result = lifecycle.run_persistent_queued_dispatch(
+            self.root, "task-1", claim_id="claim-1",
+            cancel_present=lambda _task_id: True,
+            run_queued=lambda path: effects.append(path),
+        )
+        self.assertEqual(result["status"], "cancelled_before_claim")
+        self.assertEqual(effects, [])
+        self.assertEqual(lifecycle.worker_status(self.root, "task-1")["state"], "QUEUED")
+
+    def test_claim_cas_precedes_queue_effect(self):
+        lifecycle.spawn_persistent(
+            self.root, self.manifest(), spawn_id="spawn-1",
+            enqueue=self.queued_result,
+        )
+        observations = []
+
+        def run_queue(path):
+            observations.append((path, lifecycle.worker_status(self.root, "task-1")["state"]))
+            return "provider-free-result"
+
+        result = lifecycle.run_persistent_queued_dispatch(
+            self.root, "task-1", claim_id="claim-1",
+            cancel_present=lambda _task_id: False, run_queued=run_queue,
+        )
+        self.assertEqual(result["status"], "claimed")
+        self.assertEqual(observations, [("persistent-task-1.json", "CLAIMED")])
+
 
 if __name__ == "__main__":
     unittest.main()

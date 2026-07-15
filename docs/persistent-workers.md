@@ -179,6 +179,15 @@ and no authoritative MeTTa lifecycle gate.
 2. **Spawn and cancellation surface**: add `spawn-persistent` that creates one
    durable task via the existing validated queue path; add idempotent cancel
    requests and intervention tests. Preserve `delegate` byte-for-byte behavior.
+   Implemented provider-free Python surfaces are `spawn_persistent`,
+   `cancel_persistent`, and `run_persistent_queued_dispatch`. Spawn reuses
+   normal persona/contract/tool-subset/escalation validation but forces the
+   existing queue-only boundary. Cancellation durably creates the task-scoped
+   queue token before its CAS lifecycle event, and the claim wrapper checks
+   both status and token before atomically recording `CLAIMED`. A cancellation
+   that wins first therefore prevents both the queue rename and subsequent
+   provider/tool effects. Duplicate spawn/cancel IDs return existing state;
+   conflicting spawn replays fail closed.
 3. **Attempts, checkpoints, and recovery**: introduce leases, immutable
    checkpoint chains, stale-attempt recovery, resume validation, and crash
    fixtures for every write/effect boundary.

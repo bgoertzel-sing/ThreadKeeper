@@ -1097,6 +1097,54 @@ def _queued_dispatch_paths(run_id):
     return queue_dir, os.path.join(queue_dir, f"{_safe_slug(run_id, max_len=80)}.json")
 
 
+def persistent_dispatch_cancel_path(task_id):
+    """Return the deployment-local cancellation token for a persistent task."""
+    if not isinstance(task_id, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", task_id
+    ):
+        raise ValueError("persistent task id must be a safe bounded identifier")
+    return _resolve_run_control_file_path(
+        os.path.join("persistent-cancel", f"{task_id}.cancel"),
+        "persistent task cancel_file",
+    )
+
+
+def request_persistent_dispatch_cancel(task_id):
+    """Durably write an idempotent cancellation token; performs no worker effect."""
+    path = persistent_dispatch_cancel_path(task_id)
+    if _run_control_token_present(path):
+        return path
+    _json_atomic_write(path, {"task_id": task_id, "cancel_requested": True})
+    return path
+
+
+def enqueue_persistent_dispatch(task_id, goal, tool_subset_csv, persona_key,
+                                max_turns=None, max_chars=None):
+    """Use normal dispatch validation but stop at the durable queue boundary."""
+    cancel_path = persistent_dispatch_cancel_path(task_id)
+    previous_queue_only = os.environ.get("OMEGACLAW_SUBAGENT_QUEUE_ONLY")
+    previous_cancel_file = globals().get("_SUBAGENT_CANCEL_FILE", "")
+    previous_queue_run_id = globals().get("_PERSISTENT_QUEUE_RUN_ID")
+    os.environ["OMEGACLAW_SUBAGENT_QUEUE_ONLY"] = "1"
+    globals()["_SUBAGENT_CANCEL_FILE"] = cancel_path
+    globals()["_PERSISTENT_QUEUE_RUN_ID"] = f"persistent-{task_id}"
+    try:
+        return dispatch(
+            goal, tool_subset_csv, persona_key, max_turns=max_turns,
+            max_chars=max_chars,
+        )
+    finally:
+        globals()["_SUBAGENT_CANCEL_FILE"] = previous_cancel_file
+        if previous_queue_run_id is None:
+            globals().pop("_PERSISTENT_QUEUE_RUN_ID", None)
+        else:
+            globals()["_PERSISTENT_QUEUE_RUN_ID"] = previous_queue_run_id
+        if previous_queue_only is None:
+            os.environ.pop("OMEGACLAW_SUBAGENT_QUEUE_ONLY", None)
+        else:
+            os.environ["OMEGACLAW_SUBAGENT_QUEUE_ONLY"] = previous_queue_only
+
+
 def _resolve_run_control_file_path(value, label):
     """Validate a bounded stop/cancel token path under ``SUBAGENT_RUN_DIR``.
 
@@ -4060,6 +4108,21 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
 
     if _queue_only_enabled():
         queued_record = _new_run_record(persona_key, objective)
+        _queue_run_id = globals().get("_PERSISTENT_QUEUE_RUN_ID")
+        if _queue_run_id is not None:
+            if not isinstance(_queue_run_id, str) or not re.fullmatch(
+                r"[A-Za-z0-9_.-]{1,80}", _queue_run_id
+            ):
+                return _structured_setup_error(
+                    "invalid persistent queue run id", persona_key, objective,
+                    bounded_chars, record_status="queue_id_invalid",
+                    task_contract=task_contract,
+                )
+            queued_record["run_id"] = _queue_run_id
+            queued_record["transcript_path"] = os.path.join(
+                SUBAGENT_RUN_DIR,
+                f"{_queue_run_id}-{_safe_slug(persona_key)}.json",
+            )
         queued_record["task_contract"] = dict(task_contract)
         if _cancel_requested():
             _finish_run_record(queued_record, "cancelled", "subagent cancellation token present before queue")
