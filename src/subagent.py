@@ -3087,11 +3087,34 @@ def _validate_task_contract(contract):
         if isinstance(raw_quota, int):
             quota = raw_quota
         elif isinstance(raw_quota, str) and re.match(r"^\d+$", raw_quota.strip()):
-            quota = int(raw_quota.strip())
+            quota_text = raw_quota.strip()
+            # Avoid sending attacker-controlled, arbitrarily long decimal
+            # strings through int(); Python may reject them at its conversion
+            # limit, which would otherwise escape dispatch's structured-error
+            # path. A task contract can only narrow the global quota, so a
+            # larger decimal representation is invalid without conversion.
+            max_quota_text = str(_SUBAGENT_MAX_TOOL_CALLS)
+            if (
+                len(quota_text) > len(max_quota_text)
+                or (
+                    len(quota_text) == len(max_quota_text)
+                    and quota_text > max_quota_text
+                )
+            ):
+                return (
+                    "task contract max_tool_calls must not exceed global limit "
+                    f"{_SUBAGENT_MAX_TOOL_CALLS}"
+                )
+            quota = int(quota_text)
         else:
             return f"task contract max_tool_calls entry '{raw_quota}' is not an integer"
         if quota < 0:
             return "task contract max_tool_calls must be non-negative"
+        if quota > _SUBAGENT_MAX_TOOL_CALLS:
+            return (
+                "task contract max_tool_calls must not exceed global limit "
+                f"{_SUBAGENT_MAX_TOOL_CALLS}"
+            )
         contract["max_tool_calls"] = quota
     for bool_field in ("patch_proposal_only", "requires_adjudication"):
         if bool_field in (contract or {}):

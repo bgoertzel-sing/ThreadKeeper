@@ -3699,6 +3699,29 @@ def test_task_contract_rejects_bad_max_tool_calls_before_llm(tmp_path, monkeypat
     assert "not an integer" in fractional
 
 
+@pytest.mark.parametrize("raw_quota", [25, "25", "9" * 5000])
+def test_task_contract_rejects_max_tool_calls_above_global_limit_before_llm(
+    tmp_path, monkeypatch, raw_quota
+):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_TOOL_CALLS", 24)
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")),
+    )
+
+    payload = json.loads(subagent.dispatch(json.dumps({
+        "objective": "bounded quota",
+        "max_tool_calls": raw_quota,
+    }), "write-file", "unit", max_turns=1))
+
+    assert payload["status"] == "error"
+    assert "max_tool_calls must not exceed global limit 24" in payload["summary"]
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["status"] == "contract_invalid"
+
+
 def test_task_contract_rejects_allowed_path_escape_before_llm(tmp_path, monkeypatch):
     _write_unit_persona(tmp_path, monkeypatch)
     contract_goal = json.dumps({

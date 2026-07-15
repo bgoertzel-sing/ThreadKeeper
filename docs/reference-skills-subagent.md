@@ -52,6 +52,9 @@ and returns a single-string digest via its own `emit` instruction.
   `forbidden_actions`, `done_criteria`) must be JSON arrays of non-empty
   strings; scalar, blank, or non-string entries fail closed before any worker
   LLM call. The `objective` must likewise be a non-empty string.
+  `max_tool_calls` must be a non-negative integer no greater than the global
+  `OMEGACLAW_SUBAGENT_MAX_TOOL_CALLS` limit; oversized decimal strings fail
+  closed before integer conversion.
   `allowed_paths` entries must be bounded workspace-relative paths without
   parent-directory traversal or control characters. Contract fields are bounded
   and validated before any worker LLM call.
