@@ -776,6 +776,60 @@ def recover_stale_attempt(root, task_id, *, recovery_id, actor="supervisor",
     return assessment
 
 
+def requeue_persistent(root, task_id, *, requeue_id, actor="supervisor",
+                       enqueue=None):
+    """Explicitly requeue a verified retryable task without running it.
+
+    Recovery and requeue are deliberately separate effects.  This function
+    verifies the immutable attempt/checkpoint lineage before recreating the
+    normal bounded queue record, then records the queue digest in a lifecycle
+    CAS event.  It never claims work, calls a provider, or runs a tool.
+    """
+    _validate_id(requeue_id, "requeue id")
+    status = worker_status(root, task_id)
+    if status["state"] == "QUEUED" and status["last_event_id"] == requeue_id:
+        return status
+    if status["state"] != "FAILED_RETRYABLE":
+        raise ValueError("persistent task is not explicitly requeueable")
+
+    manifest = _read_manifest(root, task_id)
+    attempts = list_attempts(root, task_id)
+    checkpoints = read_checkpoint_chain(root, task_id)
+    if not attempts:
+        raise ValueError("retryable persistent task has no durable attempt")
+    latest_attempt = attempts[-1]
+    if latest_attempt["manifest_sha256"] != manifest["manifest_sha256"]:
+        raise ValueError("persistent-worker requeue attempt manifest mismatch")
+    if checkpoints and checkpoints[-1]["attempt_id"] != latest_attempt["attempt_id"]:
+        raise ValueError("persistent-worker requeue checkpoint lineage mismatch")
+
+    adapter = enqueue or _subagent_module().enqueue_persistent_dispatch
+    result_text = adapter(
+        task_id,
+        manifest["objective"],
+        ",".join(manifest["tool_subset"]),
+        manifest["persona_key"],
+        manifest["budgets"].get("max_turns"),
+        manifest["budgets"].get("max_result_chars"),
+    )
+    try:
+        result = json.loads(result_text) if isinstance(result_text, str) else result_text
+    except json.JSONDecodeError as error:
+        raise ValueError("persistent requeue returned invalid JSON") from error
+    if not isinstance(result, dict) or result.get("status") != "queued":
+        raise ValueError("persistent requeue did not produce a queued task")
+    queue_sha256 = result.get("queue_sha256", "")
+    if not _SHA256_RE.fullmatch(str(queue_sha256)):
+        raise ValueError("persistent requeue omitted queue integrity digest")
+
+    append_task_event(
+        root, task_id, event_id=requeue_id,
+        expected_version=status["version"], prior_state="FAILED_RETRYABLE",
+        new_state="QUEUED", actor=actor, payload_sha256=queue_sha256,
+    )
+    return worker_status(root, task_id)
+
+
 def _subagent_module():
     # Lazy import keeps lifecycle/status inspection provider-free and makes the
     # queue effects seam explicit in tests.

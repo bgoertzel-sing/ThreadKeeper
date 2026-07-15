@@ -410,6 +410,87 @@ class PersistentWorkerStorageTests(unittest.TestCase):
         )
         self.assertEqual(replay, recovered)
 
+    def _failed_retryable_fixture(self, checkpoint=False):
+        lifecycle.spawn_persistent(
+            self.root, self.manifest(), spawn_id="spawn-1",
+            enqueue=self.queued_result,
+        )
+        lifecycle.append_task_event(
+            self.root, "task-1", event_id="claim-1", expected_version=1,
+            prior_state="QUEUED", new_state="CLAIMED", actor="worker",
+        )
+        lifecycle.create_attempt(
+            self.root, "task-1", attempt_id="attempt-1",
+            claim_event_id="claim-1", worker_id="worker-1",
+            created_at="2026-07-15T12:00:00+00:00",
+            lease_expires_at="2026-07-15T12:05:00+00:00",
+        )
+        if checkpoint:
+            lifecycle.append_task_event(
+                self.root, "task-1", event_id="running-1", expected_version=2,
+                prior_state="CLAIMED", new_state="RUNNING", actor="worker",
+            )
+            lifecycle.create_checkpoint(
+                self.root, "task-1", checkpoint_id="checkpoint-1",
+                attempt_id="attempt-1", payload={"cursor": 3},
+                created_at="2026-07-15T12:04:00+00:00",
+            )
+        lifecycle.recover_stale_attempt(
+            self.root, "task-1", recovery_id="recovery-1",
+            now="2026-07-15T12:05:01+00:00",
+        )
+
+    def test_explicit_requeue_is_idempotent_and_records_queue_digest(self):
+        self._failed_retryable_fixture(checkpoint=True)
+        calls = []
+
+        def enqueue(*args):
+            calls.append(args)
+            return self.queued_result(*args)
+
+        queued = lifecycle.requeue_persistent(
+            self.root, "task-1", requeue_id="requeue-1", enqueue=enqueue,
+        )
+        replay = lifecycle.requeue_persistent(
+            self.root, "task-1", requeue_id="requeue-1", enqueue=enqueue,
+        )
+        self.assertEqual((queued["state"], queued["version"]), ("QUEUED", 5))
+        self.assertEqual(replay, queued)
+        self.assertEqual(len(calls), 1)
+        with open(os.path.join(self.root, "tasks", "task-1", "events.jsonl"),
+                  "r", encoding="utf-8") as source:
+            event = json.loads(source.readlines()[-1])
+        self.assertEqual(event["event_id"], "requeue-1")
+        self.assertEqual(event["payload_sha256"], "a" * 64)
+
+    def test_failed_requeue_effect_does_not_change_retryable_state(self):
+        self._failed_retryable_fixture()
+        with self.assertRaisesRegex(ValueError, "did not produce"):
+            lifecycle.requeue_persistent(
+                self.root, "task-1", requeue_id="requeue-1",
+                enqueue=lambda *_args: {"status": "error"},
+            )
+        self.assertEqual(lifecycle.worker_status(self.root, "task-1")["state"],
+                         "FAILED_RETRYABLE")
+
+    def test_requeue_rejects_corrupt_checkpoint_before_enqueue(self):
+        self._failed_retryable_fixture(checkpoint=True)
+        path = os.path.join(
+            self.root, "tasks", "task-1", "checkpoints", "checkpoint-1.json"
+        )
+        with open(path, "r", encoding="utf-8") as source:
+            record = json.load(source)
+        record["payload"]["cursor"] = 99
+        with open(path, "w", encoding="utf-8") as output:
+            json.dump(record, output)
+        calls = []
+        with self.assertRaisesRegex(ValueError, "payload integrity"):
+            lifecycle.requeue_persistent(
+                self.root, "task-1", requeue_id="requeue-1",
+                enqueue=lambda *_args: calls.append(True),
+            )
+        self.assertEqual(calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()

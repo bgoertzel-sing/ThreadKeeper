@@ -160,11 +160,13 @@ dispatch cancellation, task contracts, quotas, token accounting, transcript
 records, hash-chained indexes, patch-proposal mode, and adjudication candidates.
 
 The remaining gap is task-level budget aggregation, inbox/result delivery,
-resume/requeue effects, and supervisor integration. The provider-free core now
+checkpoint resume consumption, and supervisor integration. The provider-free core now
 has stable spawn/status/cancel surfaces, immutable attempt leases and
-checkpoint chains, and stale-attempt recovery assessment/recording. Recovery
-intentionally stops at `FAILED_RETRYABLE`; requeue is a separate durable effect
-and may not be inferred from an expired lease.
+checkpoint chains, stale-attempt recovery assessment/recording, and an explicit
+provider-free requeue effect. Recovery intentionally stops at
+`FAILED_RETRYABLE`; `requeue_persistent` separately verifies lineage, recreates
+the bounded queue record, and CAS-records its digest. Requeue may not be
+inferred from an expired lease.
 
 ## Phased implementation plan
 
@@ -196,8 +198,11 @@ and may not be inferred from an expired lease.
    verified immutable chain. `recovery_assessment` fails closed on active,
    missing, mismatched, or corrupt attempt/checkpoint lineage;
    `recover_stale_attempt` idempotently records a verified expired attempt as
-   `FAILED_RETRYABLE`. Next: explicit resume/requeue effects and crash fixtures
-   across claim/attempt/checkpoint boundaries.
+   `FAILED_RETRYABLE`. `requeue_persistent` now performs the separate explicit
+   queue effect only after verifying attempt/checkpoint lineage and records the
+   queue digest in an idempotent `FAILED_RETRYABLE -> QUEUED` CAS event. Next:
+   pass the verified checkpoint into a new attempt and add crash fixtures
+   across the enqueue/event boundary.
 4. **Budgets and inbox/results**: persist task-level usage/retry/time/tool
    counters, enforce them before claim/resume/effects, and add idempotent inbox
    and result-delivery acknowledgements.
