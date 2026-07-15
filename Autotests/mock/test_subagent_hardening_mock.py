@@ -2407,6 +2407,35 @@ def test_run_queued_dispatch_preserves_task_contract_during_worker_run(tmp_path,
     assert "CONTRACT_VIOLATION" in worker_transcript["turns"][0]["tool_results"]
 
 
+def test_run_queued_dispatch_passes_verified_resume_checkpoint(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setenv("OMEGACLAW_SUBAGENT_QUEUE_ONLY", "1")
+    monkeypatch.setattr(subagent, "_SUBAGENT_MAX_QUEUED_DISPATCHES", 4)
+    payload = json.loads(subagent.dispatch(
+        "resume bounded work", "read-file", "unit", max_turns=2
+    ))
+    checkpoint = {
+        "checkpoint_id": "checkpoint-1",
+        "checkpoint_sha256": "b" * 64,
+        "payload": {"cursor": 7, "digest": "verified"},
+    }
+    monkeypatch.setattr(
+        subagent, "_call_subagent_llm",
+        lambda *_args: ('(emit "resumed")', 3, 1),
+    )
+
+    result = json.loads(subagent.run_queued_dispatch(
+        payload["queue_path"], checkpoint
+    ))
+
+    assert result["status"] == "ok", result["result"]["summary"]
+    transcript = json.loads(Path(result["result"]["transcript_path"]).read_text())
+    objective = transcript["task_contract"]["objective"]
+    assert "Verified persistent-worker resume checkpoint" in objective
+    assert '"checkpoint_id":"checkpoint-1"' in objective
+    assert '"cursor":7' in objective
+
+
 def test_run_queued_dispatch_rejects_path_escape(tmp_path, monkeypatch):
     monkeypatch.setattr(subagent, "SUBAGENT_RUN_DIR", str(tmp_path / "runs"))
     outside = tmp_path / "outside.json"

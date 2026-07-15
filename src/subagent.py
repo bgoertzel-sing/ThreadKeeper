@@ -2048,7 +2048,7 @@ def _validate_queued_dispatch_task(task):
     return goal, ",".join(tool_subset), persona_key, max_turns, max_chars, task_contract, cancel_file
 
 
-def run_queued_dispatch(queue_path):
+def run_queued_dispatch(queue_path, resume_checkpoint=None):
     """Claim and run one queued subagent dispatch task.
 
     Queue-only dispatch intentionally writes durable task records but does not
@@ -2081,9 +2081,31 @@ def run_queued_dispatch(queue_path):
         except FileNotFoundError:
             pass
         goal, tool_subset_csv, persona_key, max_turns, max_chars, task_contract, cancel_file = _validate_queued_dispatch_task(task)
+        resumed_contract = dict(task_contract)
+        if resume_checkpoint is not None:
+            if not isinstance(resume_checkpoint, dict):
+                raise ValueError("resume checkpoint must be a JSON object")
+            checkpoint_id = resume_checkpoint.get("checkpoint_id")
+            checkpoint_sha256 = resume_checkpoint.get("checkpoint_sha256")
+            checkpoint_payload = resume_checkpoint.get("payload")
+            if (not isinstance(checkpoint_id, str) or
+                    not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", checkpoint_id) or
+                    not isinstance(checkpoint_sha256, str) or
+                    not re.fullmatch(r"[0-9a-f]{64}", checkpoint_sha256) or
+                    not isinstance(checkpoint_payload, dict)):
+                raise ValueError("resume checkpoint has invalid identity or payload")
+            resume_text = json.dumps({
+                "checkpoint_id": checkpoint_id,
+                "checkpoint_sha256": checkpoint_sha256,
+                "payload": checkpoint_payload,
+            }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            resumed_contract["objective"] = (
+                f"{goal} | Verified persistent-worker resume checkpoint: "
+                f"{resume_text}"
+            )
         dispatch_goal = json.dumps({
             "objective": goal,
-            "task_contract": task_contract,
+            "task_contract": resumed_contract,
         }, ensure_ascii=False, sort_keys=True)
         previous_queue_only = os.environ.pop("OMEGACLAW_SUBAGENT_QUEUE_ONLY", None)
         previous_cancel_file = globals().get("_SUBAGENT_CANCEL_FILE", "")

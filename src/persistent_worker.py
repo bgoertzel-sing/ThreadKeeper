@@ -551,6 +551,7 @@ def create_attempt(root, task_id, *, attempt_id, claim_event_id, worker_id,
         if fcntl is not None:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         attempts = list_attempts(root, task_id)
+        checkpoints = read_checkpoint_chain(root, task_id)
         if os.path.lexists(_attempt_path(root, task_id, attempt_id)):
             existing = _read_attempt(root, task_id, attempt_id)
             if (existing["claim_event_id"] != claim_event_id or
@@ -573,6 +574,12 @@ def create_attempt(root, task_id, *, attempt_id, claim_event_id, worker_id,
             "created_at": created_at,
             "lease_expires_at": lease_expires_at,
             "prior_attempt_sha256": attempts[-1]["attempt_sha256"] if attempts else "",
+            "resume_checkpoint_id": (
+                checkpoints[-1]["checkpoint_id"] if checkpoints else ""
+            ),
+            "resume_checkpoint_sha256": (
+                checkpoints[-1]["checkpoint_sha256"] if checkpoints else ""
+            ),
         }
         record["attempt_sha256"] = _sha256(record)
         payload = _canonical_bytes(record)
@@ -963,10 +970,18 @@ def run_persistent_queued_dispatch(root, task_id, *, claim_id,
         worker_id=worker_id, created_at=created.isoformat(),
         lease_expires_at=(created + timedelta(seconds=lease_seconds)).isoformat(),
     )
+    checkpoints = read_checkpoint_chain(root, task_id)
+    resume_checkpoint = checkpoints[-1] if checkpoints else None
+    if resume_checkpoint is not None:
+        if (resume_checkpoint["checkpoint_id"] !=
+                attempt["resume_checkpoint_id"] or
+                resume_checkpoint["checkpoint_sha256"] !=
+                attempt["resume_checkpoint_sha256"]):
+            raise ValueError("persistent-worker resume checkpoint changed after claim")
     runner = run_queued or subagent.run_queued_dispatch
     queue_path = os.path.join(
         subagent._dispatch_queue_dir(), f"persistent-{task_id}.json"
     ) if subagent is not None else f"persistent-{task_id}.json"
     return {"status": "claimed", "task": worker_status(root, task_id),
-            "attempt": attempt,
-            "queue_result": runner(queue_path)}
+            "attempt": attempt, "resume_checkpoint": resume_checkpoint,
+            "queue_result": runner(queue_path, resume_checkpoint)}

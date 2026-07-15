@@ -244,7 +244,7 @@ class PersistentWorkerStorageTests(unittest.TestCase):
         result = lifecycle.run_persistent_queued_dispatch(
             self.root, "task-1", claim_id="claim-1",
             cancel_present=lambda _task_id: True,
-            run_queued=lambda path: effects.append(path),
+            run_queued=lambda path, checkpoint: effects.append((path, checkpoint)),
         )
         self.assertEqual(cancelled, replay)
         self.assertEqual(interventions, ["task-1"])
@@ -262,7 +262,7 @@ class PersistentWorkerStorageTests(unittest.TestCase):
         result = lifecycle.run_persistent_queued_dispatch(
             self.root, "task-1", claim_id="claim-1",
             cancel_present=lambda _task_id: True,
-            run_queued=lambda path: effects.append(path),
+            run_queued=lambda path, checkpoint: effects.append((path, checkpoint)),
         )
         self.assertEqual(result["status"], "cancelled_before_claim")
         self.assertEqual(effects, [])
@@ -275,8 +275,8 @@ class PersistentWorkerStorageTests(unittest.TestCase):
         )
         observations = []
 
-        def run_queue(path):
-            observations.append((path, lifecycle.worker_status(self.root, "task-1")["state"]))
+        def run_queue(path, checkpoint):
+            observations.append((path, checkpoint, lifecycle.worker_status(self.root, "task-1")["state"]))
             return "provider-free-result"
 
         result = lifecycle.run_persistent_queued_dispatch(
@@ -284,7 +284,7 @@ class PersistentWorkerStorageTests(unittest.TestCase):
             cancel_present=lambda _task_id: False, run_queued=run_queue,
         )
         self.assertEqual(result["status"], "claimed")
-        self.assertEqual(observations, [("persistent-task-1.json", "CLAIMED")])
+        self.assertEqual(observations, [("persistent-task-1.json", None, "CLAIMED")])
         self.assertEqual(result["attempt"]["attempt_id"], "claim-1")
         self.assertEqual(len(lifecycle.list_attempts(self.root, "task-1")), 1)
 
@@ -298,12 +298,12 @@ class PersistentWorkerStorageTests(unittest.TestCase):
             self.root, "task-1", claim_id="claim-1", attempt_id="attempt-1",
             worker_id="worker-1", lease_seconds=60,
             cancel_present=lambda _task_id: False,
-            run_queued=lambda path: effects.append(path) or "done",
+            run_queued=lambda path, checkpoint: effects.append((path, checkpoint)) or "done",
         )
         attempt = result["attempt"]
         self.assertEqual(attempt["claim_event_id"], "claim-1")
         self.assertEqual(attempt["worker_id"], "worker-1")
-        self.assertEqual(effects, ["persistent-task-1.json"])
+        self.assertEqual(effects, [("persistent-task-1.json", None)])
         path = os.path.join(
             self.root, "tasks", "task-1", "attempts", "attempt-1.json"
         )
@@ -325,7 +325,7 @@ class PersistentWorkerStorageTests(unittest.TestCase):
             lifecycle.run_persistent_queued_dispatch(
                 self.root, "task-1", claim_id="claim-1", lease_seconds=0,
                 cancel_present=lambda _task_id: False,
-                run_queued=lambda path: effects.append(path),
+                run_queued=lambda path, checkpoint: effects.append((path, checkpoint)),
             )
         self.assertEqual(lifecycle.worker_status(self.root, "task-1")["state"],
                          "QUEUED")
@@ -339,7 +339,7 @@ class PersistentWorkerStorageTests(unittest.TestCase):
         lifecycle.run_persistent_queued_dispatch(
             self.root, "task-1", claim_id="claim-1", attempt_id="attempt-1",
             cancel_present=lambda _task_id: False,
-            run_queued=lambda _path: "paused",
+            run_queued=lambda _path, _checkpoint: "paused",
         )
         lifecycle.append_task_event(
             self.root, "task-1", event_id="running-1", expected_version=2,
@@ -462,6 +462,28 @@ class PersistentWorkerStorageTests(unittest.TestCase):
             event = json.loads(source.readlines()[-1])
         self.assertEqual(event["event_id"], "requeue-1")
         self.assertEqual(event["payload_sha256"], "a" * 64)
+
+    def test_requeued_attempt_receives_verified_checkpoint(self):
+        self._failed_retryable_fixture(checkpoint=True)
+        lifecycle.requeue_persistent(
+            self.root, "task-1", requeue_id="requeue-1",
+            enqueue=self.queued_result,
+        )
+        observed = []
+        claimed = lifecycle.run_persistent_queued_dispatch(
+            self.root, "task-1", claim_id="claim-2", attempt_id="attempt-2",
+            cancel_present=lambda _task_id: False,
+            run_queued=lambda path, checkpoint: observed.append(
+                (path, checkpoint)
+            ) or "resumed",
+        )
+        checkpoint = lifecycle.read_checkpoint_chain(self.root, "task-1")[-1]
+        self.assertEqual(observed, [("persistent-task-1.json", checkpoint)])
+        self.assertEqual(claimed["resume_checkpoint"], checkpoint)
+        self.assertEqual(claimed["attempt"]["resume_checkpoint_id"],
+                         checkpoint["checkpoint_id"])
+        self.assertEqual(claimed["attempt"]["resume_checkpoint_sha256"],
+                         checkpoint["checkpoint_sha256"])
 
     def test_failed_requeue_effect_does_not_change_retryable_state(self):
         self._failed_retryable_fixture()
