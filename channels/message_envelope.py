@@ -10,7 +10,7 @@ import time
 import uuid
 import threading
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 
 @dataclass(frozen=True)
@@ -26,6 +26,7 @@ class MessageEnvelope:
     response_policy: str  # "ordinary" | "skip" | "auth_broadcast"
     receive_timestamp: float
     text: str = ""
+    inbound_identity: Optional[dict[str, Any]] = None
 
     @classmethod
     def from_ingress(
@@ -37,6 +38,7 @@ class MessageEnvelope:
         sender_display: str,
         text: str,
         response_policy: str = "ordinary",
+        inbound_identity: Optional[dict[str, Any]] = None,
     ) -> "MessageEnvelope":
         run_id = os.environ.get("OMEGACLAW_RUN_ID", "")
         generation_id = os.environ.get("OMEGACLAW_GENERATION_ID", "")
@@ -52,6 +54,7 @@ class MessageEnvelope:
             response_policy=response_policy,
             receive_timestamp=time.time(),
             text=text,
+            inbound_identity=inbound_identity,
         )
 
     def as_debug_dict(self) -> dict:

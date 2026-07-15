@@ -36,6 +36,7 @@ _allowed_user_ids = set()
 _private_only = False
 _sync_poll = False
 _receive_transport = "bot_api"
+_current_inbound_identity = None
 
 _attachment_dir = "/home/openclaw/tmp/omegaclaw-telegram-attachments"
 _download_attachments = True
@@ -114,11 +115,7 @@ def _maybe_send_preack(display_name, msg, chat_id=""):
     _last_preack_key = key
     _last_preack_time = now
 
-    target_chat = str(chat_id or "").strip()
-    if target_chat:
-        _send_message_to(f"{display_name}: Got it — I’m reading this and will answer substantively.", target_chat)
-    else:
-        send_message(f"{display_name}: Got it — I’m reading this and will answer substantively.")
+    print("[TELEGRAM_OPERATOR] preack suppressed: acknowledgements are internal state, not speech")
 
 
 def _set_reply_chat(chat_id):
@@ -169,7 +166,7 @@ def _set_last(msg, chat_id="", skip_response=False, *, envelope=None):
 
 
 def getLastMessage():
-    global _last_message, _reply_chat_id, _last_skip_response
+    global _last_message, _reply_chat_id, _last_skip_response, _current_inbound_identity
     if _receive_transport == "bot_api" and _sync_poll and _running:
         _poll_once()
     with _msg_lock:
@@ -179,8 +176,12 @@ def getLastMessage():
                 _last_message = ""
                 _last_skip_response = item.response_policy == "skip"
                 set_current_envelope(item)
+                _current_inbound_identity = item.inbound_identity
                 # Keep legacy globals in sync for unmigrated code paths
                 _set_active_chat(item.source_chat_id)
+                if item.inbound_identity:
+                    identity = json.dumps(item.inbound_identity, sort_keys=True, separators=(",", ":"))
+                    return f"[TELEGRAM_IDENTITY_V2 {identity}]\n{item.text}"
                 return item.text
             # Legacy tuple path
             msg, cid, skip = item
@@ -201,6 +202,111 @@ def getLastMessage():
 def should_skip_response():
     global _last_skip_response
     return _last_skip_response
+
+
+def current_addressee_classification():
+    identity = _current_inbound_identity or {}
+    return str(identity.get("addressee_classification", "GROUP"))
+
+
+def _bot_registry():
+    """Load the non-secret shared bot registry from TG_BOT_REGISTRY_JSON."""
+    raw = os.environ.get("TG_BOT_REGISTRY_JSON", "").strip()
+    entries = []
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            entries = parsed.get("entries", parsed) if isinstance(parsed, dict) else parsed
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid TG_BOT_REGISTRY_JSON: {exc}") from exc
+    result = {}
+    for entry in entries or []:
+        if not isinstance(entry, dict) or not str(entry.get("telegram_user_id", "")).strip():
+            raise ValueError("bot registry entries require telegram_user_id")
+        result[str(entry["telegram_user_id"])] = dict(entry)
+    return result
+
+
+def _mention_ids(message, registry):
+    ids = set()
+    usernames = {
+        str(entry.get("telegram_username", "")).lstrip("@").lower(): bot_id
+        for bot_id, entry in registry.items()
+        if str(entry.get("telegram_username", "")).strip()
+    }
+    for entities_key, text_key in (("entities", "text"), ("caption_entities", "caption")):
+        source = str(message.get(text_key, "") or "")
+        for entity in message.get(entities_key) or []:
+            user = entity.get("user") or {}
+            if entity.get("type") == "text_mention" and user.get("id") is not None:
+                ids.add(str(user["id"]))
+            elif entity.get("type") == "mention":
+                token = source[entity.get("offset", 0):][:entity.get("length", 0)].lstrip("@").lower()
+                if token in usernames:
+                    ids.add(usernames[token])
+                elif _self_bot_id and token in {
+                    str(os.environ.get("TG_BOT_USERNAME", "")).lstrip("@").lower(),
+                    "protomegabot",
+                }:
+                    ids.add(str(_self_bot_id))
+    return sorted(ids)
+
+
+def _build_inbound_identity(message, chat, user, msg):
+    registry = _bot_registry()
+    bot_id = str(_self_bot_id or "")
+    mentions = _mention_ids(message, registry)
+    reply = message.get("reply_to_message") or {}
+    reply_from = reply.get("from") or {}
+    reply_id = str(reply_from.get("id", ""))
+    mentioned_me = bool(bot_id and bot_id in mentions)
+    reply_to_me = bool(bot_id and reply_id == bot_id)
+    if str(chat.get("type", "")) == "private":
+        classification = "DIRECT"
+    elif mentioned_me:
+        classification = "DIRECT"
+    elif reply_to_me:
+        classification = "DIRECT"
+    elif reply_id and reply_id in registry:
+        classification = "SECONDARY"
+    elif not mentions and not reply:
+        classification = "GROUP"
+    else:
+        classification = "INCIDENTAL"
+    self_entry = registry.get(bot_id, {})
+    return {
+        "inbound_envelope": {
+            "version": 2,
+            "message_id": str(message.get("message_id", "")),
+            "chat_id": str(chat.get("id", "")),
+            "thread_id": str(message.get("message_thread_id", "")) or None,
+            "sender": {
+                "telegram_user_id": str(user.get("id", "")),
+                "display_name": _display_name(user, chat),
+                "is_bot": str(user.get("id", "")) in registry,
+            },
+            "reply_to": ({
+                "message_id": str(reply.get("message_id", "")),
+                "sender_telegram_user_id": reply_id or None,
+                "sender_is_bot": reply_id in registry,
+            } if reply else None),
+            "mentions": mentions,
+            "text": msg,
+            "received_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        },
+        "self_context": {
+            "version": 2,
+            "agent_instance_id": self_entry.get("agent_instance_id", "protomegabot"),
+            "telegram_bot_id": bot_id,
+            "display_name": self_entry.get("display_name", "ProtoMegaBot"),
+            "workspace": os.getcwd(),
+            "session_key": f"omegaclaw:telegram:{chat.get('id', '')}",
+            "social_role": self_entry.get("social_role", "always-attending"),
+            "important_bots": [str(value) for value in self_entry.get("important_bots", [])],
+        },
+        "addressee_classification": classification,
+        "reinforced": mentioned_me and reply_to_me,
+    }
 
 
 def _is_self_bot_message(user):
@@ -872,16 +978,16 @@ def _handle_updates(updates):
         if user.get("is_bot") and _bot_to_bot_loop_guard(user, chat_id):
             continue
 
-        # In group chats, ingest messages addressed to other bots for context,
-        # but suppress a response unless this bot is also explicitly mentioned.
-        _skip_response = False
-        if chat_type != "private":
-            _skip_response = _should_skip_group_response(message, msg)
+        identity = _build_inbound_identity(message, chat, user, msg)
+        _skip_response = identity["addressee_classification"] == "INCIDENTAL"
 
         state = _is_allowed_message(chat_id, user_id, auth_text, chat_type)
         display_name = _display_name(user, chat)
         source_message_id = int(message.get("message_id", 0) or 0)
-        policy = "skip" if (_skip_response and chat_type != "private") else "ordinary"
+        social_role = identity["self_context"]["social_role"]
+        policy = "skip" if (
+            _skip_response and chat_type != "private" and social_role != "always-attending"
+        ) else "ordinary"
         if state == "allow":
             _set_reply_chat(chat_id)
             env = MessageEnvelope.from_ingress(
@@ -892,6 +998,7 @@ def _handle_updates(updates):
                 sender_display=display_name,
                 text=f"{display_name}: {msg}",
                 response_policy=policy,
+                inbound_identity=identity,
             )
             _set_last(f"{display_name}: {msg}", chat_id, skip_response=policy == "skip", envelope=env)
             if policy != "skip":
@@ -1065,6 +1172,10 @@ def _send_message_to(text, target_chat):
         return chr(int(m.group(1), 16))
     text = _re.sub(r'\\u([0-9a-fA-F]{4})', _decode_u_esc, text)
     text = _re.sub(r'(?<![A-Za-z0-9_])u([0-9a-fA-F]{4})(?![A-Za-z0-9_])', _decode_u_esc, text)
+    publish, reason = _telegram_publish_gate(text)
+    if not publish:
+        print(f"[TELEGRAM_OPERATOR] outbound suppressed reason={reason}")
+        return
     target_chat = str(target_chat or "").strip()
     if not text:
         return
@@ -1092,6 +1203,24 @@ def _send_message_to(text, target_chat):
         except Exception as exc:
             print(f"[TELEGRAM] Send failed: {exc}")
             return
+
+
+def _telegram_publish_gate(text):
+    """Phase-2 transport barrier: silence and acknowledgements never become speech."""
+    normalized = re.sub(r"\s+", " ", str(text or "").strip())
+    upper = normalized.upper()
+    if not normalized:
+        return False, "empty"
+    if upper in {"SUPPRESS", "NO_REPLY", '{"ACTION":"SUPPRESS"}'}:
+        return False, "control_result"
+    if re.fullmatch(r"(?:NOTED|ACKNOWLEDGED|GOT IT|OKAY|OK)[.!]?", upper):
+        return False, "acknowledgement_only"
+    if re.fullmatch(
+        r"(?:I(?:'M| AM)?\s+)?(?:STAYING|REMAINING|KEEPING)\s+QUIET(?:\s+BECAUSE\s+.+)?[.!]?",
+        upper,
+    ):
+        return False, "silence_explanation"
+    return True, "reply"
 
 
 def send_message(text):
