@@ -29,6 +29,8 @@ ATTEMPT_VERSION = "threadkeeper.persistent-worker.attempt.v1"
 CHECKPOINT_VERSION = "threadkeeper.persistent-worker.checkpoint.v1"
 RECOVERY_VERSION = "threadkeeper.persistent-worker.recovery.v1"
 ENQUEUE_RECEIPT_VERSION = "threadkeeper.persistent-worker.enqueue-receipt.v1"
+BUDGET_EVENT_VERSION = "threadkeeper.persistent-worker.budget-event.v1"
+BUDGET_STATUS_VERSION = "threadkeeper.persistent-worker.budget-status.v1"
 
 MAX_MANIFEST_BYTES = 262144
 MAX_EVENT_LOG_BYTES = 1048576
@@ -39,9 +41,28 @@ MAX_CHECKPOINTS = 1000
 MAX_ATTEMPT_BYTES = 65536
 MAX_CHECKPOINT_BYTES = 262144
 MAX_ENQUEUE_RECEIPT_BYTES = 65536
+MAX_BUDGET_LOG_BYTES = 1048576
+MAX_BUDGET_EVENT_BYTES = 65536
 
 _ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+
+_BUDGET_LIMITS = frozenset({
+    "max_attempts", "max_input_tokens", "max_output_tokens",
+    "max_total_tokens", "max_tool_calls", "max_runtime_s",
+    "max_turns", "max_result_chars",
+})
+_BUDGET_COUNTERS = frozenset({
+    "input_tokens", "output_tokens", "total_tokens", "tool_calls",
+    "runtime_s",
+})
+_COUNTER_TO_LIMIT = {
+    "input_tokens": "max_input_tokens",
+    "output_tokens": "max_output_tokens",
+    "total_tokens": "max_total_tokens",
+    "tool_calls": "max_tool_calls",
+    "runtime_s": "max_runtime_s",
+}
 
 STATES = frozenset({
     "CREATED", "QUEUED", "CLAIMED", "RUNNING", "CHECKPOINTED",
@@ -336,6 +357,18 @@ def _parse_timestamp(value, label):
     return parsed
 
 
+def _validate_budgets(value):
+    if not isinstance(value, dict):
+        raise ValueError("budgets must be an object")
+    unknown = set(value) - _BUDGET_LIMITS
+    if unknown:
+        raise ValueError("task budgets contain unsupported limits")
+    for key, limit in value.items():
+        if (not isinstance(limit, int) or isinstance(limit, bool) or limit < 1):
+            raise ValueError(f"task budget {key} must be a positive integer")
+    return value
+
+
 def create_task_manifest(root, manifest):
     """Durably create one immutable v1 task manifest without running it."""
     if not isinstance(manifest, dict):
@@ -358,6 +391,7 @@ def create_task_manifest(root, manifest):
     for field in ("task_contract", "budgets", "provenance"):
         if not isinstance(record[field], dict):
             raise ValueError(f"{field} must be an object")
+    _validate_budgets(record["budgets"])
     record.update({
         "manifest_version": MANIFEST_VERSION,
         "lifecycle_version": LIFECYCLE_VERSION,
@@ -541,6 +575,151 @@ def worker_status(root, task_id):
         "last_event_sha256": last_hash,
         "manifest_sha256": manifest["manifest_sha256"],
     }
+
+
+def _read_budget_events(root, task_id):
+    path = os.path.join(_task_directory(root, task_id), "budget-events.jsonl")
+    try:
+        descriptor = _open_regular(path, os.O_RDONLY)
+    except FileNotFoundError:
+        return []
+    records = []
+    total = 0
+    previous = ""
+    with os.fdopen(descriptor, "rb") as source:
+        if os.fstat(source.fileno()).st_size > MAX_BUDGET_LOG_BYTES:
+            raise ValueError("persistent-worker budget log exceeds byte limit")
+        for sequence, line in enumerate(source, 1):
+            total += len(line)
+            if total > MAX_BUDGET_LOG_BYTES or len(line) > MAX_BUDGET_EVENT_BYTES:
+                raise ValueError("persistent-worker budget log exceeds byte limit")
+            try:
+                record = json.loads(line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise ValueError("invalid persistent-worker budget event") from error
+            if not isinstance(record, dict) or not line.endswith(b"\n"):
+                raise ValueError("invalid persistent-worker budget event")
+            digest = record.get("budget_event_sha256")
+            unsigned = dict(record)
+            unsigned.pop("budget_event_sha256", None)
+            if (record.get("budget_event_version") != BUDGET_EVENT_VERSION or
+                    record.get("task_id") != task_id or
+                    record.get("sequence") != sequence or
+                    record.get("previous_budget_event_sha256") != previous or
+                    digest != _sha256(unsigned)):
+                raise ValueError("persistent-worker budget event integrity check failed")
+            _validate_id(record.get("usage_id"), "budget usage id")
+            _validate_id(record.get("attempt_id"), "attempt id")
+            _parse_timestamp(record.get("created_at"), "budget event timestamp")
+            counters = record.get("counters")
+            if (not isinstance(counters, dict) or not counters or
+                    set(counters) - _BUDGET_COUNTERS):
+                raise ValueError("invalid persistent-worker budget counters")
+            if any(not isinstance(amount, int) or isinstance(amount, bool) or amount < 0
+                   for amount in counters.values()):
+                raise ValueError("invalid persistent-worker budget counter value")
+            records.append(record)
+            previous = digest
+    return records
+
+
+def budget_status(root, task_id):
+    """Return verified, restart-persistent task-level consumption and limits."""
+    manifest = _read_manifest(root, task_id)
+    limits = dict(manifest["budgets"])
+    events = _read_budget_events(root, task_id)
+    attempts_records = list_attempts(root, task_id)
+    attempt_ids = {record["attempt_id"] for record in attempts_records}
+    if any(event["attempt_id"] not in attempt_ids for event in events):
+        raise ValueError("persistent-worker budget event attempt lineage mismatch")
+    consumed = {key: 0 for key in sorted(_BUDGET_COUNTERS)}
+    for event in events:
+        for key, amount in event["counters"].items():
+            consumed[key] += amount
+    attempts = len(attempts_records)
+    remaining = {}
+    exhausted = []
+    if "max_attempts" in limits:
+        remaining["attempts"] = max(0, limits["max_attempts"] - attempts)
+        if attempts >= limits["max_attempts"]:
+            exhausted.append("max_attempts")
+    for counter, limit_key in _COUNTER_TO_LIMIT.items():
+        if limit_key in limits:
+            remaining[counter] = max(0, limits[limit_key] - consumed[counter])
+            if consumed[counter] >= limits[limit_key]:
+                exhausted.append(limit_key)
+    return {
+        "budget_status_version": BUDGET_STATUS_VERSION,
+        "task_id": task_id,
+        "limits": limits,
+        "consumed": consumed,
+        "attempts": attempts,
+        "remaining": remaining,
+        "exhausted": sorted(exhausted),
+        "eligible": not exhausted,
+        "event_count": len(events),
+        "last_budget_event_sha256": (
+            events[-1]["budget_event_sha256"] if events else ""
+        ),
+    }
+
+
+def record_budget_usage(root, task_id, *, usage_id, attempt_id, counters,
+                        created_at=None):
+    """CAS-append one idempotent immutable usage delta to the task ledger."""
+    _validate_id(usage_id, "budget usage id")
+    _validate_id(attempt_id, "attempt id")
+    attempt = _read_attempt(root, task_id, attempt_id)
+    if attempt["task_id"] != task_id:
+        raise ValueError("persistent-worker budget attempt mismatch")
+    if (not isinstance(counters, dict) or not counters or
+            set(counters) - _BUDGET_COUNTERS):
+        raise ValueError("invalid persistent-worker budget counters")
+    if any(not isinstance(amount, int) or isinstance(amount, bool) or amount < 0
+           for amount in counters.values()):
+        raise ValueError("invalid persistent-worker budget counter value")
+    if not any(counters.values()):
+        raise ValueError("persistent-worker budget usage must be non-zero")
+    timestamp = created_at or datetime.now(timezone.utc).isoformat()
+    _parse_timestamp(timestamp, "budget event timestamp")
+    directory = _task_directory(root, task_id)
+    lock_path = os.path.join(directory, "budget-events.lock")
+    descriptor = _open_regular(lock_path, os.O_RDWR | os.O_CREAT)
+    with os.fdopen(descriptor, "a+b") as lock:
+        if fcntl is not None:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        events = _read_budget_events(root, task_id)
+        for existing in events:
+            if existing["usage_id"] == usage_id:
+                if (existing["attempt_id"] != attempt_id or
+                        existing["counters"] != counters):
+                    raise ValueError("conflicting persistent-worker budget usage replay")
+                return dict(existing)
+        record = {
+            "budget_event_version": BUDGET_EVENT_VERSION,
+            "task_id": task_id,
+            "usage_id": usage_id,
+            "attempt_id": attempt_id,
+            "sequence": len(events) + 1,
+            "created_at": timestamp,
+            "counters": dict(counters),
+            "previous_budget_event_sha256": (
+                events[-1]["budget_event_sha256"] if events else ""
+            ),
+        }
+        record["budget_event_sha256"] = _sha256(record)
+        line = _canonical_bytes(record)
+        if len(line) > MAX_BUDGET_EVENT_BYTES:
+            raise ValueError("persistent-worker budget event exceeds byte limit")
+        path = os.path.join(directory, "budget-events.jsonl")
+        output_fd = _open_regular(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND)
+        with os.fdopen(output_fd, "ab") as output:
+            if os.fstat(output.fileno()).st_size + len(line) > MAX_BUDGET_LOG_BYTES:
+                raise ValueError("persistent-worker budget log exceeds byte limit")
+            output.write(line)
+            output.flush()
+            os.fsync(output.fileno())
+    return dict(record)
 
 
 def list_worker_statuses(root, limit=100):
@@ -902,6 +1081,9 @@ def requeue_persistent(root, task_id, *, requeue_id, actor="supervisor",
         return status
     if status["state"] != "FAILED_RETRYABLE":
         raise ValueError("persistent task is not explicitly requeueable")
+    budget = budget_status(root, task_id)
+    if not budget["eligible"]:
+        raise ValueError("persistent task budget exhausted")
 
     manifest = _read_manifest(root, task_id)
     attempts = list_attempts(root, task_id)
@@ -1032,6 +1214,9 @@ def run_persistent_queued_dispatch(root, task_id, *, claim_id,
     status = worker_status(root, task_id)
     if status["state"] != "QUEUED":
         return {"status": "not_claimed", "task": status}
+    budget = budget_status(root, task_id)
+    if not budget["eligible"]:
+        return {"status": "budget_exhausted", "task": status, "budget": budget}
     subagent = _subagent_module() if cancel_present is None or run_queued is None else None
     cancel_check = cancel_present or (
         lambda value: os.path.isfile(subagent.persistent_dispatch_cancel_path(value))

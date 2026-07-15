@@ -115,6 +115,16 @@ class PersistentWorkerStorageTests(unittest.TestCase):
         self.assertEqual(second["previous_event_sha256"], first["event_sha256"])
         self.assertEqual(lifecycle.list_worker_statuses(self.root), [status])
 
+    def test_manifest_budget_limits_are_strict_positive_integers(self):
+        for budgets in (
+            {"max_attempts": 0}, {"max_tool_calls": True},
+            {"unknown_limit": 1},
+        ):
+            manifest = self.manifest()
+            manifest["budgets"] = budgets
+            with self.assertRaisesRegex(ValueError, "budget"):
+                lifecycle.create_task_manifest(self.root, manifest)
+
     def test_event_replay_is_idempotent_and_cas_checked(self):
         lifecycle.create_task_manifest(self.root, self.manifest())
         event = lifecycle.append_task_event(
@@ -367,6 +377,79 @@ class PersistentWorkerStorageTests(unittest.TestCase):
             json.dump(tampered, output)
         with self.assertRaisesRegex(ValueError, "integrity"):
             lifecycle.list_attempts(self.root, "task-1")
+
+    def test_budget_usage_is_durable_idempotent_and_hash_chained(self):
+        manifest = self.manifest()
+        manifest["budgets"].update({
+            "max_total_tokens": 100, "max_tool_calls": 3,
+        })
+        lifecycle.spawn_persistent(
+            self.root, manifest, spawn_id="spawn-1", enqueue=self.queued_result,
+        )
+        lifecycle.run_persistent_queued_dispatch(
+            self.root, "task-1", claim_id="claim-1", attempt_id="attempt-1",
+            cancel_present=lambda _task_id: False,
+            run_queued=lambda _path, _checkpoint: "provider-free",
+        )
+        first = lifecycle.record_budget_usage(
+            self.root, "task-1", usage_id="usage-1", attempt_id="attempt-1",
+            counters={"total_tokens": 40, "tool_calls": 1},
+            created_at="2026-07-15T12:03:00+00:00",
+        )
+        replay = lifecycle.record_budget_usage(
+            self.root, "task-1", usage_id="usage-1", attempt_id="attempt-1",
+            counters={"total_tokens": 40, "tool_calls": 1},
+            created_at="2026-07-15T12:04:00+00:00",
+        )
+        second = lifecycle.record_budget_usage(
+            self.root, "task-1", usage_id="usage-2", attempt_id="attempt-1",
+            counters={"total_tokens": 60},
+            created_at="2026-07-15T12:05:00+00:00",
+        )
+        self.assertEqual(replay, first)
+        self.assertEqual(second["previous_budget_event_sha256"],
+                         first["budget_event_sha256"])
+        status = lifecycle.budget_status(self.root, "task-1")
+        self.assertEqual(status["consumed"]["total_tokens"], 100)
+        self.assertEqual(status["consumed"]["tool_calls"], 1)
+        self.assertEqual(status["event_count"], 2)
+        self.assertFalse(status["eligible"])
+        self.assertEqual(status["exhausted"], ["max_total_tokens"])
+        with self.assertRaisesRegex(ValueError, "conflicting"):
+            lifecycle.record_budget_usage(
+                self.root, "task-1", usage_id="usage-1",
+                attempt_id="attempt-1", counters={"total_tokens": 41},
+            )
+
+    def test_budget_exhaustion_blocks_requeue_before_queue_effect(self):
+        manifest = self.manifest()
+        manifest["budgets"] = {"max_attempts": 1}
+        lifecycle.spawn_persistent(
+            self.root, manifest, spawn_id="spawn-1", enqueue=self.queued_result,
+        )
+        lifecycle.append_task_event(
+            self.root, "task-1", event_id="claim-1", expected_version=1,
+            prior_state="QUEUED", new_state="CLAIMED", actor="worker",
+        )
+        lifecycle.create_attempt(
+            self.root, "task-1", attempt_id="attempt-1",
+            claim_event_id="claim-1", worker_id="worker-1",
+            created_at="2026-07-15T12:00:00+00:00",
+            lease_expires_at="2026-07-15T12:05:00+00:00",
+        )
+        lifecycle.recover_stale_attempt(
+            self.root, "task-1", recovery_id="recovery-1",
+            now="2026-07-15T12:05:01+00:00",
+        )
+        effects = []
+        with self.assertRaisesRegex(ValueError, "budget exhausted"):
+            lifecycle.requeue_persistent(
+                self.root, "task-1", requeue_id="requeue-1",
+                enqueue=lambda *_args: effects.append(True),
+            )
+        self.assertEqual(effects, [])
+        self.assertEqual(lifecycle.worker_status(self.root, "task-1")["state"],
+                         "FAILED_RETRYABLE")
 
     def test_invalid_lease_fails_before_claim_mutation(self):
         lifecycle.spawn_persistent(
