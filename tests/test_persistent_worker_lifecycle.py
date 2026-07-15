@@ -6,6 +6,7 @@ import sys
 import json
 import tempfile
 import unittest
+from unittest import mock
 
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -225,6 +226,58 @@ class PersistentWorkerStorageTests(unittest.TestCase):
             enqueue=self.queued_result,
         )
         self.assertEqual(status["state"], "QUEUED")
+
+    def test_spawn_receipt_closes_enqueue_event_crash_window(self):
+        calls = []
+        real_append = lifecycle.append_task_event
+
+        def enqueue(*args):
+            calls.append(args)
+            return self.queued_result(*args)
+
+        with mock.patch.object(
+            lifecycle, "append_task_event", side_effect=RuntimeError("crash")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "crash"):
+                lifecycle.spawn_persistent(
+                    self.root, self.manifest(), spawn_id="spawn-1", enqueue=enqueue
+                )
+        receipt = lifecycle._read_enqueue_receipt(self.root, "task-1", "spawn-1")
+        self.assertEqual(receipt["queue_sha256"], "a" * 64)
+        self.assertEqual(lifecycle.worker_status(self.root, "task-1")["state"], "CREATED")
+
+        with mock.patch.object(lifecycle, "append_task_event", wraps=real_append):
+            status = lifecycle.spawn_persistent(
+                self.root, self.manifest(), spawn_id="spawn-1", enqueue=enqueue
+            )
+        self.assertEqual(status["state"], "QUEUED")
+        self.assertEqual(len(calls), 1)
+
+    def test_corrupt_spawn_receipt_fails_closed_without_reenqueue(self):
+        calls = []
+
+        def enqueue(*args):
+            calls.append(args)
+            return self.queued_result(*args)
+
+        with mock.patch.object(
+            lifecycle, "append_task_event", side_effect=RuntimeError("crash")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "crash"):
+                lifecycle.spawn_persistent(
+                    self.root, self.manifest(), spawn_id="spawn-1", enqueue=enqueue
+                )
+        path = lifecycle._enqueue_receipt_path(self.root, "task-1", "spawn-1")
+        with open(path, "r", encoding="utf-8") as source:
+            receipt = json.load(source)
+        receipt["queue_sha256"] = "bad"
+        with open(path, "w", encoding="utf-8") as output:
+            json.dump(receipt, output)
+        with self.assertRaisesRegex(ValueError, "queue digest invalid"):
+            lifecycle.spawn_persistent(
+                self.root, self.manifest(), spawn_id="spawn-1", enqueue=enqueue
+            )
+        self.assertEqual(len(calls), 1)
 
     def test_cancel_is_idempotent_and_prevents_later_claim_or_effect(self):
         lifecycle.spawn_persistent(
@@ -494,6 +547,32 @@ class PersistentWorkerStorageTests(unittest.TestCase):
             )
         self.assertEqual(lifecycle.worker_status(self.root, "task-1")["state"],
                          "FAILED_RETRYABLE")
+
+    def test_requeue_receipt_closes_enqueue_event_crash_window(self):
+        self._failed_retryable_fixture()
+        calls = []
+        real_append = lifecycle.append_task_event
+
+        def enqueue(*args):
+            calls.append(args)
+            return self.queued_result(*args)
+
+        with mock.patch.object(
+            lifecycle, "append_task_event", side_effect=RuntimeError("crash")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "crash"):
+                lifecycle.requeue_persistent(
+                    self.root, "task-1", requeue_id="requeue-1", enqueue=enqueue
+                )
+        self.assertEqual(
+            lifecycle.worker_status(self.root, "task-1")["state"], "FAILED_RETRYABLE"
+        )
+        with mock.patch.object(lifecycle, "append_task_event", wraps=real_append):
+            status = lifecycle.requeue_persistent(
+                self.root, "task-1", requeue_id="requeue-1", enqueue=enqueue
+            )
+        self.assertEqual(status["state"], "QUEUED")
+        self.assertEqual(len(calls), 1)
 
     def test_requeue_rejects_corrupt_checkpoint_before_enqueue(self):
         self._failed_retryable_fixture(checkpoint=True)

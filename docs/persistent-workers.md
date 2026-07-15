@@ -160,7 +160,7 @@ dispatch cancellation, task contracts, quotas, token accounting, transcript
 records, hash-chained indexes, patch-proposal mode, and adjudication candidates.
 
 The remaining gap is task-level budget aggregation, inbox/result delivery,
-enqueue receipts, and supervisor integration. The provider-free core now
+and supervisor integration. The provider-free core now
 has stable spawn/status/cancel surfaces, immutable attempt leases and
 checkpoint chains, stale-attempt recovery assessment/recording, and an explicit
 provider-free requeue effect. Recovery intentionally stops at
@@ -204,8 +204,11 @@ inferred from an expired lease.
    attempt now binds the latest verified checkpoint ID/digest into its immutable
    lease and passes that structured checkpoint to the queued runner; the normal
    runner validates its identity/payload and exposes it as bounded resume
-   context. Next: add an idempotent enqueue receipt and crash fixtures across
-   the enqueue/event boundary.
+   context. Spawn and explicit requeue now write immutable, bounded,
+   manifest-bound enqueue receipts before their lifecycle CAS event. A retry
+   after an event-write crash reuses the verified receipt rather than repeating
+   the queue effect; corrupt or conflicting receipts fail closed. Enqueue
+   operations are serialized per task where file locking is available.
 4. **Budgets and inbox/results**: persist task-level usage/retry/time/tool
    counters, enforce them before claim/resume/effects, and add idempotent inbox
    and result-delivery acknowledgements.

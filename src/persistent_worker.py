@@ -28,6 +28,7 @@ STATUS_VERSION = "threadkeeper.persistent-worker.status.v1"
 ATTEMPT_VERSION = "threadkeeper.persistent-worker.attempt.v1"
 CHECKPOINT_VERSION = "threadkeeper.persistent-worker.checkpoint.v1"
 RECOVERY_VERSION = "threadkeeper.persistent-worker.recovery.v1"
+ENQUEUE_RECEIPT_VERSION = "threadkeeper.persistent-worker.enqueue-receipt.v1"
 
 MAX_MANIFEST_BYTES = 262144
 MAX_EVENT_LOG_BYTES = 1048576
@@ -37,6 +38,7 @@ MAX_ATTEMPTS = 1000
 MAX_CHECKPOINTS = 1000
 MAX_ATTEMPT_BYTES = 65536
 MAX_CHECKPOINT_BYTES = 262144
+MAX_ENQUEUE_RECEIPT_BYTES = 65536
 
 _ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
@@ -218,6 +220,108 @@ def _bounded_json_read(path, max_bytes):
 def _task_directory(root, task_id):
     _validate_id(task_id, "task id")
     return os.path.join(os.path.abspath(root), "tasks", task_id)
+
+
+def _enqueue_receipt_path(root, task_id, operation_id):
+    _validate_id(operation_id, "enqueue operation id")
+    return os.path.join(
+        _task_directory(root, task_id), "enqueue-receipts", f"{operation_id}.json"
+    )
+
+
+def _read_enqueue_receipt(root, task_id, operation_id):
+    path = _enqueue_receipt_path(root, task_id, operation_id)
+    receipt = _bounded_json_read(path, MAX_ENQUEUE_RECEIPT_BYTES)
+    expected = {
+        "receipt_version": ENQUEUE_RECEIPT_VERSION,
+        "task_id": task_id,
+        "operation_id": operation_id,
+    }
+    if any(receipt.get(key) != value for key, value in expected.items()):
+        raise ValueError("persistent-worker enqueue receipt identity mismatch")
+    if receipt.get("operation") not in {"spawn", "requeue"}:
+        raise ValueError("persistent-worker enqueue receipt operation invalid")
+    if not _SHA256_RE.fullmatch(str(receipt.get("manifest_sha256", ""))):
+        raise ValueError("persistent-worker enqueue receipt manifest digest invalid")
+    if not _SHA256_RE.fullmatch(str(receipt.get("queue_sha256", ""))):
+        raise ValueError("persistent-worker enqueue receipt queue digest invalid")
+    _parse_timestamp(receipt.get("created_at"), "enqueue receipt timestamp")
+    return receipt
+
+
+def _record_enqueue_receipt(root, task_id, *, operation_id, operation,
+                            manifest_sha256, queue_sha256):
+    receipt = {
+        "receipt_version": ENQUEUE_RECEIPT_VERSION,
+        "task_id": task_id,
+        "operation_id": operation_id,
+        "operation": operation,
+        "manifest_sha256": manifest_sha256,
+        "queue_sha256": queue_sha256,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    path = _enqueue_receipt_path(root, task_id, operation_id)
+    payload = _canonical_bytes(receipt)
+    if len(payload) > MAX_ENQUEUE_RECEIPT_BYTES:
+        raise ValueError("persistent-worker enqueue receipt exceeds byte limit")
+    try:
+        _atomic_create(path, payload)
+        return receipt
+    except FileExistsError:
+        existing = _read_enqueue_receipt(root, task_id, operation_id)
+        for field in ("operation", "manifest_sha256", "queue_sha256"):
+            if existing[field] != receipt[field]:
+                raise ValueError("conflicting persistent-worker enqueue receipt replay")
+        return existing
+
+
+def _enqueue_with_receipt(root, manifest, *, operation_id, operation, adapter):
+    task_id = manifest["task_id"]
+    lock_path = os.path.join(_task_directory(root, task_id), "enqueue.lock")
+    descriptor = _open_regular(lock_path, os.O_RDWR | os.O_CREAT)
+    with os.fdopen(descriptor, "a+b") as lock:
+        if fcntl is not None:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        return _enqueue_with_receipt_locked(
+            root, manifest, operation_id=operation_id, operation=operation,
+            adapter=adapter,
+        )
+
+
+def _enqueue_with_receipt_locked(root, manifest, *, operation_id, operation,
+                                 adapter):
+    task_id = manifest["task_id"]
+    try:
+        receipt = _read_enqueue_receipt(root, task_id, operation_id)
+    except FileNotFoundError:
+        receipt = None
+    if receipt is not None:
+        if (receipt["operation"] != operation or
+                receipt["manifest_sha256"] != manifest["manifest_sha256"]):
+            raise ValueError("conflicting persistent-worker enqueue receipt replay")
+        return receipt
+
+    result_text = adapter(
+        task_id,
+        manifest["objective"],
+        ",".join(manifest["tool_subset"]),
+        manifest["persona_key"],
+        manifest["budgets"].get("max_turns"),
+        manifest["budgets"].get("max_result_chars"),
+    )
+    try:
+        result = json.loads(result_text) if isinstance(result_text, str) else result_text
+    except json.JSONDecodeError as error:
+        raise ValueError("persistent enqueue returned invalid JSON") from error
+    if not isinstance(result, dict) or result.get("status") != "queued":
+        raise ValueError("persistent enqueue did not produce a queued task")
+    queue_sha256 = result.get("queue_sha256", "")
+    if not _SHA256_RE.fullmatch(str(queue_sha256)):
+        raise ValueError("persistent enqueue omitted queue integrity digest")
+    return _record_enqueue_receipt(
+        root, task_id, operation_id=operation_id, operation=operation,
+        manifest_sha256=manifest["manifest_sha256"], queue_sha256=queue_sha256,
+    )
 
 
 def _parse_timestamp(value, label):
@@ -811,23 +915,11 @@ def requeue_persistent(root, task_id, *, requeue_id, actor="supervisor",
         raise ValueError("persistent-worker requeue checkpoint lineage mismatch")
 
     adapter = enqueue or _subagent_module().enqueue_persistent_dispatch
-    result_text = adapter(
-        task_id,
-        manifest["objective"],
-        ",".join(manifest["tool_subset"]),
-        manifest["persona_key"],
-        manifest["budgets"].get("max_turns"),
-        manifest["budgets"].get("max_result_chars"),
+    receipt = _enqueue_with_receipt(
+        root, manifest, operation_id=requeue_id, operation="requeue",
+        adapter=adapter,
     )
-    try:
-        result = json.loads(result_text) if isinstance(result_text, str) else result_text
-    except json.JSONDecodeError as error:
-        raise ValueError("persistent requeue returned invalid JSON") from error
-    if not isinstance(result, dict) or result.get("status") != "queued":
-        raise ValueError("persistent requeue did not produce a queued task")
-    queue_sha256 = result.get("queue_sha256", "")
-    if not _SHA256_RE.fullmatch(str(queue_sha256)):
-        raise ValueError("persistent requeue omitted queue integrity digest")
+    queue_sha256 = receipt["queue_sha256"]
 
     append_task_event(
         root, task_id, event_id=requeue_id,
@@ -878,23 +970,10 @@ def spawn_persistent(root, manifest, *, spawn_id, actor="parent",
     if status["state"] != "CREATED":
         raise ValueError("persistent task is not spawnable")
     adapter = enqueue or _subagent_module().enqueue_persistent_dispatch
-    result_text = adapter(
-        task_id,
-        stored["objective"],
-        ",".join(stored["tool_subset"]),
-        stored["persona_key"],
-        stored["budgets"].get("max_turns"),
-        stored["budgets"].get("max_result_chars"),
+    receipt = _enqueue_with_receipt(
+        root, stored, operation_id=spawn_id, operation="spawn", adapter=adapter,
     )
-    try:
-        result = json.loads(result_text) if isinstance(result_text, str) else result_text
-    except json.JSONDecodeError as error:
-        raise ValueError("persistent enqueue returned invalid JSON") from error
-    if not isinstance(result, dict) or result.get("status") != "queued":
-        raise ValueError("persistent enqueue did not produce a queued task")
-    payload_sha256 = result.get("queue_sha256", "")
-    if not _SHA256_RE.fullmatch(str(payload_sha256)):
-        raise ValueError("persistent enqueue omitted queue integrity digest")
+    payload_sha256 = receipt["queue_sha256"]
     append_task_event(
         root, task_id, event_id=spawn_id, expected_version=0,
         prior_state="CREATED", new_state="QUEUED", actor=actor,
