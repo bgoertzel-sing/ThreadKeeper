@@ -612,6 +612,14 @@ def _message_text_and_attachments(message, *, _depth=0, include_reply_content=Tr
         # attachment works but a reply-with-mention only shows metadata.
         reply_mentioned = False
         if _self_bot_id:
+            # Text-based fallback: also check raw text for @Protomegabot mentions
+            # in case Telegram doesn't include mention entities (can happen in replies).
+            for src_key in ("text", "caption"):
+                raw = message.get(src_key, "") or ""
+                if re.search(r"@protomega\w*", raw, re.IGNORECASE):
+                    reply_mentioned = True
+                    break
+        if _self_bot_id:
             for ent_list_key, src_key in (("entities", "text"), ("caption_entities", "caption")):
                 for ent in message.get(ent_list_key, []) or []:
                     if ent.get("type") in ("mention", "text_mention"):
