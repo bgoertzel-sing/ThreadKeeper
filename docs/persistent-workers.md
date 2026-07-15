@@ -159,11 +159,12 @@ loop with lock/status metadata, stale-lock reporting, stop files/signals,
 dispatch cancellation, task contracts, quotas, token accounting, transcript
 records, hash-chained indexes, patch-proposal mode, and adjudication candidates.
 
-The gap is that these are exposed as an async queue primitive around one
-ordinary bounded dispatch, not yet as a first-class persistent task ontology.
-There is no stable `spawn/status/cancel/inbox/resume` API, no immutable
-checkpoint chain, no durable task-level budget aggregation across attempts,
-and no authoritative MeTTa lifecycle gate.
+The remaining gap is task-level budget aggregation, inbox/result delivery,
+resume/requeue effects, and supervisor integration. The provider-free core now
+has stable spawn/status/cancel surfaces, immutable attempt leases and
+checkpoint chains, and stale-attempt recovery assessment/recording. Recovery
+intentionally stops at `FAILED_RETRYABLE`; requeue is a separate durable effect
+and may not be inferred from an expired lease.
 
 ## Phased implementation plan
 
@@ -188,9 +189,15 @@ and no authoritative MeTTa lifecycle gate.
    that wins first therefore prevents both the queue rename and subsequent
    provider/tool effects. Duplicate spawn/cancel IDs return existing state;
    conflicting spawn replays fail closed.
-3. **Attempts, checkpoints, and recovery**: introduce leases, immutable
-   checkpoint chains, stale-attempt recovery, resume validation, and crash
-   fixtures for every write/effect boundary.
+3. **Attempts, checkpoints, and recovery**: partially implemented. A claim now
+   creates a versioned, bounded, hash-linked immutable attempt/lease before the
+   queued dispatch effect. Versioned checkpoints are atomically created,
+   bounded, idempotent by checkpoint ID, payload-hashed, and linked in a
+   verified immutable chain. `recovery_assessment` fails closed on active,
+   missing, mismatched, or corrupt attempt/checkpoint lineage;
+   `recover_stale_attempt` idempotently records a verified expired attempt as
+   `FAILED_RETRYABLE`. Next: explicit resume/requeue effects and crash fixtures
+   across claim/attempt/checkpoint boundaries.
 4. **Budgets and inbox/results**: persist task-level usage/retry/time/tool
    counters, enforce them before claim/resume/effects, and add idempotent inbox
    and result-delivery acknowledgements.

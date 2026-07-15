@@ -285,6 +285,130 @@ class PersistentWorkerStorageTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "claimed")
         self.assertEqual(observations, [("persistent-task-1.json", "CLAIMED")])
+        self.assertEqual(result["attempt"]["attempt_id"], "claim-1")
+        self.assertEqual(len(lifecycle.list_attempts(self.root, "task-1")), 1)
+
+    def test_attempt_lease_is_immutable_and_required_before_effect(self):
+        lifecycle.spawn_persistent(
+            self.root, self.manifest(), spawn_id="spawn-1",
+            enqueue=self.queued_result,
+        )
+        effects = []
+        result = lifecycle.run_persistent_queued_dispatch(
+            self.root, "task-1", claim_id="claim-1", attempt_id="attempt-1",
+            worker_id="worker-1", lease_seconds=60,
+            cancel_present=lambda _task_id: False,
+            run_queued=lambda path: effects.append(path) or "done",
+        )
+        attempt = result["attempt"]
+        self.assertEqual(attempt["claim_event_id"], "claim-1")
+        self.assertEqual(attempt["worker_id"], "worker-1")
+        self.assertEqual(effects, ["persistent-task-1.json"])
+        path = os.path.join(
+            self.root, "tasks", "task-1", "attempts", "attempt-1.json"
+        )
+        with open(path, "r", encoding="utf-8") as source:
+            tampered = json.load(source)
+        tampered["worker_id"] = "forged"
+        with open(path, "w", encoding="utf-8") as output:
+            json.dump(tampered, output)
+        with self.assertRaisesRegex(ValueError, "integrity"):
+            lifecycle.list_attempts(self.root, "task-1")
+
+    def test_invalid_lease_fails_before_claim_mutation(self):
+        lifecycle.spawn_persistent(
+            self.root, self.manifest(), spawn_id="spawn-1",
+            enqueue=self.queued_result,
+        )
+        effects = []
+        with self.assertRaisesRegex(ValueError, "lease seconds"):
+            lifecycle.run_persistent_queued_dispatch(
+                self.root, "task-1", claim_id="claim-1", lease_seconds=0,
+                cancel_present=lambda _task_id: False,
+                run_queued=lambda path: effects.append(path),
+            )
+        self.assertEqual(lifecycle.worker_status(self.root, "task-1")["state"],
+                         "QUEUED")
+        self.assertEqual(effects, [])
+
+    def test_checkpoint_chain_is_bounded_idempotent_and_integrity_checked(self):
+        lifecycle.spawn_persistent(
+            self.root, self.manifest(), spawn_id="spawn-1",
+            enqueue=self.queued_result,
+        )
+        lifecycle.run_persistent_queued_dispatch(
+            self.root, "task-1", claim_id="claim-1", attempt_id="attempt-1",
+            cancel_present=lambda _task_id: False,
+            run_queued=lambda _path: "paused",
+        )
+        lifecycle.append_task_event(
+            self.root, "task-1", event_id="running-1", expected_version=2,
+            prior_state="CLAIMED", new_state="RUNNING", actor="worker",
+        )
+        first = lifecycle.create_checkpoint(
+            self.root, "task-1", checkpoint_id="checkpoint-1",
+            attempt_id="attempt-1", payload={"cursor": 3, "digest": "safe"},
+            created_at="2026-07-15T12:03:00+00:00",
+        )
+        replay = lifecycle.create_checkpoint(
+            self.root, "task-1", checkpoint_id="checkpoint-1",
+            attempt_id="attempt-1", payload={"cursor": 3, "digest": "safe"},
+            created_at="2026-07-15T12:03:00+00:00",
+        )
+        second = lifecycle.create_checkpoint(
+            self.root, "task-1", checkpoint_id="checkpoint-2",
+            attempt_id="attempt-1", payload={"cursor": 7},
+            created_at="2026-07-15T12:04:00+00:00",
+        )
+        self.assertEqual(first, replay)
+        self.assertEqual(second["previous_checkpoint_sha256"],
+                         first["checkpoint_sha256"])
+        self.assertEqual([item["sequence"] for item in
+                          lifecycle.read_checkpoint_chain(self.root, "task-1")],
+                         [1, 2])
+        path = os.path.join(
+            self.root, "tasks", "task-1", "checkpoints", "checkpoint-2.json"
+        )
+        with open(path, "r", encoding="utf-8") as source:
+            tampered = json.load(source)
+        tampered["payload"]["cursor"] = 99
+        with open(path, "w", encoding="utf-8") as output:
+            json.dump(tampered, output)
+        with self.assertRaisesRegex(ValueError, "payload integrity"):
+            lifecycle.read_checkpoint_chain(self.root, "task-1")
+
+    def test_restart_recovery_requires_expired_verified_attempt(self):
+        lifecycle.spawn_persistent(
+            self.root, self.manifest(), spawn_id="spawn-1",
+            enqueue=self.queued_result,
+        )
+        lifecycle.append_task_event(
+            self.root, "task-1", event_id="claim-1", expected_version=1,
+            prior_state="QUEUED", new_state="CLAIMED", actor="worker",
+        )
+        lifecycle.create_attempt(
+            self.root, "task-1", attempt_id="attempt-1",
+            claim_event_id="claim-1", worker_id="worker-1",
+            created_at="2026-07-15T12:00:00+00:00",
+            lease_expires_at="2026-07-15T12:05:00+00:00",
+        )
+        active = lifecycle.recovery_assessment(
+            self.root, "task-1", now="2026-07-15T12:04:59+00:00"
+        )
+        self.assertFalse(active["recoverable"])
+        recovered = lifecycle.recover_stale_attempt(
+            self.root, "task-1", recovery_id="recovery-1",
+            now="2026-07-15T12:05:01+00:00",
+        )
+        self.assertTrue(recovered["recoverable"])
+        self.assertEqual(recovered["state"], "FAILED_RETRYABLE")
+        self.assertEqual(lifecycle.worker_status(self.root, "task-1")["state"],
+                         "FAILED_RETRYABLE")
+        replay = lifecycle.recover_stale_attempt(
+            self.root, "task-1", recovery_id="recovery-1",
+            now="2026-07-15T12:05:02+00:00",
+        )
+        self.assertEqual(replay, recovered)
 
 
 if __name__ == "__main__":

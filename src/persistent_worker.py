@@ -13,7 +13,7 @@ import re
 import stat
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 try:
     import fcntl
@@ -25,11 +25,18 @@ LIFECYCLE_VERSION = "threadkeeper.persistent-worker.lifecycle.v1"
 MANIFEST_VERSION = "threadkeeper.persistent-worker.task-manifest.v1"
 EVENT_VERSION = "threadkeeper.persistent-worker.event.v1"
 STATUS_VERSION = "threadkeeper.persistent-worker.status.v1"
+ATTEMPT_VERSION = "threadkeeper.persistent-worker.attempt.v1"
+CHECKPOINT_VERSION = "threadkeeper.persistent-worker.checkpoint.v1"
+RECOVERY_VERSION = "threadkeeper.persistent-worker.recovery.v1"
 
 MAX_MANIFEST_BYTES = 262144
 MAX_EVENT_LOG_BYTES = 1048576
 MAX_EVENT_LINE_BYTES = 65536
 MAX_STATUS_TASKS = 1000
+MAX_ATTEMPTS = 1000
+MAX_CHECKPOINTS = 1000
+MAX_ATTEMPT_BYTES = 65536
+MAX_CHECKPOINT_BYTES = 262144
 
 _ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
@@ -211,6 +218,18 @@ def _bounded_json_read(path, max_bytes):
 def _task_directory(root, task_id):
     _validate_id(task_id, "task id")
     return os.path.join(os.path.abspath(root), "tasks", task_id)
+
+
+def _parse_timestamp(value, label):
+    if not isinstance(value, str):
+        raise ValueError(f"invalid {label}")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError(f"invalid {label}") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"invalid {label}")
+    return parsed
 
 
 def create_task_manifest(root, manifest):
@@ -441,6 +460,322 @@ def list_worker_statuses(root, limit=100):
     return statuses
 
 
+def _attempt_path(root, task_id, attempt_id):
+    _validate_id(attempt_id, "attempt id")
+    return os.path.join(
+        _task_directory(root, task_id), "attempts", f"{attempt_id}.json"
+    )
+
+
+def _read_attempt(root, task_id, attempt_id):
+    record = _bounded_json_read(
+        _attempt_path(root, task_id, attempt_id), MAX_ATTEMPT_BYTES
+    )
+    digest = record.get("attempt_sha256")
+    unsigned = dict(record)
+    unsigned.pop("attempt_sha256", None)
+    if record.get("attempt_version") != ATTEMPT_VERSION:
+        raise ValueError("unsupported persistent-worker attempt version")
+    if record.get("lifecycle_version") != LIFECYCLE_VERSION:
+        raise ValueError("persistent-worker attempt lifecycle mismatch")
+    if record.get("task_id") != task_id or record.get("attempt_id") != attempt_id:
+        raise ValueError("persistent-worker attempt identity mismatch")
+    _validate_id(record.get("claim_event_id"), "claim event id")
+    _validate_id(record.get("worker_id"), "worker id")
+    _parse_timestamp(record.get("created_at"), "attempt creation timestamp")
+    _parse_timestamp(record.get("lease_expires_at"), "attempt lease timestamp")
+    if (not isinstance(record.get("task_version"), int) or
+            isinstance(record.get("task_version"), bool) or
+            record["task_version"] < 1):
+        raise ValueError("invalid persistent-worker attempt task version")
+    if (not isinstance(record.get("sequence"), int) or
+            isinstance(record.get("sequence"), bool) or record["sequence"] < 1):
+        raise ValueError("invalid persistent-worker attempt sequence")
+    if digest != _sha256(unsigned):
+        raise ValueError("persistent-worker attempt integrity check failed")
+    return record
+
+
+def list_attempts(root, task_id):
+    """Return verified immutable attempts in creation order."""
+    directory = os.path.join(_task_directory(root, task_id), "attempts")
+    try:
+        entries = os.scandir(directory)
+    except FileNotFoundError:
+        return []
+    records = []
+    with entries:
+        for entry in entries:
+            if entry.name == "attempts.lock":
+                continue
+            if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                raise ValueError("persistent-worker attempt entry must be a file")
+            if not entry.name.endswith(".json"):
+                raise ValueError("invalid persistent-worker attempt entry")
+            attempt_id = entry.name[:-5]
+            records.append(_read_attempt(root, task_id, attempt_id))
+            if len(records) > MAX_ATTEMPTS:
+                raise ValueError("persistent-worker attempt count exceeds limit")
+    records.sort(key=lambda item: item["sequence"])
+    previous = ""
+    for sequence, record in enumerate(records, 1):
+        if record["sequence"] != sequence:
+            raise ValueError("persistent-worker attempt sequence mismatch")
+        if record.get("prior_attempt_sha256") != previous:
+            raise ValueError("persistent-worker attempt chain mismatch")
+        previous = record["attempt_sha256"]
+    return records
+
+
+def create_attempt(root, task_id, *, attempt_id, claim_event_id, worker_id,
+                   lease_expires_at, created_at=None):
+    """Create one immutable attempt/lease after a successful lifecycle claim."""
+    _validate_id(attempt_id, "attempt id")
+    _validate_id(claim_event_id, "claim event id")
+    _validate_id(worker_id, "worker id")
+    status = worker_status(root, task_id)
+    if status["state"] != "CLAIMED":
+        raise ValueError("persistent-worker attempt requires a claimed task")
+    if status["last_event_id"] != claim_event_id:
+        raise ValueError("persistent-worker attempt claim event mismatch")
+    created_at = created_at or datetime.now(timezone.utc).isoformat()
+    created = _parse_timestamp(created_at, "attempt creation timestamp")
+    expires = _parse_timestamp(lease_expires_at, "attempt lease timestamp")
+    if expires <= created:
+        raise ValueError("persistent-worker attempt lease must expire after creation")
+    attempt_directory = os.path.join(_task_directory(root, task_id), "attempts")
+    _ensure_directory(attempt_directory)
+    lock_path = os.path.join(attempt_directory, "attempts.lock")
+    descriptor = _open_regular(lock_path, os.O_RDWR | os.O_CREAT)
+    with os.fdopen(descriptor, "a+b") as lock:
+        if fcntl is not None:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        attempts = list_attempts(root, task_id)
+        if os.path.lexists(_attempt_path(root, task_id, attempt_id)):
+            existing = _read_attempt(root, task_id, attempt_id)
+            if (existing["claim_event_id"] != claim_event_id or
+                    existing["worker_id"] != worker_id or
+                    existing["lease_expires_at"] != lease_expires_at):
+                raise ValueError("conflicting persistent-worker attempt replay")
+            return existing
+        if len(attempts) >= MAX_ATTEMPTS:
+            raise ValueError("persistent-worker attempt count exceeds limit")
+        record = {
+            "attempt_version": ATTEMPT_VERSION,
+            "lifecycle_version": LIFECYCLE_VERSION,
+            "task_id": task_id,
+            "attempt_id": attempt_id,
+            "claim_event_id": claim_event_id,
+            "worker_id": worker_id,
+            "sequence": len(attempts) + 1,
+            "task_version": status["version"],
+            "manifest_sha256": status["manifest_sha256"],
+            "created_at": created_at,
+            "lease_expires_at": lease_expires_at,
+            "prior_attempt_sha256": attempts[-1]["attempt_sha256"] if attempts else "",
+        }
+        record["attempt_sha256"] = _sha256(record)
+        payload = _canonical_bytes(record)
+        if len(payload) > MAX_ATTEMPT_BYTES:
+            raise ValueError("persistent-worker attempt exceeds byte limit")
+        _atomic_create(_attempt_path(root, task_id, attempt_id), payload)
+    return dict(record)
+
+
+def _checkpoint_directory(root, task_id):
+    return os.path.join(_task_directory(root, task_id), "checkpoints")
+
+
+def _read_checkpoint(root, task_id, checkpoint_id):
+    _validate_id(checkpoint_id, "checkpoint id")
+    path = os.path.join(_checkpoint_directory(root, task_id), f"{checkpoint_id}.json")
+    record = _bounded_json_read(path, MAX_CHECKPOINT_BYTES)
+    digest = record.get("checkpoint_sha256")
+    unsigned = dict(record)
+    unsigned.pop("checkpoint_sha256", None)
+    if record.get("checkpoint_version") != CHECKPOINT_VERSION:
+        raise ValueError("unsupported persistent-worker checkpoint version")
+    if record.get("lifecycle_version") != LIFECYCLE_VERSION:
+        raise ValueError("persistent-worker checkpoint lifecycle mismatch")
+    if record.get("task_id") != task_id or record.get("checkpoint_id") != checkpoint_id:
+        raise ValueError("persistent-worker checkpoint identity mismatch")
+    _validate_id(record.get("attempt_id"), "attempt id")
+    _parse_timestamp(record.get("created_at"), "checkpoint timestamp")
+    if not isinstance(record.get("payload"), dict):
+        raise ValueError("persistent-worker checkpoint payload must be an object")
+    if record.get("payload_sha256") != _sha256(record["payload"]):
+        raise ValueError("persistent-worker checkpoint payload integrity check failed")
+    if digest != _sha256(unsigned):
+        raise ValueError("persistent-worker checkpoint integrity check failed")
+    return record
+
+
+def read_checkpoint_chain(root, task_id):
+    """Return a bounded, verified immutable checkpoint chain."""
+    directory = _checkpoint_directory(root, task_id)
+    try:
+        entries = os.scandir(directory)
+    except FileNotFoundError:
+        return []
+    records = []
+    with entries:
+        for entry in entries:
+            if entry.name == "checkpoints.lock":
+                continue
+            if (entry.is_symlink() or not entry.is_file(follow_symlinks=False) or
+                    not entry.name.endswith(".json")):
+                raise ValueError("invalid persistent-worker checkpoint entry")
+            records.append(_read_checkpoint(root, task_id, entry.name[:-5]))
+            if len(records) > MAX_CHECKPOINTS:
+                raise ValueError("persistent-worker checkpoint count exceeds limit")
+    records.sort(key=lambda item: item["sequence"])
+    previous = ""
+    for sequence, record in enumerate(records, 1):
+        if record.get("sequence") != sequence:
+            raise ValueError("persistent-worker checkpoint sequence mismatch")
+        if record.get("previous_checkpoint_sha256") != previous:
+            raise ValueError("persistent-worker checkpoint chain mismatch")
+        previous = record["checkpoint_sha256"]
+    return records
+
+
+def create_checkpoint(root, task_id, *, checkpoint_id, attempt_id, payload,
+                      created_at=None):
+    """Atomically append bounded worker state to the immutable checkpoint chain."""
+    _validate_id(checkpoint_id, "checkpoint id")
+    attempt = _read_attempt(root, task_id, attempt_id)
+    status = worker_status(root, task_id)
+    if status["state"] not in {"RUNNING", "CHECKPOINTED"}:
+        raise ValueError("persistent-worker checkpoint requires a running task")
+    if attempt["manifest_sha256"] != status["manifest_sha256"]:
+        raise ValueError("persistent-worker checkpoint manifest mismatch")
+    attempts = list_attempts(root, task_id)
+    if not attempts or attempts[-1]["attempt_id"] != attempt_id:
+        raise ValueError("persistent-worker checkpoint requires latest attempt")
+    if not isinstance(payload, dict):
+        raise ValueError("persistent-worker checkpoint payload must be an object")
+    created_at = created_at or datetime.now(timezone.utc).isoformat()
+    _parse_timestamp(created_at, "checkpoint timestamp")
+    directory = _checkpoint_directory(root, task_id)
+    _ensure_directory(directory)
+    lock_path = os.path.join(directory, "checkpoints.lock")
+    descriptor = _open_regular(lock_path, os.O_RDWR | os.O_CREAT)
+    with os.fdopen(descriptor, "a+b") as lock:
+        if fcntl is not None:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        checkpoints = read_checkpoint_chain(root, task_id)
+        record = {
+            "checkpoint_version": CHECKPOINT_VERSION,
+            "lifecycle_version": LIFECYCLE_VERSION,
+            "task_id": task_id,
+            "checkpoint_id": checkpoint_id,
+            "attempt_id": attempt_id,
+            "sequence": len(checkpoints) + 1,
+            "task_version": status["version"],
+            "created_at": created_at,
+            "payload": payload,
+            "payload_sha256": _sha256(payload),
+            "previous_checkpoint_sha256": (
+                checkpoints[-1]["checkpoint_sha256"] if checkpoints else ""
+            ),
+        }
+        record["checkpoint_sha256"] = _sha256(record)
+        encoded = _canonical_bytes(record)
+        if len(encoded) > MAX_CHECKPOINT_BYTES:
+            raise ValueError("persistent-worker checkpoint exceeds byte limit")
+        path = os.path.join(directory, f"{checkpoint_id}.json")
+        try:
+            _atomic_create(path, encoded)
+        except FileExistsError:
+            existing = _read_checkpoint(root, task_id, checkpoint_id)
+            replay = dict(record)
+            replay["sequence"] = existing.get("sequence")
+            replay["previous_checkpoint_sha256"] = existing.get(
+                "previous_checkpoint_sha256"
+            )
+            replay["checkpoint_sha256"] = _sha256({
+                key: value for key, value in replay.items()
+                if key != "checkpoint_sha256"
+            })
+            if existing != replay:
+                raise ValueError("conflicting persistent-worker checkpoint replay")
+            return existing
+    return dict(record)
+
+
+def recovery_assessment(root, task_id, *, now=None):
+    """Assess restart recovery from durable state without running any effect."""
+    status = worker_status(root, task_id)
+    now_value = now or datetime.now(timezone.utc).isoformat()
+    current = _parse_timestamp(now_value, "recovery timestamp")
+    attempts = list_attempts(root, task_id)
+    checkpoints = read_checkpoint_chain(root, task_id)
+    result = {
+        "recovery_version": RECOVERY_VERSION,
+        "task_id": task_id,
+        "state": status["state"],
+        "task_version": status["version"],
+        "recoverable": False,
+        "reason": "task state does not require stale-attempt recovery",
+        "attempt_id": attempts[-1]["attempt_id"] if attempts else "",
+        "checkpoint_id": checkpoints[-1]["checkpoint_id"] if checkpoints else "",
+    }
+    if status["state"] not in {"CLAIMED", "RUNNING"}:
+        return result
+    if not attempts:
+        result["reason"] = "claimed task has no durable attempt"
+        return result
+    latest = attempts[-1]
+    if latest["manifest_sha256"] != status["manifest_sha256"]:
+        result["reason"] = "attempt manifest mismatch"
+        return result
+    if checkpoints and checkpoints[-1]["attempt_id"] != latest["attempt_id"]:
+        result["reason"] = "latest checkpoint belongs to another attempt"
+        return result
+    if current <= _parse_timestamp(latest["lease_expires_at"], "attempt lease timestamp"):
+        result["reason"] = "attempt lease is still active"
+        return result
+    result["recoverable"] = True
+    result["reason"] = "attempt lease expired with verified durable lineage"
+    return result
+
+
+def recover_stale_attempt(root, task_id, *, recovery_id, actor="supervisor",
+                          now=None):
+    """Record an expired attempt as retryable; requeue remains a separate effect."""
+    _validate_id(recovery_id, "recovery id")
+    status = worker_status(root, task_id)
+    if status["state"] == "FAILED_RETRYABLE" and status["last_event_id"] == recovery_id:
+        attempts = list_attempts(root, task_id)
+        checkpoints = read_checkpoint_chain(root, task_id)
+        return {
+            "recovery_version": RECOVERY_VERSION,
+            "task_id": task_id,
+            "state": "FAILED_RETRYABLE",
+            "task_version": status["version"],
+            "recoverable": True,
+            "reason": "expired attempt recorded for explicit requeue",
+            "attempt_id": attempts[-1]["attempt_id"] if attempts else "",
+            "checkpoint_id": checkpoints[-1]["checkpoint_id"] if checkpoints else "",
+        }
+    assessment = recovery_assessment(root, task_id, now=now)
+    if not assessment["recoverable"]:
+        return assessment
+    status = worker_status(root, task_id)
+    attempt = _read_attempt(root, task_id, assessment["attempt_id"])
+    append_task_event(
+        root, task_id, event_id=recovery_id,
+        expected_version=status["version"], prior_state=status["state"],
+        new_state="FAILED_RETRYABLE", actor=actor,
+        payload_sha256=attempt["attempt_sha256"],
+    )
+    assessment = dict(assessment)
+    assessment["state"] = "FAILED_RETRYABLE"
+    assessment["task_version"] = status["version"] + 1
+    assessment["reason"] = "expired attempt recorded for explicit requeue"
+    return assessment
+
+
 def _subagent_module():
     # Lazy import keeps lifecycle/status inspection provider-free and makes the
     # queue effects seam explicit in tests.
@@ -544,9 +879,16 @@ def cancel_persistent(root, task_id, *, cancel_id, actor="parent",
 
 
 def run_persistent_queued_dispatch(root, task_id, *, claim_id,
-                                   cancel_present=None, run_queued=None):
+                                   cancel_present=None, run_queued=None,
+                                   attempt_id=None, worker_id="worker",
+                                   lease_seconds=300):
     """Claim through lifecycle CAS only if cancellation has not won the race."""
     _validate_id(claim_id, "claim id")
+    _validate_id(attempt_id or claim_id, "attempt id")
+    _validate_id(worker_id, "worker id")
+    if (not isinstance(lease_seconds, int) or isinstance(lease_seconds, bool) or
+            not 1 <= lease_seconds <= 86400):
+        raise ValueError("persistent-worker lease seconds out of range")
     status = worker_status(root, task_id)
     if status["state"] != "QUEUED":
         return {"status": "not_claimed", "task": status}
@@ -560,9 +902,17 @@ def run_persistent_queued_dispatch(root, task_id, *, claim_id,
         root, task_id, event_id=claim_id, expected_version=status["version"],
         prior_state="QUEUED", new_state="CLAIMED", actor="worker",
     )
+    attempt_id = attempt_id or claim_id
+    created = datetime.now(timezone.utc)
+    attempt = create_attempt(
+        root, task_id, attempt_id=attempt_id, claim_event_id=claim_id,
+        worker_id=worker_id, created_at=created.isoformat(),
+        lease_expires_at=(created + timedelta(seconds=lease_seconds)).isoformat(),
+    )
     runner = run_queued or subagent.run_queued_dispatch
     queue_path = os.path.join(
         subagent._dispatch_queue_dir(), f"persistent-{task_id}.json"
     ) if subagent is not None else f"persistent-{task_id}.json"
     return {"status": "claimed", "task": worker_status(root, task_id),
+            "attempt": attempt,
             "queue_result": runner(queue_path)}
