@@ -167,9 +167,15 @@ and no authoritative MeTTa lifecycle gate.
 
 ## Phased implementation plan
 
-1. **Lifecycle contract and read-only status**: add MeTTa transition truth
-   tables plus a Python parity contract; introduce versioned persistent task
-   manifests/events and read-only `worker-status` without provider calls.
+1. **Lifecycle contract and read-only status**: implemented in
+   `src/persistent_worker_lifecycle.metta` and `src/persistent_worker.py`.
+   Immutable `threadkeeper.persistent-worker.task-manifest.v1` records and
+   append-only, CAS-checked, hash-chained
+   `threadkeeper.persistent-worker.event.v1` records project to bounded
+   `threadkeeper.persistent-worker.status.v1` single-task/list responses.
+   Readers reject unknown versions, invalid transitions, broken sequence/hash
+   lineage, oversized files, symlinks, and non-regular records. These storage
+   primitives perform no provider, tool, process, queue, or Telegram effects.
 2. **Spawn and cancellation surface**: add `spawn-persistent` that creates one
    durable task via the existing validated queue path; add idempotent cancel
    requests and intervention tests. Preserve `delegate` byte-for-byte behavior.
