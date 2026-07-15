@@ -1,0 +1,53 @@
+;; ThreadKeeper persistent-worker lifecycle policy v1.
+;;
+;; Each public policy function has exactly one equation. This avoids ambiguous
+;; multi-match results from overlapping specific and catch-all clauses.
+
+(= (pw-terminal $state)
+   (if (or (== $state COMPLETED)
+           (or (== $state CANCELLED)
+               (or (== $state FAILED_TERMINAL)
+                   (== $state EXPIRED))))
+       True
+       False))
+
+(= (pw-transition $from $to)
+   (if
+     (or (and (== $from CREATED) (== $to QUEUED))
+     (or (and (== $from CREATED) (== $to CANCELLED))
+     (or (and (== $from QUEUED) (== $to CLAIMED))
+     (or (and (== $from QUEUED) (== $to CANCEL_REQUESTED))
+     (or (and (== $from QUEUED) (== $to EXPIRED))
+     (or (and (== $from CLAIMED) (== $to RUNNING))
+     (or (and (== $from CLAIMED) (== $to CANCEL_REQUESTED))
+     (or (and (== $from CLAIMED) (== $to FAILED_RETRYABLE))
+     (or (and (== $from CLAIMED) (== $to FAILED_TERMINAL))
+     (or (and (== $from CLAIMED) (== $to EXPIRED))
+     (or (and (== $from RUNNING) (== $to CHECKPOINTED))
+     (or (and (== $from RUNNING) (== $to WAITING_INPUT))
+     (or (and (== $from RUNNING) (== $to NEEDS_ADJUDICATION))
+     (or (and (== $from RUNNING) (== $to COMPLETED))
+     (or (and (== $from RUNNING) (== $to CANCEL_REQUESTED))
+     (or (and (== $from RUNNING) (== $to FAILED_RETRYABLE))
+     (or (and (== $from RUNNING) (== $to FAILED_TERMINAL))
+     (or (and (== $from RUNNING) (== $to EXPIRED))
+     (or (and (== $from CHECKPOINTED) (== $to QUEUED))
+     (or (and (== $from CHECKPOINTED) (== $to CANCEL_REQUESTED))
+     (or (and (== $from CHECKPOINTED) (== $to FAILED_TERMINAL))
+     (or (and (== $from CHECKPOINTED) (== $to EXPIRED))
+     (or (and (== $from WAITING_INPUT) (== $to QUEUED))
+     (or (and (== $from WAITING_INPUT) (== $to CANCEL_REQUESTED))
+     (or (and (== $from WAITING_INPUT) (== $to FAILED_TERMINAL))
+     (or (and (== $from WAITING_INPUT) (== $to EXPIRED))
+     (or (and (== $from NEEDS_ADJUDICATION) (== $to COMPLETED))
+     (or (and (== $from NEEDS_ADJUDICATION) (== $to CANCEL_REQUESTED))
+     (or (and (== $from NEEDS_ADJUDICATION) (== $to FAILED_TERMINAL))
+     (or (and (== $from NEEDS_ADJUDICATION) (== $to EXPIRED))
+     (or (and (== $from CANCEL_REQUESTED) (== $to CANCELLED))
+     (or (and (== $from CANCEL_REQUESTED) (== $to FAILED_TERMINAL))
+     (or (and (== $from FAILED_RETRYABLE) (== $to QUEUED))
+     (or (and (== $from FAILED_RETRYABLE) (== $to CANCEL_REQUESTED))
+     (or (and (== $from FAILED_RETRYABLE) (== $to FAILED_TERMINAL))
+         (and (== $from FAILED_RETRYABLE) (== $to EXPIRED)))))))))))))))))))))))))))))))))))))
+     ALLOW
+     DENY))
