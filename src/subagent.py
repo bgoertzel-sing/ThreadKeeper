@@ -3995,6 +3995,29 @@ def _structured_setup_error(msg, persona_key, goal, max_chars,
 # The dispatch entry point — called from MeTTa via py-call
 # ----------------------------------------------------------------------
 
+def _parse_dispatch_integer_limit(value, default, label):
+    """Parse a direct-dispatch integer limit without lossy coercion.
+
+    MeTTa/Python callers may supply decimal strings, but booleans, floats, and
+    malformed or pathologically long strings must not silently become a
+    different worker run. Clamping valid integers to the configured safety
+    floor/cap remains the caller's responsibility.
+    """
+    if value is None:
+        return default, ""
+    if isinstance(value, bool):
+        return default, f"{label} must be an integer"
+    if isinstance(value, int):
+        return value, ""
+    if isinstance(value, str):
+        text = value.strip()
+        if len(text) > 64:
+            return default, f"{label} integer is too long"
+        if re.fullmatch(r"[+-]?\d+", text):
+            return int(text), ""
+    return default, f"{label} must be an integer"
+
+
 def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
              max_chars=None):
     """Entry point invoked by (delegate ...) in src/skills.metta.
@@ -4006,21 +4029,22 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
     Failure path always returns a (subagent error: ...) string;
     never raises into the MeTTa interpreter."""
     # 1. Bound the per-call caps
-    if max_turns is None:
-        max_turns = SUBAGENT_MAX_TURNS_HARD_CAP
-    try:
-        max_turns = int(max_turns)
-    except (TypeError, ValueError):
-        max_turns = SUBAGENT_MAX_TURNS_HARD_CAP
+    max_turns, turns_error = _parse_dispatch_integer_limit(
+        max_turns, SUBAGENT_MAX_TURNS_HARD_CAP, "max_turns"
+    )
     bounded_turns = max(1, min(max_turns, SUBAGENT_MAX_TURNS_HARD_CAP))
 
-    if max_chars is None:
-        max_chars = SUBAGENT_MAX_DIGEST_CHARS
-    try:
-        max_chars = int(max_chars)
-    except (TypeError, ValueError):
-        max_chars = SUBAGENT_MAX_DIGEST_CHARS
+    max_chars, chars_error = _parse_dispatch_integer_limit(
+        max_chars, SUBAGENT_MAX_DIGEST_CHARS, "max_chars"
+    )
     bounded_chars = max(100, min(max_chars, SUBAGENT_MAX_DIGEST_CHARS))
+    limit_errors = [item for item in (turns_error, chars_error) if item]
+    if limit_errors:
+        return _structured_setup_error(
+            "; ".join(limit_errors), persona_key, goal, bounded_chars,
+            record_status="dispatch_args_invalid",
+            next_action="fix dispatch integer limits before retry",
+        )
 
     # 2. Load persona config
     try:

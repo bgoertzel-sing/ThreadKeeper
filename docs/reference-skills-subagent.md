@@ -69,7 +69,10 @@ and returns a single-string digest via its own `emit` instruction.
   extension), resolved against `memory/personas-subagent/`.
 - `max_turns` — hard cap on subagent iterations. Bounded by
   `OMEGACLAW_SUBAGENT_MAX_TURNS` (default 8). Optional in the
-  three-argument form; defaults to 8.
+  three-argument form; defaults to 8. Direct Python/MeTTa dispatch accepts an
+  integer or bounded decimal integer string; booleans, floats, malformed
+  strings, and pathologically long integer strings fail before persona/provider
+  setup instead of being coerced.
 
 ### Returns
 
@@ -399,6 +402,7 @@ end-to-end walkthrough.
 | OpenAI-compatible provider client cannot initialize | Structured JSON `status=error`; `summary` names the provider initialization failure; transcript status `provider_invalid`; no worker LLM call is attempted. |
 | Tool subset includes unknown skill | Structured JSON `status=error`; `summary` contains `(subagent error: unknown skill(s) [...]; registered subagent tools: [...])`; transcript status `tool_subset_invalid`. |
 | Tool subset includes v1-excluded skill | Structured JSON `status=error`; `summary` contains `(subagent error: skill(s) [...] are not callable by subagents in v1)`; transcript status `tool_subset_invalid`. |
+| Direct `max_turns` / `max_chars` is boolean, fractional, malformed, or an excessively long integer string | Structured JSON `status=error`; transcript status `dispatch_args_invalid`; no persona/provider setup or worker LLM call is attempted. |
 | Task contract is oversized, path-escaping, contains unsafe control/format/surrogate characters, uses unsafe action identifiers, or has invalid `max_tool_calls` / `patch_proposal_only` | Structured JSON `status=error`; `summary` contains `(subagent error: task contract <reason>)`; transcript status `contract_invalid`. |
 | Final `emit` contains unsafe control/format/surrogate characters | Structured JSON `status=error`; `summary` contains `EMIT_PROTOCOL_VIOLATION`; transcript status `emit_protocol_violation`; no successful parent digest is accepted. |
 | Task contract enables `patch_proposal_only` and worker calls `write-file` / `append-file` | Workspace file is not changed; transcript records full `patch_proposals`; parent digest includes bounded proposal metadata. |

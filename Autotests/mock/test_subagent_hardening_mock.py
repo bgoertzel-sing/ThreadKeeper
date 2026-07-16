@@ -3674,6 +3674,51 @@ def test_queue_only_dispatch_backpressure_fails_before_worker_llm(tmp_path, monk
     assert saved["status"] == "queue_backpressure"
 
 
+@pytest.mark.parametrize(
+    ("argument", "value", "message"),
+    [
+        ("max_turns", True, "max_turns must be an integer"),
+        ("max_turns", 1.5, "max_turns must be an integer"),
+        ("max_chars", "not-an-int", "max_chars must be an integer"),
+        ("max_chars", "9" * 5000, "max_chars integer is too long"),
+    ],
+)
+def test_dispatch_rejects_coerced_integer_limits_before_setup_or_llm(
+    tmp_path, monkeypatch, argument, value, message
+):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        subagent,
+        "load_persona_config",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not load persona")),
+    )
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")),
+    )
+    kwargs = {argument: value}
+
+    payload = json.loads(subagent.dispatch("strict limits", "write-file", "unit", **kwargs))
+
+    assert payload["status"] == "error"
+    assert message in payload["summary"]
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["status"] == "dispatch_args_invalid"
+
+
+def test_dispatch_accepts_decimal_string_limits(tmp_path, monkeypatch):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setattr(subagent, "_call_subagent_llm", lambda *_args: ('(emit "done")', 0, 0))
+
+    payload = json.loads(subagent.dispatch(
+        "strict limits", "write-file", "unit", max_turns="1", max_chars="1000"
+    ))
+
+    assert payload["status"] == "ok"
+    assert payload["summary"] == "done"
+
+
 def test_task_contract_rejects_bad_max_tool_calls_before_llm(tmp_path, monkeypatch):
     _write_unit_persona(tmp_path, monkeypatch)
     monkeypatch.setattr(
