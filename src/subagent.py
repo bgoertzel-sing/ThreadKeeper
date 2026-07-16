@@ -2994,6 +2994,16 @@ _TOOL_DESCRIPTIONS = {
         "- Technical analysis for a stock ticker: technical-analysis ticker",
 }
 
+_TASK_CONTRACT_FIELDS = frozenset({
+    "objective",
+    "allowed_paths",
+    "forbidden_actions",
+    "done_criteria",
+    "max_tool_calls",
+    "patch_proposal_only",
+    "requires_adjudication",
+})
+
 
 def _normalize_task_contract(goal, cfg=None):
     """Return (objective_text, contract_dict) for optional task contracts.
@@ -3020,10 +3030,8 @@ def _normalize_task_contract(goal, cfg=None):
             contract["task_contract"] = nested_contract
         inline = nested_contract if isinstance(nested_contract, dict) else parsed
         if isinstance(inline, dict):
-            for key in (
-                "allowed_paths", "forbidden_actions", "done_criteria",
-                "max_tool_calls", "patch_proposal_only", "requires_adjudication",
-            ):
+            keys = inline.keys() if isinstance(nested_contract, dict) else _TASK_CONTRACT_FIELDS
+            for key in keys:
                 if key in inline:
                     contract[key] = inline[key]
             if "objective" in inline:
@@ -3050,6 +3058,9 @@ def _validate_task_contract(contract):
     """
     if "task_contract" in (contract or {}):
         return "task contract field must be a JSON object"
+    unknown_fields = sorted(set(contract or {}) - _TASK_CONTRACT_FIELDS)
+    if unknown_fields:
+        return f"task contract contains unknown field(s): {unknown_fields}"
     objective = (contract or {}).get("objective", "")
     if not isinstance(objective, str):
         return "task contract objective must be a string"

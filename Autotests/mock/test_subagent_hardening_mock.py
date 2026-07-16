@@ -3699,6 +3699,33 @@ def test_task_contract_rejects_bad_max_tool_calls_before_llm(tmp_path, monkeypat
     assert "not an integer" in fractional
 
 
+@pytest.mark.parametrize("source", ["nested", "persona"])
+def test_task_contract_rejects_unknown_fields_before_llm(tmp_path, monkeypatch, source):
+    _write_unit_persona(tmp_path, monkeypatch)
+    goal = json.dumps({
+        "objective": "bounded task",
+        "task_contract": {"objective": "bounded task", "max_tools_calls": 0},
+    })
+    if source == "persona":
+        goal = "bounded task"
+        cfg_path = Path(subagent.PERSONA_DIR) / "unit.json"
+        cfg = json.loads(cfg_path.read_text())
+        cfg["task_contract"] = {"max_tools_calls": 0}
+        cfg_path.write_text(json.dumps(cfg))
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")),
+    )
+
+    payload = json.loads(subagent.dispatch(goal, "write-file", "unit", max_turns=1))
+
+    assert payload["status"] == "error"
+    assert "unknown field(s): ['max_tools_calls']" in payload["summary"]
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["status"] == "contract_invalid"
+
+
 @pytest.mark.parametrize("raw_quota", [25, "25", "9" * 5000])
 def test_task_contract_rejects_max_tool_calls_above_global_limit_before_llm(
     tmp_path, monkeypatch, raw_quota

@@ -55,6 +55,8 @@ and returns a single-string digest via its own `emit` instruction.
   `max_tool_calls` must be a non-negative integer no greater than the global
   `OMEGACLAW_SUBAGENT_MAX_TOOL_CALLS` limit; oversized decimal strings fail
   closed before integer conversion.
+  Nested and persona task contracts use a closed schema; unknown or misspelled
+  fields fail closed before worker setup instead of being silently ignored.
   `allowed_paths` entries must be bounded workspace-relative paths without
   parent-directory traversal or control characters. Contract fields are bounded
   and validated before any worker LLM call.
