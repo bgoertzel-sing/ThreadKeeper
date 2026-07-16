@@ -794,6 +794,30 @@ def test_persona_config_task_contract_requires_json_object(
         subagent.load_persona_config("unit")
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("persona_file", "unit\u2028spoof.metta"),
+        ("provider", "Open\u202eAI"),
+        ("model", "safe\ud800model"),
+        ("node_role", "local\x00cloud"),
+        ("endpoint_kind", "openai\ufeff_compatible"),
+        ("base_url", "https://example.invalid/\u2029forged"),
+    ],
+)
+def test_persona_config_rejects_unsafe_control_text(
+    tmp_path, monkeypatch, field, value
+):
+    persona_dir = _write_unit_persona(tmp_path, monkeypatch)
+    config_path = persona_dir / "unit.json"
+    config = json.loads(config_path.read_text())
+    config[field] = value
+    config_path.write_text(json.dumps(config))
+
+    with pytest.raises(ValueError, match=rf"field '{field}'.*control characters"):
+        subagent.load_persona_config("unit")
+
+
 def test_persona_config_rejects_symlink_before_read(tmp_path, monkeypatch):
     persona_dir = tmp_path / "personas"
     persona_dir.mkdir()

@@ -2573,6 +2573,10 @@ def load_persona_config(persona_key):
                 f"persona config '{persona_key}.json' field '{field}' exceeds "
                 f"OMEGACLAW_SUBAGENT_MAX_PERSONA_SCALAR_CHARS={_SUBAGENT_MAX_PERSONA_SCALAR_CHARS}"
             )
+        if _contains_text_control(value):
+            raise ValueError(
+                f"persona config '{persona_key}.json' field '{field}' must not contain control characters"
+            )
     if "base_url" in cfg and cfg.get("base_url") is not None:
         value = cfg.get("base_url")
         if not isinstance(value, str):
@@ -2583,6 +2587,10 @@ def load_persona_config(persona_key):
             raise ValueError(
                 f"persona config '{persona_key}.json' field 'base_url' exceeds "
                 f"OMEGACLAW_SUBAGENT_MAX_PERSONA_SCALAR_CHARS={_SUBAGENT_MAX_PERSONA_SCALAR_CHARS}"
+            )
+        if _contains_text_control(value):
+            raise ValueError(
+                f"persona config '{persona_key}.json' field 'base_url' must not contain control characters"
             )
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", cfg.get("api_key_env", "")):
         raise ValueError(
