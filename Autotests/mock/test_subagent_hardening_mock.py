@@ -3719,6 +3719,38 @@ def test_dispatch_accepts_decimal_string_limits(tmp_path, monkeypatch):
     assert payload["summary"] == "done"
 
 
+@pytest.mark.parametrize(
+    ("goal", "tool_subset", "persona", "message"),
+    [
+        (False, "write-file", "unit", "goal must be a string"),
+        ("   ", "write-file", "unit", "goal must be a non-empty string"),
+        ("strict args", ["write-file"], "unit", "tool_subset_csv must be a string or null"),
+        ("strict args", "write-file", 7, "persona_key must be a string"),
+    ],
+)
+def test_dispatch_rejects_non_string_scalar_args_before_setup_or_llm(
+    tmp_path, monkeypatch, goal, tool_subset, persona, message
+):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        subagent,
+        "load_persona_config",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not load persona")),
+    )
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")),
+    )
+
+    payload = json.loads(subagent.dispatch(goal, tool_subset, persona, max_turns=1))
+
+    assert payload["status"] == "error"
+    assert message in payload["summary"]
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["status"] == "dispatch_args_invalid"
+
+
 def test_task_contract_rejects_bad_max_tool_calls_before_llm(tmp_path, monkeypatch):
     _write_unit_persona(tmp_path, monkeypatch)
     monkeypatch.setattr(

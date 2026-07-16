@@ -4046,6 +4046,29 @@ def dispatch(goal, tool_subset_csv, persona_key, max_turns=None,
             next_action="fix dispatch integer limits before retry",
         )
 
+    # Direct Python/MeTTa inputs are tool-boundary data. Do not stringify
+    # malformed scalar values or let ``.strip()`` raise after partial setup.
+    # Inline task contracts remain JSON encoded strings and are validated
+    # separately below.
+    scalar_errors = []
+    if not isinstance(goal, str):
+        scalar_errors.append("goal must be a string")
+    elif not goal.strip():
+        scalar_errors.append("goal must be a non-empty string")
+    if not isinstance(persona_key, str):
+        scalar_errors.append("persona_key must be a string")
+    if tool_subset_csv is not None and not isinstance(tool_subset_csv, str):
+        scalar_errors.append("tool_subset_csv must be a string or null")
+    if scalar_errors:
+        return _structured_setup_error(
+            "; ".join(scalar_errors),
+            persona_key if isinstance(persona_key, str) else "invalid",
+            goal if isinstance(goal, str) else "",
+            bounded_chars,
+            record_status="dispatch_args_invalid",
+            next_action="fix dispatch scalar arguments before retry",
+        )
+
     # 2. Load persona config
     try:
         cfg = load_persona_config(persona_key)
