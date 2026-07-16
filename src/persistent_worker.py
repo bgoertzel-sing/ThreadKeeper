@@ -38,6 +38,8 @@ INBOX_ITEM_VERSION = "threadkeeper.persistent-worker.inbox-item.v1"
 INBOX_CONSUMPTION_RECEIPT_VERSION = (
     "threadkeeper.persistent-worker.inbox-consumption-receipt.v1"
 )
+RESULT_DELIVERY_VERSION = "threadkeeper.persistent-worker.result-delivery.v1"
+RESULT_ACK_VERSION = "threadkeeper.persistent-worker.result-ack.v1"
 
 MAX_MANIFEST_BYTES = 262144
 MAX_EVENT_LOG_BYTES = 1048576
@@ -54,6 +56,9 @@ MAX_ATTEMPT_RESULT_RECEIPT_BYTES = 262144
 MAX_INBOX_ITEMS = 1000
 MAX_INBOX_ITEM_BYTES = 262144
 MAX_INBOX_CONSUMPTION_RECEIPT_BYTES = 65536
+MAX_RESULT_DELIVERIES = 1000
+MAX_RESULT_DELIVERY_BYTES = 262144
+MAX_RESULT_ACK_BYTES = 65536
 
 _ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
@@ -282,6 +287,227 @@ def _inbox_consumption_receipt_path(root, task_id, consumption_id):
         _task_directory(root, task_id), "inbox-consumption-receipts",
         f"{consumption_id}.json",
     )
+
+
+def _result_delivery_path(root, task_id, terminal_event_id):
+    _validate_id(terminal_event_id, "terminal event id")
+    return os.path.join(
+        _task_directory(root, task_id), "result-deliveries",
+        f"{terminal_event_id}.json",
+    )
+
+
+def _result_ack_path(root, task_id, terminal_event_id):
+    _validate_id(terminal_event_id, "terminal event id")
+    return os.path.join(
+        _task_directory(root, task_id), "result-acks",
+        f"{terminal_event_id}.json",
+    )
+
+
+def _terminal_event(root, task_id, terminal_event_id):
+    """Return the verified current terminal event or fail closed."""
+    manifest = _read_manifest(root, task_id)
+    events = _read_events(
+        os.path.join(_task_directory(root, task_id), "events.jsonl")
+    )
+    state, _version, _digest = _replay_events(manifest, events)
+    if not is_terminal(state) or not events:
+        raise ValueError("persistent-worker result task is not terminal")
+    event = events[-1]
+    if event.get("event_id") != terminal_event_id:
+        raise ValueError("persistent-worker result terminal event mismatch")
+    return event
+
+
+def _read_result_delivery(root, task_id, terminal_event_id):
+    delivery = _bounded_json_read(
+        _result_delivery_path(root, task_id, terminal_event_id),
+        MAX_RESULT_DELIVERY_BYTES,
+    )
+    expected_fields = {
+        "delivery_version", "task_id", "terminal_event_id",
+        "terminal_event_sha256", "manifest_sha256", "created_at",
+        "result", "result_sha256", "delivery_sha256",
+    }
+    if set(delivery) != expected_fields:
+        raise ValueError("persistent-worker result delivery schema mismatch")
+    if (delivery.get("delivery_version") != RESULT_DELIVERY_VERSION or
+            delivery.get("task_id") != task_id or
+            delivery.get("terminal_event_id") != terminal_event_id):
+        raise ValueError("persistent-worker result delivery identity mismatch")
+    for field in (
+        "terminal_event_sha256", "manifest_sha256", "result_sha256",
+    ):
+        if not _SHA256_RE.fullmatch(str(delivery.get(field, ""))):
+            raise ValueError("persistent-worker result delivery digest invalid")
+    _parse_timestamp(delivery.get("created_at"), "result delivery timestamp")
+    if not isinstance(delivery.get("result"), dict):
+        raise ValueError("persistent-worker delivered result must be an object")
+    if delivery["result_sha256"] != _sha256(delivery["result"]):
+        raise ValueError("persistent-worker delivered result integrity check failed")
+    digest = delivery.get("delivery_sha256")
+    unsigned = dict(delivery)
+    unsigned.pop("delivery_sha256", None)
+    if digest != _sha256(unsigned):
+        raise ValueError("persistent-worker result delivery integrity check failed")
+    return delivery
+
+
+def record_result_delivery(root, task_id, *, terminal_event_id, result,
+                           created_at=None):
+    """Persist one at-least-once parent delivery keyed by terminal event ID."""
+    _validate_id(terminal_event_id, "terminal event id")
+    if not isinstance(result, dict):
+        raise ValueError("persistent-worker delivered result must be an object")
+    event = _terminal_event(root, task_id, terminal_event_id)
+    result_sha256 = _sha256(result)
+    if event.get("payload_sha256") != result_sha256:
+        raise ValueError("persistent-worker result terminal payload mismatch")
+    manifest = _read_manifest(root, task_id)
+    timestamp = created_at or datetime.now(timezone.utc).isoformat()
+    _parse_timestamp(timestamp, "result delivery timestamp")
+    delivery = {
+        "delivery_version": RESULT_DELIVERY_VERSION,
+        "task_id": task_id,
+        "terminal_event_id": terminal_event_id,
+        "terminal_event_sha256": event["event_sha256"],
+        "manifest_sha256": manifest["manifest_sha256"],
+        "created_at": timestamp,
+        "result": result,
+        "result_sha256": result_sha256,
+    }
+    delivery["delivery_sha256"] = _sha256(delivery)
+    encoded = _canonical_bytes(delivery)
+    if len(encoded) > MAX_RESULT_DELIVERY_BYTES:
+        raise ValueError("persistent-worker result delivery exceeds byte limit")
+    directory = os.path.join(_task_directory(root, task_id), "result-deliveries")
+    _ensure_directory(directory)
+    path = _result_delivery_path(root, task_id, terminal_event_id)
+    try:
+        existing = _read_result_delivery(root, task_id, terminal_event_id)
+    except FileNotFoundError:
+        existing = None
+    if existing is not None:
+        if (existing["terminal_event_sha256"] != event["event_sha256"] or
+                existing["manifest_sha256"] != manifest["manifest_sha256"] or
+                existing["result_sha256"] != result_sha256):
+            raise ValueError("conflicting persistent-worker result delivery replay")
+        return existing
+    try:
+        entries = os.listdir(directory)
+    except FileNotFoundError:  # pragma: no cover - created immediately above
+        entries = []
+    if len(entries) >= MAX_RESULT_DELIVERIES:
+        raise ValueError("persistent-worker result delivery limit exceeded")
+    try:
+        _atomic_create(path, encoded)
+        return delivery
+    except FileExistsError:
+        existing = _read_result_delivery(root, task_id, terminal_event_id)
+        if (existing["terminal_event_sha256"] != event["event_sha256"] or
+                existing["manifest_sha256"] != manifest["manifest_sha256"] or
+                existing["result_sha256"] != result_sha256):
+            raise ValueError("conflicting persistent-worker result delivery replay")
+        return existing
+
+
+def _read_result_ack(root, task_id, terminal_event_id):
+    ack = _bounded_json_read(
+        _result_ack_path(root, task_id, terminal_event_id), MAX_RESULT_ACK_BYTES
+    )
+    expected_fields = {
+        "ack_version", "task_id", "terminal_event_id", "ack_id", "actor",
+        "delivery_sha256", "created_at", "ack_sha256",
+    }
+    if set(ack) != expected_fields:
+        raise ValueError("persistent-worker result acknowledgement schema mismatch")
+    if (ack.get("ack_version") != RESULT_ACK_VERSION or
+            ack.get("task_id") != task_id or
+            ack.get("terminal_event_id") != terminal_event_id):
+        raise ValueError("persistent-worker result acknowledgement identity mismatch")
+    _validate_id(ack.get("ack_id"), "result acknowledgement id")
+    _validate_id(ack.get("actor"), "result acknowledgement actor")
+    if not _SHA256_RE.fullmatch(str(ack.get("delivery_sha256", ""))):
+        raise ValueError("persistent-worker result acknowledgement digest invalid")
+    _parse_timestamp(ack.get("created_at"), "result acknowledgement timestamp")
+    digest = ack.get("ack_sha256")
+    unsigned = dict(ack)
+    unsigned.pop("ack_sha256", None)
+    if digest != _sha256(unsigned):
+        raise ValueError(
+            "persistent-worker result acknowledgement integrity check failed"
+        )
+    return ack
+
+
+def acknowledge_result_delivery(root, task_id, *, terminal_event_id, ack_id,
+                                actor="parent", created_at=None):
+    """Idempotently acknowledge the exact immutable terminal delivery."""
+    _validate_id(terminal_event_id, "terminal event id")
+    _validate_id(ack_id, "result acknowledgement id")
+    _validate_id(actor, "result acknowledgement actor")
+    delivery = _read_result_delivery(root, task_id, terminal_event_id)
+    event = _terminal_event(root, task_id, terminal_event_id)
+    if delivery["terminal_event_sha256"] != event["event_sha256"]:
+        raise ValueError("persistent-worker result delivery event mismatch")
+    timestamp = created_at or datetime.now(timezone.utc).isoformat()
+    _parse_timestamp(timestamp, "result acknowledgement timestamp")
+    ack = {
+        "ack_version": RESULT_ACK_VERSION,
+        "task_id": task_id,
+        "terminal_event_id": terminal_event_id,
+        "ack_id": ack_id,
+        "actor": actor,
+        "delivery_sha256": delivery["delivery_sha256"],
+        "created_at": timestamp,
+    }
+    ack["ack_sha256"] = _sha256(ack)
+    encoded = _canonical_bytes(ack)
+    if len(encoded) > MAX_RESULT_ACK_BYTES:
+        raise ValueError("persistent-worker result acknowledgement exceeds byte limit")
+    path = _result_ack_path(root, task_id, terminal_event_id)
+    try:
+        _atomic_create(path, encoded)
+        return ack
+    except FileExistsError:
+        existing = _read_result_ack(root, task_id, terminal_event_id)
+        if (existing["ack_id"] != ack_id or existing["actor"] != actor or
+                existing["delivery_sha256"] != delivery["delivery_sha256"]):
+            raise ValueError(
+                "conflicting persistent-worker result acknowledgement replay"
+            )
+        return existing
+
+
+def list_pending_result_deliveries(root, task_id):
+    """Return verified unacknowledged deliveries for bounded parent polling."""
+    _read_manifest(root, task_id)
+    directory = os.path.join(_task_directory(root, task_id), "result-deliveries")
+    try:
+        entries = os.listdir(directory)
+    except FileNotFoundError:
+        return []
+    if len(entries) > MAX_RESULT_DELIVERIES:
+        raise ValueError("persistent-worker result delivery limit exceeded")
+    pending = []
+    for entry in sorted(entries):
+        if not entry.endswith(".json"):
+            raise ValueError("invalid persistent-worker result delivery entry")
+        event_id = entry[:-5]
+        delivery = _read_result_delivery(root, task_id, event_id)
+        event = _terminal_event(root, task_id, event_id)
+        if (delivery["terminal_event_sha256"] != event["event_sha256"] or
+                delivery["result_sha256"] != event["payload_sha256"]):
+            raise ValueError("persistent-worker result delivery event mismatch")
+        try:
+            ack = _read_result_ack(root, task_id, event_id)
+        except FileNotFoundError:
+            pending.append(delivery)
+            continue
+        if ack["delivery_sha256"] != delivery["delivery_sha256"]:
+            raise ValueError("persistent-worker result acknowledgement mismatch")
+    return pending
 
 
 def _read_inbox_item(root, task_id, item_id):

@@ -218,6 +218,115 @@ class PersistentWorkerStorageTests(unittest.TestCase):
                 new_state=target, actor="worker",
             )
 
+    def terminal_result_fixture(self):
+        result = {
+            "summary": "provider-free result",
+            "transcript_path": "memory/subagent-runs/task-1.json",
+        }
+        lifecycle.create_task_manifest(self.root, self.manifest())
+        for event_id, expected, prior, target, payload_sha256 in (
+            ("queued-1", 0, "CREATED", "QUEUED", ""),
+            ("claim-1", 1, "QUEUED", "CLAIMED", ""),
+            ("running-1", 2, "CLAIMED", "RUNNING", ""),
+            ("complete-1", 3, "RUNNING", "COMPLETED",
+             lifecycle._sha256(result)),
+        ):
+            lifecycle.append_task_event(
+                self.root, "task-1", event_id=event_id,
+                expected_version=expected, prior_state=prior,
+                new_state=target, actor="worker",
+                payload_sha256=payload_sha256,
+            )
+        return result
+
+    def test_result_delivery_is_event_bound_and_acknowledged_once(self):
+        result = self.terminal_result_fixture()
+        delivery = lifecycle.record_result_delivery(
+            self.root, "task-1", terminal_event_id="complete-1",
+            result=result, created_at="2026-07-15T12:10:00+00:00",
+        )
+        replay = lifecycle.record_result_delivery(
+            self.root, "task-1", terminal_event_id="complete-1",
+            result=result, created_at="2026-07-15T12:11:00+00:00",
+        )
+        self.assertEqual(replay, delivery)
+        self.assertEqual(
+            lifecycle.list_pending_result_deliveries(self.root, "task-1"),
+            [delivery],
+        )
+        ack = lifecycle.acknowledge_result_delivery(
+            self.root, "task-1", terminal_event_id="complete-1",
+            ack_id="ack-1", created_at="2026-07-15T12:12:00+00:00",
+        )
+        ack_replay = lifecycle.acknowledge_result_delivery(
+            self.root, "task-1", terminal_event_id="complete-1",
+            ack_id="ack-1", created_at="2026-07-15T12:13:00+00:00",
+        )
+        self.assertEqual(ack_replay, ack)
+        self.assertEqual(ack["delivery_sha256"], delivery["delivery_sha256"])
+        self.assertEqual(
+            lifecycle.list_pending_result_deliveries(self.root, "task-1"), []
+        )
+
+    def test_result_delivery_rejects_nonterminal_stale_or_wrong_payload(self):
+        lifecycle.create_task_manifest(self.root, self.manifest())
+        with self.assertRaisesRegex(ValueError, "not terminal"):
+            lifecycle.record_result_delivery(
+                self.root, "task-1", terminal_event_id="complete-1", result={}
+            )
+        self.temporary.cleanup()
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = self.temporary.name
+        result = self.terminal_result_fixture()
+        with self.assertRaisesRegex(ValueError, "event mismatch"):
+            lifecycle.record_result_delivery(
+                self.root, "task-1", terminal_event_id="running-1",
+                result=result,
+            )
+        with self.assertRaisesRegex(ValueError, "payload mismatch"):
+            lifecycle.record_result_delivery(
+                self.root, "task-1", terminal_event_id="complete-1",
+                result={"summary": "substituted"},
+            )
+
+    def test_result_delivery_and_ack_tampering_or_conflict_fail_closed(self):
+        result = self.terminal_result_fixture()
+        lifecycle.record_result_delivery(
+            self.root, "task-1", terminal_event_id="complete-1", result=result
+        )
+        lifecycle.acknowledge_result_delivery(
+            self.root, "task-1", terminal_event_id="complete-1", ack_id="ack-1"
+        )
+        with self.assertRaisesRegex(ValueError, "conflicting"):
+            lifecycle.acknowledge_result_delivery(
+                self.root, "task-1", terminal_event_id="complete-1",
+                ack_id="ack-2",
+            )
+        ack_path = lifecycle._result_ack_path(
+            self.root, "task-1", "complete-1"
+        )
+        with open(ack_path, "r", encoding="utf-8") as source:
+            ack = json.load(source)
+        ack["actor"] = "forged"
+        with open(ack_path, "w", encoding="utf-8") as output:
+            json.dump(ack, output)
+        with self.assertRaisesRegex(ValueError, "integrity"):
+            lifecycle.list_pending_result_deliveries(self.root, "task-1")
+
+        delivery_path = lifecycle._result_delivery_path(
+            self.root, "task-1", "complete-1"
+        )
+        with open(delivery_path, "r", encoding="utf-8") as source:
+            delivery = json.load(source)
+        delivery["result"]["summary"] = "forged"
+        with open(delivery_path, "w", encoding="utf-8") as output:
+            json.dump(delivery, output)
+        with self.assertRaisesRegex(ValueError, "integrity"):
+            lifecycle.record_result_delivery(
+                self.root, "task-1", terminal_event_id="complete-1",
+                result=result,
+            )
+
     def test_inbox_item_is_bounded_immutable_and_restart_readable(self):
         self.waiting_input_fixture()
         item = lifecycle.record_inbox_item(

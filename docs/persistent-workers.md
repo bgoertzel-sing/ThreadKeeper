@@ -159,8 +159,8 @@ loop with lock/status metadata, stale-lock reporting, stop files/signals,
 dispatch cancellation, task contracts, quotas, token accounting, transcript
 records, hash-chained indexes, patch-proposal mode, and adjudication candidates.
 
-The remaining gap is result delivery/acknowledgement and supervisor integration. The
-provider-free core now
+The remaining gap is supervisor integration and mechanically observed
+runtime/tool accounting. The provider-free core now
 has stable spawn/status/cancel surfaces, immutable attempt leases and
 checkpoint chains, stale-attempt recovery assessment/recording, and an explicit
 provider-free requeue effect. It also validates a closed set of positive task
@@ -174,7 +174,10 @@ effect; receipt and token-total tampering fail closed. Bounded inbox items can
 now be explicitly consumed: the consumption receipt binds the manifest, source
 event, exact item, and queue digest before lifecycle CAS, and crash retry reuses
 that receipt without repeating enqueue. The item is queued as labeled untrusted
-task context. Recovery intentionally stops at
+task context. Terminal results are delivered through bounded immutable records
+keyed to their exact terminal event and result digest; separate self-hashed
+parent acknowledgements make polling at-least-once and consumption idempotent.
+Recovery intentionally stops at
 `FAILED_RETRYABLE`; `requeue_persistent` separately verifies lineage, recreates
 the bounded queue record, and CAS-records its digest. Requeue may not be
 inferred from an expired lease.
@@ -230,10 +233,15 @@ inferred from an expired lease.
    to its current source event; duplicate IDs replay, while conflicts and
    tampering fail closed. `consume_inbox_item` explicitly recreates the bounded
    queue record and writes a self-hashed, item-bound receipt before the
-   `WAITING_INPUT -> QUEUED` CAS event. Next, add result-delivery
-   acknowledgements, then extend automatic accounting to
-   mechanically observed runtime/tool counters as those compact fields become
-   available from the queue runner.
+   `WAITING_INPUT -> QUEUED` CAS event. Terminal results are stored as bounded
+   immutable deliveries keyed to the exact terminal event ID and payload
+   digest. Parent
+   polling verifies that event/result lineage, returns only unacknowledged
+   deliveries, and writes a separate immutable self-hashed acknowledgement
+   bound to the delivery digest. Replays are idempotent; conflicting IDs,
+   stale events, substituted payloads, and tampering fail closed. Next, extend
+   automatic accounting to mechanically observed runtime/tool counters as
+   those compact fields become available from the queue runner.
 5. **Supervisor and ProtoMegaBot2 canary**: provider-free boundary/restart/
    cancellation/intervention suite first; then deploy only to ProtoMegaBot2's
    isolated paths. Live provider/Telegram use remains separately gated.
