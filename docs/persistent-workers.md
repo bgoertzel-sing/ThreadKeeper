@@ -159,7 +159,7 @@ loop with lock/status metadata, stale-lock reporting, stop files/signals,
 dispatch cancellation, task contracts, quotas, token accounting, transcript
 records, hash-chained indexes, patch-proposal mode, and adjudication candidates.
 
-The remaining gap is inbox/result delivery and supervisor integration. The
+The remaining gap is result delivery/acknowledgement and supervisor integration. The
 provider-free core now
 has stable spawn/status/cancel surfaces, immutable attempt leases and
 checkpoint chains, stale-attempt recovery assessment/recording, and an explicit
@@ -170,7 +170,11 @@ an exhausted limit blocks claim and explicit requeue before queue/provider/tool
 effects. Completed queued attempts now create a bounded immutable result receipt
 before their token counters are appended to the ledger. If ledger append fails,
 a matching claim retry replays the verified receipt without repeating the queue
-effect; receipt and token-total tampering fail closed. Recovery intentionally stops at
+effect; receipt and token-total tampering fail closed. Bounded inbox items can
+now be explicitly consumed: the consumption receipt binds the manifest, source
+event, exact item, and queue digest before lifecycle CAS, and crash retry reuses
+that receipt without repeating enqueue. The item is queued as labeled untrusted
+task context. Recovery intentionally stops at
 `FAILED_RETRYABLE`; `requeue_persistent` separately verifies lineage, recreates
 the bounded queue record, and CAS-records its digest. Requeue may not be
 inferred from an expired lease.
@@ -221,11 +225,13 @@ inferred from an expired lease.
    lineage checks, and pre-claim/requeue exhaustion gates. Completed queued
    attempts persist a self-hashed result receipt and automatically account
    strict input/output/total-token counters. Ledger-write retry reuses that
-  receipt and never repeats the queued effect. Immutable bounded inbox items
+   receipt and never repeats the queued effect. Immutable bounded inbox items
    are now accepted only while the task is `WAITING_INPUT` and only when bound
    to its current source event; duplicate IDs replay, while conflicts and
-   tampering fail closed. Next, add the separate inbox consumption/requeue and
-   result-delivery acknowledgements, then extend automatic accounting to
+   tampering fail closed. `consume_inbox_item` explicitly recreates the bounded
+   queue record and writes a self-hashed, item-bound receipt before the
+   `WAITING_INPUT -> QUEUED` CAS event. Next, add result-delivery
+   acknowledgements, then extend automatic accounting to
    mechanically observed runtime/tool counters as those compact fields become
    available from the queue runner.
 5. **Supervisor and ProtoMegaBot2 canary**: provider-free boundary/restart/

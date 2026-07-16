@@ -276,6 +276,116 @@ class PersistentWorkerStorageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "integrity"):
             lifecycle.list_inbox_items(self.root, "task-1")
 
+    def test_inbox_consumption_requeues_once_with_verified_receipt(self):
+        self.waiting_input_fixture()
+        item = lifecycle.record_inbox_item(
+            self.root, "task-1", item_id="input-1",
+            source_event_id="waiting-1", actor="parent",
+            payload={"message": "continue"},
+        )
+        calls = []
+
+        def enqueue(*args):
+            calls.append(args)
+            return self.queued_result(*args)
+
+        consumed = lifecycle.consume_inbox_item(
+            self.root, "task-1", consumption_id="consume-1",
+            item_id="input-1", enqueue=enqueue,
+        )
+        replay = lifecycle.consume_inbox_item(
+            self.root, "task-1", consumption_id="consume-1",
+            item_id="input-1", enqueue=enqueue,
+        )
+        self.assertEqual(consumed, replay)
+        self.assertEqual(consumed["task"]["state"], "QUEUED")
+        self.assertEqual(consumed["receipt"]["inbox_sha256"],
+                         item["inbox_sha256"])
+        self.assertEqual(len(calls), 1)
+        self.assertIn("Verified persistent-worker inbox input", calls[0][1])
+        self.assertIn(item["inbox_sha256"], calls[0][1])
+        self.assertIn('"message":"continue"', calls[0][1])
+        with open(os.path.join(self.root, "tasks", "task-1", "events.jsonl"),
+                  "r", encoding="utf-8") as source:
+            event = json.loads(source.readlines()[-1])
+        self.assertEqual(event["event_id"], "consume-1")
+        self.assertEqual(event["payload_sha256"],
+                         consumed["receipt"]["receipt_sha256"])
+
+    def test_inbox_consumption_receipt_closes_enqueue_event_crash_window(self):
+        self.waiting_input_fixture()
+        lifecycle.record_inbox_item(
+            self.root, "task-1", item_id="input-1",
+            source_event_id="waiting-1", actor="parent", payload={},
+        )
+        calls = []
+        real_append = lifecycle.append_task_event
+
+        def enqueue(*args):
+            calls.append(args)
+            return self.queued_result(*args)
+
+        with mock.patch.object(
+            lifecycle, "append_task_event", side_effect=RuntimeError("crash")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "crash"):
+                lifecycle.consume_inbox_item(
+                    self.root, "task-1", consumption_id="consume-1",
+                    item_id="input-1", enqueue=enqueue,
+                )
+        self.assertEqual(lifecycle.worker_status(self.root, "task-1")["state"],
+                         "WAITING_INPUT")
+        with mock.patch.object(lifecycle, "append_task_event", wraps=real_append):
+            result = lifecycle.consume_inbox_item(
+                self.root, "task-1", consumption_id="consume-1",
+                item_id="input-1", enqueue=enqueue,
+            )
+        self.assertEqual(result["task"]["state"], "QUEUED")
+        self.assertEqual(len(calls), 1)
+
+    def test_inbox_consumption_conflict_and_tampering_fail_closed(self):
+        self.waiting_input_fixture()
+        lifecycle.record_inbox_item(
+            self.root, "task-1", item_id="input-1",
+            source_event_id="waiting-1", actor="parent", payload={"value": 1},
+        )
+        lifecycle.record_inbox_item(
+            self.root, "task-1", item_id="input-2",
+            source_event_id="waiting-1", actor="parent", payload={"value": 2},
+        )
+        real_append = lifecycle.append_task_event
+        with mock.patch.object(
+            lifecycle, "append_task_event", side_effect=RuntimeError("crash")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "crash"):
+                lifecycle.consume_inbox_item(
+                    self.root, "task-1", consumption_id="consume-1",
+                    item_id="input-1", enqueue=self.queued_result,
+                )
+        with self.assertRaisesRegex(ValueError, "conflicting"):
+            lifecycle.consume_inbox_item(
+                self.root, "task-1", consumption_id="consume-1",
+                item_id="input-2", enqueue=lambda *_args: self.fail(
+                    "queue effect repeated"
+                ),
+            )
+        path = lifecycle._inbox_consumption_receipt_path(
+            self.root, "task-1", "consume-1"
+        )
+        with open(path, "r", encoding="utf-8") as source:
+            receipt = json.load(source)
+        receipt["queue_sha256"] = "b" * 64
+        with open(path, "w", encoding="utf-8") as output:
+            json.dump(receipt, output)
+        with mock.patch.object(lifecycle, "append_task_event", wraps=real_append):
+            with self.assertRaisesRegex(ValueError, "integrity"):
+                lifecycle.consume_inbox_item(
+                    self.root, "task-1", consumption_id="consume-1",
+                    item_id="input-1", enqueue=lambda *_args: self.fail(
+                        "queue effect repeated"
+                    ),
+                )
+
     def test_spawn_is_provider_free_idempotent_and_uses_enqueue_seam(self):
         calls = []
 

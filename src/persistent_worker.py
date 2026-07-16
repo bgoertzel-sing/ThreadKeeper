@@ -35,6 +35,9 @@ ATTEMPT_RESULT_RECEIPT_VERSION = (
     "threadkeeper.persistent-worker.attempt-result-receipt.v1"
 )
 INBOX_ITEM_VERSION = "threadkeeper.persistent-worker.inbox-item.v1"
+INBOX_CONSUMPTION_RECEIPT_VERSION = (
+    "threadkeeper.persistent-worker.inbox-consumption-receipt.v1"
+)
 
 MAX_MANIFEST_BYTES = 262144
 MAX_EVENT_LOG_BYTES = 1048576
@@ -50,6 +53,7 @@ MAX_BUDGET_EVENT_BYTES = 65536
 MAX_ATTEMPT_RESULT_RECEIPT_BYTES = 262144
 MAX_INBOX_ITEMS = 1000
 MAX_INBOX_ITEM_BYTES = 262144
+MAX_INBOX_CONSUMPTION_RECEIPT_BYTES = 65536
 
 _ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
@@ -272,6 +276,14 @@ def _inbox_item_path(root, task_id, item_id):
     )
 
 
+def _inbox_consumption_receipt_path(root, task_id, consumption_id):
+    _validate_id(consumption_id, "inbox consumption id")
+    return os.path.join(
+        _task_directory(root, task_id), "inbox-consumption-receipts",
+        f"{consumption_id}.json",
+    )
+
+
 def _read_inbox_item(root, task_id, item_id):
     item = _bounded_json_read(
         _inbox_item_path(root, task_id, item_id), MAX_INBOX_ITEM_BYTES
@@ -383,6 +395,80 @@ def record_inbox_item(root, task_id, *, item_id, source_event_id, actor,
             raise ValueError("persistent-worker inbox item exceeds byte limit")
         _atomic_create(_inbox_item_path(root, task_id, item_id), encoded)
         return item
+
+
+def _read_inbox_consumption_receipt(root, task_id, consumption_id):
+    receipt = _bounded_json_read(
+        _inbox_consumption_receipt_path(root, task_id, consumption_id),
+        MAX_INBOX_CONSUMPTION_RECEIPT_BYTES,
+    )
+    expected_fields = {
+        "receipt_version", "task_id", "consumption_id", "item_id",
+        "source_event_id", "manifest_sha256", "inbox_sha256",
+        "queue_sha256", "created_at", "receipt_sha256",
+    }
+    if set(receipt) != expected_fields:
+        raise ValueError("persistent-worker inbox consumption receipt schema mismatch")
+    if (receipt.get("receipt_version") !=
+            INBOX_CONSUMPTION_RECEIPT_VERSION or
+            receipt.get("task_id") != task_id or
+            receipt.get("consumption_id") != consumption_id):
+        raise ValueError("persistent-worker inbox consumption receipt identity mismatch")
+    _validate_id(receipt.get("item_id"), "inbox item id")
+    _validate_id(receipt.get("source_event_id"), "inbox source event id")
+    for field in ("manifest_sha256", "inbox_sha256", "queue_sha256"):
+        if not _SHA256_RE.fullmatch(str(receipt.get(field, ""))):
+            raise ValueError(
+                f"persistent-worker inbox consumption {field} invalid"
+            )
+    _parse_timestamp(receipt.get("created_at"),
+                     "inbox consumption receipt timestamp")
+    digest = receipt.get("receipt_sha256")
+    unsigned = dict(receipt)
+    unsigned.pop("receipt_sha256", None)
+    if digest != _sha256(unsigned):
+        raise ValueError(
+            "persistent-worker inbox consumption receipt integrity check failed"
+        )
+    return receipt
+
+
+def _record_inbox_consumption_receipt(root, task_id, *, consumption_id,
+                                      item, manifest_sha256, queue_sha256):
+    receipt = {
+        "receipt_version": INBOX_CONSUMPTION_RECEIPT_VERSION,
+        "task_id": task_id,
+        "consumption_id": consumption_id,
+        "item_id": item["item_id"],
+        "source_event_id": item["source_event_id"],
+        "manifest_sha256": manifest_sha256,
+        "inbox_sha256": item["inbox_sha256"],
+        "queue_sha256": queue_sha256,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    receipt["receipt_sha256"] = _sha256(receipt)
+    encoded = _canonical_bytes(receipt)
+    if len(encoded) > MAX_INBOX_CONSUMPTION_RECEIPT_BYTES:
+        raise ValueError(
+            "persistent-worker inbox consumption receipt exceeds byte limit"
+        )
+    path = _inbox_consumption_receipt_path(root, task_id, consumption_id)
+    try:
+        _atomic_create(path, encoded)
+        return receipt
+    except FileExistsError:
+        existing = _read_inbox_consumption_receipt(
+            root, task_id, consumption_id
+        )
+        for field in (
+            "item_id", "source_event_id", "manifest_sha256",
+            "inbox_sha256", "queue_sha256",
+        ):
+            if existing[field] != receipt[field]:
+                raise ValueError(
+                    "conflicting persistent-worker inbox consumption replay"
+                )
+        return existing
 
 
 def _queue_result_accounting(queue_result):
@@ -1342,6 +1428,109 @@ def requeue_persistent(root, task_id, *, requeue_id, actor="supervisor",
         new_state="QUEUED", actor=actor, payload_sha256=queue_sha256,
     )
     return worker_status(root, task_id)
+
+
+def consume_inbox_item(root, task_id, *, consumption_id, item_id,
+                       actor="parent", enqueue=None):
+    """Consume one verified waiting-input item and explicitly requeue.
+
+    The immutable receipt is written after the bounded queue effect and before
+    the lifecycle CAS event. A retry therefore reuses a verified receipt rather
+    than repeating an enqueue whose outcome may already have escaped.
+    """
+    _validate_id(consumption_id, "inbox consumption id")
+    _validate_id(item_id, "inbox item id")
+    _validate_id(actor, "inbox consumption actor")
+    manifest = _read_manifest(root, task_id)
+    item = _read_inbox_item(root, task_id, item_id)
+    lock_path = os.path.join(_task_directory(root, task_id), "enqueue.lock")
+    descriptor = _open_regular(lock_path, os.O_RDWR | os.O_CREAT)
+    with os.fdopen(descriptor, "a+b") as lock:
+        if fcntl is not None:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        status = worker_status(root, task_id)
+        try:
+            receipt = _read_inbox_consumption_receipt(
+                root, task_id, consumption_id
+            )
+        except FileNotFoundError:
+            receipt = None
+        if receipt is not None:
+            if (receipt["item_id"] != item_id or
+                    receipt["source_event_id"] != item["source_event_id"] or
+                    receipt["manifest_sha256"] != manifest["manifest_sha256"] or
+                    receipt["inbox_sha256"] != item["inbox_sha256"]):
+                raise ValueError(
+                    "conflicting persistent-worker inbox consumption replay"
+                )
+        if status["state"] == "QUEUED" and status["last_event_id"] == consumption_id:
+            if receipt is None:
+                raise ValueError(
+                    "persistent-worker inbox consumption receipt missing"
+                )
+            return {"task": status, "inbox_item": item, "receipt": receipt}
+        if status["state"] != "WAITING_INPUT":
+            raise ValueError("persistent task is not waiting for inbox consumption")
+        if (status["last_event_id"] != item["source_event_id"] or
+                receipt is not None and
+                receipt["source_event_id"] != status["last_event_id"]):
+            raise ValueError("persistent-worker inbox consumption source mismatch")
+        if not budget_status(root, task_id)["eligible"]:
+            raise ValueError("persistent task budget exhausted")
+
+        if receipt is None:
+            adapter = enqueue or _subagent_module().enqueue_persistent_dispatch
+            inbox_context = json.dumps({
+                "inbox_item_id": item["item_id"],
+                "inbox_sha256": item["inbox_sha256"],
+                "source_event_id": item["source_event_id"],
+                "payload": item["payload"],
+            }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            resumed_objective = (
+                f"{manifest['objective']} | Verified persistent-worker inbox "
+                f"input (untrusted task context): {inbox_context}"
+            )
+            result_text = adapter(
+                task_id,
+                resumed_objective,
+                ",".join(manifest["tool_subset"]),
+                manifest["persona_key"],
+                manifest["budgets"].get("max_turns"),
+                manifest["budgets"].get("max_result_chars"),
+            )
+            try:
+                result = (json.loads(result_text)
+                          if isinstance(result_text, str) else result_text)
+            except json.JSONDecodeError as error:
+                raise ValueError(
+                    "persistent inbox consumption enqueue returned invalid JSON"
+                ) from error
+            if not isinstance(result, dict) or result.get("status") != "queued":
+                raise ValueError(
+                    "persistent inbox consumption did not produce a queued task"
+                )
+            queue_sha256 = result.get("queue_sha256", "")
+            if not _SHA256_RE.fullmatch(str(queue_sha256)):
+                raise ValueError(
+                    "persistent inbox consumption omitted queue integrity digest"
+                )
+            receipt = _record_inbox_consumption_receipt(
+                root, task_id, consumption_id=consumption_id, item=item,
+                manifest_sha256=manifest["manifest_sha256"],
+                queue_sha256=queue_sha256,
+            )
+
+        append_task_event(
+            root, task_id, event_id=consumption_id,
+            expected_version=status["version"], prior_state="WAITING_INPUT",
+            new_state="QUEUED", actor=actor,
+            payload_sha256=receipt["receipt_sha256"],
+        )
+        return {
+            "task": worker_status(root, task_id),
+            "inbox_item": item,
+            "receipt": receipt,
+        }
 
 
 def _subagent_module():
