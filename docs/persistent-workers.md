@@ -221,7 +221,10 @@ inferred from an expired lease.
    lineage checks, and pre-claim/requeue exhaustion gates. Completed queued
    attempts persist a self-hashed result receipt and automatically account
    strict input/output/total-token counters. Ledger-write retry reuses that
-   receipt and never repeats the queued effect. Next, add idempotent inbox and
+  receipt and never repeats the queued effect. Immutable bounded inbox items
+   are now accepted only while the task is `WAITING_INPUT` and only when bound
+   to its current source event; duplicate IDs replay, while conflicts and
+   tampering fail closed. Next, add the separate inbox consumption/requeue and
    result-delivery acknowledgements, then extend automatic accounting to
    mechanically observed runtime/tool counters as those compact fields become
    available from the queue runner.

@@ -204,6 +204,78 @@ class PersistentWorkerStorageTests(unittest.TestCase):
             "queue_path": f"queue/persistent-{task_id}.json",
         })
 
+    def waiting_input_fixture(self):
+        lifecycle.create_task_manifest(self.root, self.manifest())
+        for event_id, expected, prior, target in (
+            ("queued-1", 0, "CREATED", "QUEUED"),
+            ("claim-1", 1, "QUEUED", "CLAIMED"),
+            ("running-1", 2, "CLAIMED", "RUNNING"),
+            ("waiting-1", 3, "RUNNING", "WAITING_INPUT"),
+        ):
+            lifecycle.append_task_event(
+                self.root, "task-1", event_id=event_id,
+                expected_version=expected, prior_state=prior,
+                new_state=target, actor="worker",
+            )
+
+    def test_inbox_item_is_bounded_immutable_and_restart_readable(self):
+        self.waiting_input_fixture()
+        item = lifecycle.record_inbox_item(
+            self.root, "task-1", item_id="input-1",
+            source_event_id="waiting-1", actor="parent",
+            payload={"message": "continue", "correlation_id": "msg-1"},
+            created_at="2026-07-15T12:10:00+00:00",
+        )
+        replay = lifecycle.record_inbox_item(
+            self.root, "task-1", item_id="input-1",
+            source_event_id="waiting-1", actor="parent",
+            payload={"message": "continue", "correlation_id": "msg-1"},
+            created_at="2026-07-15T12:11:00+00:00",
+        )
+        self.assertEqual(replay, item)
+        self.assertEqual(lifecycle.list_inbox_items(self.root, "task-1"), [item])
+        self.assertEqual(item["sequence"], 1)
+        self.assertEqual(lifecycle.worker_status(self.root, "task-1")["state"],
+                         "WAITING_INPUT")
+
+    def test_inbox_rejects_ineligible_or_stale_source_event(self):
+        lifecycle.create_task_manifest(self.root, self.manifest())
+        with self.assertRaisesRegex(ValueError, "not waiting"):
+            lifecycle.record_inbox_item(
+                self.root, "task-1", item_id="input-1",
+                source_event_id="waiting-1", actor="parent", payload={},
+            )
+        self.temporary.cleanup()
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = self.temporary.name
+        self.waiting_input_fixture()
+        with self.assertRaisesRegex(ValueError, "source event mismatch"):
+            lifecycle.record_inbox_item(
+                self.root, "task-1", item_id="input-1",
+                source_event_id="running-1", actor="parent", payload={},
+            )
+
+    def test_inbox_duplicate_conflict_and_tampering_fail_closed(self):
+        self.waiting_input_fixture()
+        lifecycle.record_inbox_item(
+            self.root, "task-1", item_id="input-1",
+            source_event_id="waiting-1", actor="parent", payload={"value": 1},
+        )
+        with self.assertRaisesRegex(ValueError, "conflicting"):
+            lifecycle.record_inbox_item(
+                self.root, "task-1", item_id="input-1",
+                source_event_id="waiting-1", actor="parent",
+                payload={"value": 2},
+            )
+        path = lifecycle._inbox_item_path(self.root, "task-1", "input-1")
+        with open(path, "r", encoding="utf-8") as source:
+            item = json.load(source)
+        item["payload"]["value"] = 99
+        with open(path, "w", encoding="utf-8") as output:
+            json.dump(item, output)
+        with self.assertRaisesRegex(ValueError, "integrity"):
+            lifecycle.list_inbox_items(self.root, "task-1")
+
     def test_spawn_is_provider_free_idempotent_and_uses_enqueue_seam(self):
         calls = []
 

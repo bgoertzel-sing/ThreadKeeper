@@ -34,6 +34,7 @@ BUDGET_STATUS_VERSION = "threadkeeper.persistent-worker.budget-status.v1"
 ATTEMPT_RESULT_RECEIPT_VERSION = (
     "threadkeeper.persistent-worker.attempt-result-receipt.v1"
 )
+INBOX_ITEM_VERSION = "threadkeeper.persistent-worker.inbox-item.v1"
 
 MAX_MANIFEST_BYTES = 262144
 MAX_EVENT_LOG_BYTES = 1048576
@@ -47,6 +48,8 @@ MAX_ENQUEUE_RECEIPT_BYTES = 65536
 MAX_BUDGET_LOG_BYTES = 1048576
 MAX_BUDGET_EVENT_BYTES = 65536
 MAX_ATTEMPT_RESULT_RECEIPT_BYTES = 262144
+MAX_INBOX_ITEMS = 1000
+MAX_INBOX_ITEM_BYTES = 262144
 
 _ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
@@ -260,6 +263,126 @@ def _attempt_result_receipt_path(root, task_id, attempt_id):
         _task_directory(root, task_id), "attempt-result-receipts",
         f"{attempt_id}.json",
     )
+
+
+def _inbox_item_path(root, task_id, item_id):
+    _validate_id(item_id, "inbox item id")
+    return os.path.join(
+        _task_directory(root, task_id), "inbox", f"{item_id}.json"
+    )
+
+
+def _read_inbox_item(root, task_id, item_id):
+    item = _bounded_json_read(
+        _inbox_item_path(root, task_id, item_id), MAX_INBOX_ITEM_BYTES
+    )
+    expected_fields = {
+        "inbox_version", "task_id", "item_id", "sequence",
+        "source_event_id", "actor", "created_at", "payload",
+        "payload_sha256", "inbox_sha256",
+    }
+    if set(item) != expected_fields:
+        raise ValueError("persistent-worker inbox item schema mismatch")
+    if (item.get("inbox_version") != INBOX_ITEM_VERSION or
+            item.get("task_id") != task_id or item.get("item_id") != item_id):
+        raise ValueError("persistent-worker inbox item identity mismatch")
+    if (not isinstance(item.get("sequence"), int) or
+            isinstance(item.get("sequence"), bool) or item["sequence"] < 1):
+        raise ValueError("persistent-worker inbox item sequence invalid")
+    _validate_id(item.get("source_event_id"), "inbox source event id")
+    _validate_id(item.get("actor"), "inbox actor")
+    _parse_timestamp(item.get("created_at"), "inbox item timestamp")
+    if not isinstance(item.get("payload"), dict):
+        raise ValueError("persistent-worker inbox payload must be an object")
+    if item.get("payload_sha256") != _sha256(item["payload"]):
+        raise ValueError("persistent-worker inbox payload integrity check failed")
+    digest = item.get("inbox_sha256")
+    unsigned = dict(item)
+    unsigned.pop("inbox_sha256", None)
+    if digest != _sha256(unsigned):
+        raise ValueError("persistent-worker inbox item integrity check failed")
+    return item
+
+
+def list_inbox_items(root, task_id):
+    """Return the bounded verified inbox ordered by immutable sequence."""
+    _read_manifest(root, task_id)
+    directory = os.path.join(_task_directory(root, task_id), "inbox")
+    try:
+        entries = os.listdir(directory)
+    except FileNotFoundError:
+        return []
+    if len(entries) > MAX_INBOX_ITEMS:
+        raise ValueError("persistent-worker inbox item limit exceeded")
+    items = []
+    for entry in entries:
+        if not entry.endswith(".json"):
+            raise ValueError("invalid persistent-worker inbox entry")
+        item_id = entry[:-5]
+        items.append(_read_inbox_item(root, task_id, item_id))
+    items.sort(key=lambda item: item["sequence"])
+    if [item["sequence"] for item in items] != list(range(1, len(items) + 1)):
+        raise ValueError("persistent-worker inbox sequence mismatch")
+    return items
+
+
+def record_inbox_item(root, task_id, *, item_id, source_event_id, actor,
+                      payload, created_at=None):
+    """Atomically record authorized input for the current waiting task.
+
+    This is a storage receipt only: it deliberately performs no queue,
+    lifecycle, provider, or tool effect.
+    """
+    _validate_id(item_id, "inbox item id")
+    _validate_id(source_event_id, "inbox source event id")
+    _validate_id(actor, "inbox actor")
+    if not isinstance(payload, dict):
+        raise ValueError("persistent-worker inbox payload must be an object")
+    timestamp = created_at or datetime.now(timezone.utc).isoformat()
+    _parse_timestamp(timestamp, "inbox item timestamp")
+    directory = _task_directory(root, task_id)
+    _ensure_directory(directory)
+    lock_path = os.path.join(directory, "inbox.lock")
+    descriptor = _open_regular(lock_path, os.O_RDWR | os.O_CREAT)
+    with os.fdopen(descriptor, "a+b") as lock:
+        if fcntl is not None:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            existing = _read_inbox_item(root, task_id, item_id)
+        except FileNotFoundError:
+            existing = None
+        requested_payload_sha256 = _sha256(payload)
+        if existing is not None:
+            if (existing["source_event_id"] != source_event_id or
+                    existing["actor"] != actor or
+                    existing["payload_sha256"] != requested_payload_sha256):
+                raise ValueError("conflicting persistent-worker inbox replay")
+            return existing
+        status = worker_status(root, task_id)
+        if status["state"] != "WAITING_INPUT":
+            raise ValueError("persistent-worker inbox task is not waiting for input")
+        if status["last_event_id"] != source_event_id:
+            raise ValueError("persistent-worker inbox source event mismatch")
+        items = list_inbox_items(root, task_id)
+        if len(items) >= MAX_INBOX_ITEMS:
+            raise ValueError("persistent-worker inbox item limit exceeded")
+        item = {
+            "inbox_version": INBOX_ITEM_VERSION,
+            "task_id": task_id,
+            "item_id": item_id,
+            "sequence": len(items) + 1,
+            "source_event_id": source_event_id,
+            "actor": actor,
+            "created_at": timestamp,
+            "payload": payload,
+            "payload_sha256": requested_payload_sha256,
+        }
+        item["inbox_sha256"] = _sha256(item)
+        encoded = _canonical_bytes(item)
+        if len(encoded) > MAX_INBOX_ITEM_BYTES:
+            raise ValueError("persistent-worker inbox item exceeds byte limit")
+        _atomic_create(_inbox_item_path(root, task_id, item_id), encoded)
+        return item
 
 
 def _queue_result_accounting(queue_result):
