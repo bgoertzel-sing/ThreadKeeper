@@ -311,6 +311,9 @@ def _env_float(name, default, minimum=0.0):
 SUBAGENT_MAX_TURNS_HARD_CAP = _env_int("OMEGACLAW_SUBAGENT_MAX_TURNS", 8, minimum=1)
 SUBAGENT_MAX_DIGEST_CHARS = _env_int("OMEGACLAW_SUBAGENT_MAX_DIGEST_CHARS", 2000, minimum=100)
 SUBAGENT_DEFAULT_OUTPUT_TOKENS = 1500
+SUBAGENT_MAX_OUTPUT_TOKENS_HARD_CAP = _env_int(
+    "OMEGACLAW_SUBAGENT_MAX_OUTPUT_TOKENS", 8192, minimum=1,
+)
 
 # Per-subagent-iteration history cap. The subagent's internal history
 # is much smaller than the parent's (~4000 chars vs 30000) because
@@ -2602,6 +2605,40 @@ def load_persona_config(persona_key):
             raise ValueError(
                 f"persona config '{persona_key}.json' field 'persona_sha256' must be a 64-character hex SHA-256"
             )
+    if "max_output_tokens" in cfg:
+        value = cfg.get("max_output_tokens")
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 1
+            or value > SUBAGENT_MAX_OUTPUT_TOKENS_HARD_CAP
+        ):
+            raise ValueError(
+                f"persona config '{persona_key}.json' field 'max_output_tokens' "
+                f"must be an integer from 1 to {SUBAGENT_MAX_OUTPUT_TOKENS_HARD_CAP}"
+            )
+    if "default_tool_subset" in cfg:
+        value = cfg.get("default_tool_subset")
+        if not isinstance(value, list) or not value:
+            raise ValueError(
+                f"persona config '{persona_key}.json' field 'default_tool_subset' "
+                "must be a non-empty list"
+            )
+        if len(value) > _SUBAGENT_MAX_CONTRACT_ITEMS:
+            raise ValueError(
+                f"persona config '{persona_key}.json' field 'default_tool_subset' "
+                f"exceeds {_SUBAGENT_MAX_CONTRACT_ITEMS} items"
+            )
+        if any(
+            not isinstance(item, str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]+", item)
+            for item in value
+        ):
+            raise ValueError(
+                f"persona config '{persona_key}.json' field 'default_tool_subset' "
+                "must contain only safe tool-name strings"
+            )
+        parse_subset(",".join(value))
     role = _node_role(cfg)
     if role not in (_LOCAL_NODE_ROLES | _CLOUD_NODE_ROLES):
         raise ValueError(

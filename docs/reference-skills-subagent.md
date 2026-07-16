@@ -67,6 +67,11 @@ and returns a single-string digest via its own `emit` instruction.
   config specifies a `default_tool_subset`.
 - `persona_key` — name of the persona config (without `.json`
   extension), resolved against `memory/personas-subagent/`.
+  Persona `max_output_tokens` must be an integer between 1 and the
+  `OMEGACLAW_SUBAGENT_MAX_OUTPUT_TOKENS` hard cap (default 8,192), and a
+  configured `default_tool_subset` must be a non-empty list of registered,
+  v1-callable tool names. Invalid persona limits and defaults fail closed before
+  escalation/provider setup.
 - `max_turns` — hard cap on subagent iterations. Bounded by
   `OMEGACLAW_SUBAGENT_MAX_TURNS` (default 8). Optional in the
   three-argument form; defaults to 8. Direct Python/MeTTa dispatch accepts an

@@ -818,6 +818,37 @@ def test_persona_config_rejects_unsafe_control_text(
         subagent.load_persona_config("unit")
 
 
+@pytest.mark.parametrize("value", [True, 1.5, "100", 0, -1, 8193])
+def test_persona_config_rejects_invalid_max_output_tokens(
+    tmp_path, monkeypatch, value
+):
+    persona_dir = _write_unit_persona(tmp_path, monkeypatch)
+    config_path = persona_dir / "unit.json"
+    config = json.loads(config_path.read_text())
+    config["max_output_tokens"] = value
+    config_path.write_text(json.dumps(config))
+
+    with pytest.raises(ValueError, match="field 'max_output_tokens'.*1 to 8192"):
+        subagent.load_persona_config("unit")
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["read-file", [], ["read-file", 1], ["read-file\nwrite-file"], ["unknown-tool"]],
+)
+def test_persona_config_rejects_invalid_default_tool_subset(
+    tmp_path, monkeypatch, value
+):
+    persona_dir = _write_unit_persona(tmp_path, monkeypatch)
+    config_path = persona_dir / "unit.json"
+    config = json.loads(config_path.read_text())
+    config["default_tool_subset"] = value
+    config_path.write_text(json.dumps(config))
+
+    with pytest.raises(ValueError, match="default_tool_subset|unknown skill"):
+        subagent.load_persona_config("unit")
+
+
 def test_persona_config_rejects_symlink_before_read(tmp_path, monkeypatch):
     persona_dir = tmp_path / "personas"
     persona_dir.mkdir()
