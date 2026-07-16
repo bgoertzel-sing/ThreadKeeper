@@ -167,7 +167,10 @@ provider-free requeue effect. It also validates a closed set of positive task
 budget limits and keeps idempotent usage deltas in a bounded, hash-linked
 task-local ledger. Verified aggregate status reports consumed/remaining limits;
 an exhausted limit blocks claim and explicit requeue before queue/provider/tool
-effects. Recovery intentionally stops at
+effects. Completed queued attempts now create a bounded immutable result receipt
+before their token counters are appended to the ledger. If ledger append fails,
+a matching claim retry replays the verified receipt without repeating the queue
+effect; receipt and token-total tampering fail closed. Recovery intentionally stops at
 `FAILED_RETRYABLE`; `requeue_persistent` separately verifies lineage, recreates
 the bounded queue record, and CAS-records its digest. Requeue may not be
 inferred from an expired lease.
@@ -215,9 +218,13 @@ inferred from an expired lease.
    operations are serialized per task where file locking is available.
 4. **Budgets and inbox/results**: task-level attempt/token/time/tool accounting
    is implemented with bounded immutable usage events, idempotency IDs, attempt
-   lineage checks, and pre-claim/requeue exhaustion gates. Next, wire each
-   completed queued attempt's compact accounting into the ledger with a crash
-   receipt, then add idempotent inbox and result-delivery acknowledgements.
+   lineage checks, and pre-claim/requeue exhaustion gates. Completed queued
+   attempts persist a self-hashed result receipt and automatically account
+   strict input/output/total-token counters. Ledger-write retry reuses that
+   receipt and never repeats the queued effect. Next, add idempotent inbox and
+   result-delivery acknowledgements, then extend automatic accounting to
+   mechanically observed runtime/tool counters as those compact fields become
+   available from the queue runner.
 5. **Supervisor and ProtoMegaBot2 canary**: provider-free boundary/restart/
    cancellation/intervention suite first; then deploy only to ProtoMegaBot2's
    isolated paths. Live provider/Telegram use remains separately gated.

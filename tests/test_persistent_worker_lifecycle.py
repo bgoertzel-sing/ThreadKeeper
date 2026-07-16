@@ -421,6 +421,104 @@ class PersistentWorkerStorageTests(unittest.TestCase):
                 attempt_id="attempt-1", counters={"total_tokens": 41},
             )
 
+    def test_completed_queue_result_is_accounted_once_across_ledger_crash(self):
+        manifest = self.manifest()
+        manifest["budgets"]["max_total_tokens"] = 100
+        lifecycle.spawn_persistent(
+            self.root, manifest, spawn_id="spawn-1", enqueue=self.queued_result,
+        )
+        calls = []
+        queue_result = json.dumps({
+            "status": "ok",
+            "result": {"worker_token_usage": {
+                "input_tokens": 7, "output_tokens": 5, "total_tokens": 12,
+            }},
+        })
+        real_record = lifecycle.record_budget_usage
+        with mock.patch.object(
+            lifecycle, "record_budget_usage", side_effect=RuntimeError("crash")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "crash"):
+                lifecycle.run_persistent_queued_dispatch(
+                    self.root, "task-1", claim_id="claim-1",
+                    attempt_id="attempt-1",
+                    cancel_present=lambda _task_id: False,
+                    run_queued=lambda path, checkpoint: calls.append(
+                        (path, checkpoint)
+                    ) or queue_result,
+                )
+
+        with mock.patch.object(lifecycle, "record_budget_usage", wraps=real_record):
+            replay = lifecycle.run_persistent_queued_dispatch(
+                self.root, "task-1", claim_id="claim-1",
+                attempt_id="attempt-1",
+                cancel_present=lambda _task_id: False,
+                run_queued=lambda *_args: self.fail("queue effect repeated"),
+            )
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(replay["receipt_replayed"])
+        self.assertEqual(replay["queue_result"], queue_result)
+        budget = lifecycle.budget_status(self.root, "task-1")
+        self.assertEqual(budget["consumed"]["input_tokens"], 7)
+        self.assertEqual(budget["consumed"]["output_tokens"], 5)
+        self.assertEqual(budget["consumed"]["total_tokens"], 12)
+        self.assertEqual(budget["event_count"], 1)
+
+    def test_queue_result_accounting_rejects_inconsistent_token_totals(self):
+        lifecycle.spawn_persistent(
+            self.root, self.manifest(), spawn_id="spawn-1",
+            enqueue=self.queued_result,
+        )
+        bad_result = json.dumps({
+            "status": "ok",
+            "result": {"worker_token_usage": {
+                "input_tokens": 7, "output_tokens": 5, "total_tokens": 13,
+            }},
+        })
+        with self.assertRaisesRegex(ValueError, "total mismatch"):
+            lifecycle.run_persistent_queued_dispatch(
+                self.root, "task-1", claim_id="claim-1",
+                attempt_id="attempt-1",
+                cancel_present=lambda _task_id: False,
+                run_queued=lambda *_args: bad_result,
+            )
+        receipt_path = lifecycle._attempt_result_receipt_path(
+            self.root, "task-1", "attempt-1"
+        )
+        self.assertFalse(os.path.exists(receipt_path))
+
+    def test_attempt_result_receipt_tampering_fails_closed(self):
+        lifecycle.spawn_persistent(
+            self.root, self.manifest(), spawn_id="spawn-1",
+            enqueue=self.queued_result,
+        )
+        lifecycle.run_persistent_queued_dispatch(
+            self.root, "task-1", claim_id="claim-1",
+            attempt_id="attempt-1", cancel_present=lambda _task_id: False,
+            run_queued=lambda *_args: json.dumps({
+                "status": "ok",
+                "result": {"worker_token_usage": {
+                    "input_tokens": 1, "output_tokens": 1,
+                    "total_tokens": 2,
+                }},
+            }),
+        )
+        path = lifecycle._attempt_result_receipt_path(
+            self.root, "task-1", "attempt-1"
+        )
+        with open(path, "r", encoding="utf-8") as source:
+            receipt = json.load(source)
+        receipt["counters"]["total_tokens"] = 99
+        with open(path, "w", encoding="utf-8") as output:
+            json.dump(receipt, output)
+        with self.assertRaisesRegex(ValueError, "integrity"):
+            lifecycle.run_persistent_queued_dispatch(
+                self.root, "task-1", claim_id="claim-1",
+                attempt_id="attempt-1",
+                cancel_present=lambda _task_id: False,
+                run_queued=lambda *_args: self.fail("queue effect repeated"),
+            )
+
     def test_budget_exhaustion_blocks_requeue_before_queue_effect(self):
         manifest = self.manifest()
         manifest["budgets"] = {"max_attempts": 1}

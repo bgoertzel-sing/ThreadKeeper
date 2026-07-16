@@ -31,6 +31,9 @@ RECOVERY_VERSION = "threadkeeper.persistent-worker.recovery.v1"
 ENQUEUE_RECEIPT_VERSION = "threadkeeper.persistent-worker.enqueue-receipt.v1"
 BUDGET_EVENT_VERSION = "threadkeeper.persistent-worker.budget-event.v1"
 BUDGET_STATUS_VERSION = "threadkeeper.persistent-worker.budget-status.v1"
+ATTEMPT_RESULT_RECEIPT_VERSION = (
+    "threadkeeper.persistent-worker.attempt-result-receipt.v1"
+)
 
 MAX_MANIFEST_BYTES = 262144
 MAX_EVENT_LOG_BYTES = 1048576
@@ -43,6 +46,7 @@ MAX_CHECKPOINT_BYTES = 262144
 MAX_ENQUEUE_RECEIPT_BYTES = 65536
 MAX_BUDGET_LOG_BYTES = 1048576
 MAX_BUDGET_EVENT_BYTES = 65536
+MAX_ATTEMPT_RESULT_RECEIPT_BYTES = 262144
 
 _ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
@@ -248,6 +252,112 @@ def _enqueue_receipt_path(root, task_id, operation_id):
     return os.path.join(
         _task_directory(root, task_id), "enqueue-receipts", f"{operation_id}.json"
     )
+
+
+def _attempt_result_receipt_path(root, task_id, attempt_id):
+    _validate_id(attempt_id, "attempt id")
+    return os.path.join(
+        _task_directory(root, task_id), "attempt-result-receipts",
+        f"{attempt_id}.json",
+    )
+
+
+def _queue_result_accounting(queue_result):
+    """Extract only trusted non-negative token counters from a queue result."""
+    parsed = queue_result
+    if isinstance(queue_result, str):
+        try:
+            parsed = json.loads(queue_result)
+        except json.JSONDecodeError:
+            return {}
+    if not isinstance(parsed, dict):
+        return {}
+    result = parsed.get("result")
+    if not isinstance(result, dict):
+        return {}
+    usage = result.get("worker_token_usage")
+    if not isinstance(usage, dict):
+        return {}
+    expected = {"input_tokens", "output_tokens", "total_tokens"}
+    if set(usage) != expected:
+        raise ValueError("persistent queue result token usage schema invalid")
+    if any(not isinstance(value, int) or isinstance(value, bool) or value < 0
+           for value in usage.values()):
+        raise ValueError("persistent queue result token usage value invalid")
+    if usage["total_tokens"] != usage["input_tokens"] + usage["output_tokens"]:
+        raise ValueError("persistent queue result token usage total mismatch")
+    return dict(usage)
+
+
+def _read_attempt_result_receipt(root, task_id, attempt_id):
+    receipt = _bounded_json_read(
+        _attempt_result_receipt_path(root, task_id, attempt_id),
+        MAX_ATTEMPT_RESULT_RECEIPT_BYTES,
+    )
+    if (receipt.get("receipt_version") != ATTEMPT_RESULT_RECEIPT_VERSION or
+            receipt.get("task_id") != task_id or
+            receipt.get("attempt_id") != attempt_id):
+        raise ValueError("persistent-worker attempt result receipt identity mismatch")
+    digest = receipt.get("receipt_sha256")
+    unsigned = dict(receipt)
+    unsigned.pop("receipt_sha256", None)
+    if digest != _sha256(unsigned):
+        raise ValueError("persistent-worker attempt result receipt integrity check failed")
+    _validate_id(receipt.get("claim_event_id"), "claim event id")
+    _parse_timestamp(receipt.get("created_at"), "attempt result receipt timestamp")
+    counters = receipt.get("counters")
+    if not isinstance(counters, dict) or set(counters) - _BUDGET_COUNTERS:
+        raise ValueError("persistent-worker attempt result receipt counters invalid")
+    if any(not isinstance(value, int) or isinstance(value, bool) or value < 0
+           for value in counters.values()):
+        raise ValueError("persistent-worker attempt result receipt counters invalid")
+    if receipt.get("queue_result_sha256") != _sha256(receipt.get("queue_result")):
+        raise ValueError("persistent-worker attempt result receipt integrity check failed")
+    if counters != _queue_result_accounting(receipt.get("queue_result")):
+        raise ValueError("persistent-worker attempt result receipt accounting mismatch")
+    return receipt
+
+
+def _record_attempt_result_receipt(root, task_id, *, attempt, queue_result):
+    counters = _queue_result_accounting(queue_result)
+    receipt = {
+        "receipt_version": ATTEMPT_RESULT_RECEIPT_VERSION,
+        "task_id": task_id,
+        "attempt_id": attempt["attempt_id"],
+        "claim_event_id": attempt["claim_event_id"],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "counters": counters,
+        "queue_result": queue_result,
+        "queue_result_sha256": _sha256(queue_result),
+    }
+    receipt["receipt_sha256"] = _sha256(receipt)
+    payload = _canonical_bytes(receipt)
+    if len(payload) > MAX_ATTEMPT_RESULT_RECEIPT_BYTES:
+        raise ValueError("persistent-worker attempt result receipt exceeds byte limit")
+    path = _attempt_result_receipt_path(root, task_id, attempt["attempt_id"])
+    try:
+        _atomic_create(path, payload)
+        return receipt
+    except FileExistsError:
+        existing = _read_attempt_result_receipt(
+            root, task_id, attempt["attempt_id"]
+        )
+        if (existing["claim_event_id"] != attempt["claim_event_id"] or
+                existing["queue_result_sha256"] != receipt["queue_result_sha256"] or
+                existing["counters"] != counters):
+            raise ValueError("conflicting persistent-worker attempt result replay")
+        return existing
+
+
+def _account_attempt_result(root, task_id, receipt):
+    counters = receipt["counters"]
+    if counters and any(counters.values()):
+        record_budget_usage(
+            root, task_id,
+            usage_id=f"{receipt['attempt_id']}-result",
+            attempt_id=receipt["attempt_id"], counters=counters,
+            created_at=receipt["created_at"],
+        )
 
 
 def _read_enqueue_receipt(root, task_id, operation_id):
@@ -1212,6 +1322,35 @@ def run_persistent_queued_dispatch(root, task_id, *, claim_id,
             not 1 <= lease_seconds <= 86400):
         raise ValueError("persistent-worker lease seconds out of range")
     status = worker_status(root, task_id)
+    requested_attempt_id = attempt_id or claim_id
+    if status["state"] == "CLAIMED":
+        attempts = list_attempts(root, task_id)
+        if (attempts and attempts[-1]["attempt_id"] == requested_attempt_id and
+                attempts[-1]["claim_event_id"] == claim_id):
+            try:
+                receipt = _read_attempt_result_receipt(
+                    root, task_id, requested_attempt_id
+                )
+            except FileNotFoundError:
+                return {"status": "not_claimed", "task": status}
+            _account_attempt_result(root, task_id, receipt)
+            checkpoints = read_checkpoint_chain(root, task_id)
+            resume_checkpoint = checkpoints[-1] if checkpoints else None
+            if resume_checkpoint is not None and (
+                    resume_checkpoint["checkpoint_id"] !=
+                    attempts[-1]["resume_checkpoint_id"] or
+                    resume_checkpoint["checkpoint_sha256"] !=
+                    attempts[-1]["resume_checkpoint_sha256"]):
+                raise ValueError(
+                    "persistent-worker resume checkpoint changed after claim"
+                )
+            return {
+                "status": "claimed", "task": status,
+                "attempt": attempts[-1],
+                "resume_checkpoint": resume_checkpoint,
+                "queue_result": receipt["queue_result"],
+                "result_receipt": receipt, "receipt_replayed": True,
+            }
     if status["state"] != "QUEUED":
         return {"status": "not_claimed", "task": status}
     budget = budget_status(root, task_id)
@@ -1227,7 +1366,7 @@ def run_persistent_queued_dispatch(root, task_id, *, claim_id,
         root, task_id, event_id=claim_id, expected_version=status["version"],
         prior_state="QUEUED", new_state="CLAIMED", actor="worker",
     )
-    attempt_id = attempt_id or claim_id
+    attempt_id = requested_attempt_id
     created = datetime.now(timezone.utc)
     attempt = create_attempt(
         root, task_id, attempt_id=attempt_id, claim_event_id=claim_id,
@@ -1246,6 +1385,12 @@ def run_persistent_queued_dispatch(root, task_id, *, claim_id,
     queue_path = os.path.join(
         subagent._dispatch_queue_dir(), f"persistent-{task_id}.json"
     ) if subagent is not None else f"persistent-{task_id}.json"
+    queue_result = runner(queue_path, resume_checkpoint)
+    receipt = _record_attempt_result_receipt(
+        root, task_id, attempt=attempt, queue_result=queue_result
+    )
+    _account_attempt_result(root, task_id, receipt)
     return {"status": "claimed", "task": worker_status(root, task_id),
             "attempt": attempt, "resume_checkpoint": resume_checkpoint,
-            "queue_result": runner(queue_path, resume_checkpoint)}
+            "queue_result": queue_result, "result_receipt": receipt,
+            "receipt_replayed": False}
