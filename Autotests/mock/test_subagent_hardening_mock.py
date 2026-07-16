@@ -3751,6 +3751,34 @@ def test_dispatch_rejects_non_string_scalar_args_before_setup_or_llm(
     assert saved["status"] == "dispatch_args_invalid"
 
 
+def test_dispatch_compound_invalid_args_still_persist_structured_error(
+    tmp_path, monkeypatch
+):
+    _write_unit_persona(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        subagent,
+        "load_persona_config",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not load persona")),
+    )
+    monkeypatch.setattr(
+        subagent,
+        "_call_subagent_llm",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not call llm")),
+    )
+
+    payload = json.loads(subagent.dispatch(False, ["write-file"], 7, max_turns=True))
+
+    assert payload["status"] == "error"
+    assert "max_turns must be an integer" in payload["summary"]
+    assert "goal must be a string" in payload["summary"]
+    assert "tool_subset_csv must be a string or null" in payload["summary"]
+    assert "persona_key must be a string" in payload["summary"]
+    saved = json.loads(Path(payload["transcript_path"]).read_text())
+    assert saved["status"] == "dispatch_args_invalid"
+    assert saved["persona_key"] == "invalid"
+    assert saved["goal"] == ""
+
+
 def test_task_contract_rejects_bad_max_tool_calls_before_llm(tmp_path, monkeypatch):
     _write_unit_persona(tmp_path, monkeypatch)
     monkeypatch.setattr(
