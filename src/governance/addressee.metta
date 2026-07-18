@@ -8,4 +8,6 @@
 (= (addressee-classification False False False True) INCIDENTAL)
 
 (= (addressee-reinforced True True) True)
-(= (addressee-reinforced $mentioned $replied) False)
+(= (addressee-reinforced True False) False)
+(= (addressee-reinforced False True) False)
+(= (addressee-reinforced False False) False)
