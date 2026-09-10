@@ -49,6 +49,27 @@ def test_agreeing_mention_and_reply_are_reinforced(monkeypatch):
     assert result["reinforced"] is True
 
 
+def test_first_bot_authored_direct_update_reaches_the_input_queue(monkeypatch):
+    _configure(monkeypatch)
+    monkeypatch.setattr(telegram.auth, "is_auth_enabled", lambda: False)
+    monkeypatch.setattr(telegram, "_pending_messages", [])
+    monkeypatch.setattr(telegram, "_last_message", "")
+    monkeypatch.setattr(telegram, "_bot_sender_last_ts", {})
+    monkeypatch.setattr(telegram, "_bot_interaction_chain", [])
+    telegram._configure_chat_targets("-100")
+    message = _message(
+        "@ProtoMegaBot staging check",
+        [{"type": "mention", "offset": 0, "length": 13}],
+    )
+    message["from"] = {"id": 55, "first_name": "Other", "is_bot": True}
+
+    telegram._handle_updates([{"update_id": 123, "message": message}])
+
+    queued = telegram.getLastMessage()
+    assert "Other: @ProtoMegaBot staging check" in queued
+    assert '"addressee_classification":"DIRECT"' in queued
+
+
 def test_unaddressed_room_message_is_group(monkeypatch):
     _configure(monkeypatch)
     message = _message()

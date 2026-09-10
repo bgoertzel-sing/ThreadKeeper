@@ -199,6 +199,13 @@ def getLastMessage():
         return tmp
 
 
+def current_message_correlation_id():
+    env = get_current_envelope()
+    if env is not None:
+        return env.correlation_id
+    return None
+
+
 def should_skip_response():
     global _last_skip_response
     return _last_skip_response
@@ -394,7 +401,7 @@ def _should_skip_group_response(message, msg):
     _collect(message.get("caption_entities"), message.get("caption") or "")
 
     self_mentioned = any(
-        any(name in mentioned for name in ("protomega", "protom"))
+        mentioned.startswith("protomega") or mentioned == "protom"
         for mentioned in mentions
     )
     if self_mentioned:
@@ -1164,9 +1171,6 @@ def stop_telegram():
 
 def _send_message_to(text, target_chat):
     text = str(text).replace("\\n", "\n").replace("\r", "")
-    # Decode Unicode escape artifacts from the MeTTa/JSON path.
-    # Sometimes they arrive as literal "\\u2014"; sometimes MeTTa strips the
-    # backslash and leaves bare "u2014". Decode both forms for display.
     import re as _re
     def _decode_u_esc(m):
         return chr(int(m.group(1), 16))
@@ -1179,18 +1183,20 @@ def _send_message_to(text, target_chat):
     target_chat = str(target_chat or "").strip()
     if not text:
         return
-
-    if not _connected or not target_chat:
-        print(f"[TELEGRAM] Send skipped: connected={_connected} chat_id={'set' if target_chat else 'unset'}")
-        return
+    if not target_chat:
+        raise RuntimeError("Telegram send unavailable: no target chat_id")
 
     if _is_duplicate_send(text, target_chat):
-        return
+        return "TELEGRAM_SEND_DEDUPLICATED"
 
     max_len = 3900
-    for i in range(0, len(text), max_len):
-        chunk = text[i:i + max_len]
-        if not chunk:
+    chunks = [text[i:i + max_len] for i in range(0, len(text), max_len) if text[i:i + max_len]]
+    total = len(text)
+    _norm_text = re.sub(r"\s+", " ", text.strip())
+    sent_key = target_chat + chr(0) + _norm_text
+
+    for idx, chunk in enumerate(chunks):
+        if sent_key in _partial_send_chunks and idx < _partial_send_chunks[sent_key]:
             continue
         try:
             _api_call(
@@ -1199,12 +1205,14 @@ def _send_message_to(text, target_chat):
                 timeout=15,
                 use_post=True,
             )
+            _partial_send_chunks[sent_key] = idx + 1
             print(f"[TELEGRAM] Sent message chunk chars={len(chunk)} chat_id={target_chat}")
         except Exception as exc:
             print(f"[TELEGRAM] Send failed: {exc}")
-            return
+            raise RuntimeError(f"Telegram send failed: {exc}")
 
-
+    _partial_send_chunks.pop(sent_key, None)
+    return f"TELEGRAM_SEND_OK chunks={len(chunks)} chars={total}"
 def _telegram_publish_gate(text):
     """Phase-2 transport barrier: silence and acknowledgements never become speech."""
     normalized = re.sub(r"\s+", " ", str(text or "").strip())
@@ -1226,14 +1234,26 @@ def _telegram_publish_gate(text):
 def send_message(text):
     """Send a reply using the active envelope's source_chat_id.
 
-    Falls back to legacy globals only if no envelope is active (e.g.
-    administrative broadcasts).  For ordinary replies, the envelope is
-    authoritative and immutable.
+    Fails closed (RuntimeError) when no envelope is active, preventing
+    silent cross-chat delivery via stale mutable routing state.
+    Use send_admin_message for administrative broadcasts.
     """
     env = get_current_envelope()
     if env is not None:
         return _send_message_to(text, env.source_chat_id)
-    # Legacy/administrative fallback
-    with _state_lock:
-        target_chat = _active_chat_id or _reply_chat_id or _chat_id
-    return _send_message_to(text, target_chat)
+    raise RuntimeError(
+        "send_message called without an active message envelope; "
+        "use send_admin_message for administrative broadcasts"
+    )
+
+def send_admin_message(text):
+    """Send an administrative broadcast to the configured default chat.
+
+    Unlike ``send_message``, this bypasses the per-message envelope routing
+    because it is not a reply to any inbound user message.
+    """
+    target = _chat_id or os.environ.get("TG_CHAT_ID", "")
+    if not target:
+        raise RuntimeError("Telegram admin send unavailable: no configured chat target")
+    return _send_message_to(text, target)
+

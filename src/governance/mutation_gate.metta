@@ -28,6 +28,7 @@
 (= (proposal-fp-of        (mutation-proposal $id $cid $p $fp $pv $ast $c $e $s)) $fp)
 (= (proposal-expires-of   (mutation-proposal $id $cid $p $fp $pv $ast $c $e $s)) $e)
 (= (proposal-state-of     (mutation-proposal $id $cid $p $fp $pv $ast $c $e $s)) $s)
+(= (proposal-ast-of      (mutation-proposal $id $cid $p $fp $pv $ast $c $e $s)) $ast)
 
 (= (proposals-with-fp $cid $fp $state)
    (collapse (match &self
@@ -140,24 +141,26 @@
 
 ;;; Terminal transitions. Both COMMITTED and ERROR leave no live approval:
 ;;; replaying the same command afterwards requires a fresh proposal.
-(= (commit-mutation! $cid $fp $k $before-sig $after-sig $cap-delta)
+(= (commit-mutation! $cid $fp $k $before-sig $after-sig $cap-delta $evidence $source-commit)
    (let $approved (proposals-with-fp $cid $fp APPROVED)
      (if (== $approved ())
        commit-noop-no-approved
        (let ($h $t) (decons $approved)
          (progn (set-proposal-state! $h COMMITTED)
-                (append-continuity-event! $cid $k (proposal-actor-of $h) $fp
+                (append-continuity-event! $cid $k (proposal-actor-of $h)
+                                          (proposal-ast-of $h) $fp
                                           $before-sig $after-sig $cap-delta
-                                          committed)
+                                          $evidence committed $source-commit)
                 (committed $fp))))))
 
-(= (error-mutation! $cid $fp $k $before-sig $after-sig $cap-delta)
+(= (error-mutation! $cid $fp $k $before-sig $after-sig $cap-delta $evidence $source-commit)
    (let $approved (proposals-with-fp $cid $fp APPROVED)
      (if (== $approved ())
        error-noop-no-approved
        (let ($h $t) (decons $approved)
          (progn (set-proposal-state! $h ERROR)
-                (append-continuity-event! $cid $k (proposal-actor-of $h) $fp
+                (append-continuity-event! $cid $k (proposal-actor-of $h)
+                                          (proposal-ast-of $h) $fp
                                           $before-sig $after-sig $cap-delta
-                                          error)
+                                          $evidence error $source-commit)
                 (errored $fp))))))

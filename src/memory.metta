@@ -22,7 +22,7 @@
        (read-file (library OmegaClaw-Core ./memory/prompt.txt)))))
 
 (= (getHistory)
-   (read_file_tail (library OmegaClaw-Core ./memory/history.metta) (maxHistory)))
+   (read_file_tail (py-call (helper.memory_file_path "history.metta")) (maxHistory)))
 
 (= (addToHistory $lastmessage $response $sexpr $msgnew)
    (if $msgnew
@@ -39,7 +39,7 @@
        (useGPTEmbedding (string-safe $str))))
 
 (= (appendToHistory $addition)
-   (append-file (library OmegaClaw-Core ./memory/history.metta) (swrite $addition)))
+   (append-file (py-call (helper.memory_file_path "history.metta")) (swrite $addition)))
 
 (= (remember $str)
    (progn (py-call (lib_chromadb.remember $str (embed $str) (get_time_as_string)))

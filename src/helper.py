@@ -22,6 +22,12 @@ LLM_COMMANDS = {
 }
 
 
+_ALLOWED_INTERNAL_ACTIONS = LLM_COMMANDS | {"extension-status"}
+_MAX_ACTIONS = 5
+_ERROR_INVALID = "invalid internal action format"
+_ERROR_NO_REPLY = "no user-facing reply"
+
+
 def extract_timestamp(line):
     m = TS_RE.search(line)
     if not m:
@@ -159,10 +165,178 @@ def _looks_like_known_command_response(s):
     return any(_is_known_command(line) for line in lines)
 
 
+
+def _try_parse_json_envelope(s, is_new_message=False):
+    """Try to parse an omegaclaw.action.v1 JSON envelope.
+    Returns (result_str, error_str). Both None if not a JSON envelope."""
+    s_stripped = s.strip()
+    if not s_stripped.startswith('{'):
+        return None, None
+    try:
+        obj = json.loads(s_stripped)
+    except (json.JSONDecodeError, ValueError):
+        return None, None
+    if not isinstance(obj, dict):
+        return None, None
+    if obj.get('protocol') != 'omegaclaw.action.v1':
+        return None, None
+    reply = obj.get('reply')
+    actions = obj.get('actions', [])
+    cont = obj.get('continue')
+    parts = []
+    has_send_in_reply = False
+    if reply is not None and isinstance(reply, dict):
+        text = reply.get('text', '')
+        if text and not _is_suppressed_noop_response(text):
+            parts.append(f'(send {json.dumps(text, ensure_ascii=False)})')
+            has_send_in_reply = True
+    # During a new message burst, require at least one user-facing send
+    if _truthy(is_new_message) and not has_send_in_reply:
+        # Check if any action is a send
+        has_send_action = any(
+            isinstance(a, dict) and a.get('name') == 'send'
+            for a in actions
+        )
+        if not has_send_action:
+            return None, _ERROR_NO_REPLY
+    for action in actions:
+        if not isinstance(action, dict):
+            return None, _ERROR_INVALID
+        name = action.get('name', '')
+        args = action.get('args', [])
+        if name not in _ALLOWED_INTERNAL_ACTIONS:
+            return None, _ERROR_INVALID
+        arg_str = ' '.join(json.dumps(a, ensure_ascii=False) for a in args) if args else ''
+        if arg_str:
+            parts.append(f'({name} {arg_str})')
+        else:
+            parts.append(f'({name})')
+    if cont is not None and isinstance(cont, dict):
+        reason = cont.get('reason', '')
+        if reason:
+            parts.append(f'(continue-thinking {json.dumps(reason, ensure_ascii=False)})')
+        else:
+            parts.append('(continue-thinking)')
+    if not parts:
+        return '()', None
+    if len(parts) > _MAX_ACTIONS:
+        return None, _ERROR_INVALID
+    return '(' + ' '.join(parts) + ')', None
+
+
+def _parse_sexpr_tokens(s):
+    """Parse a string into a list of top-level s-expression strings."""
+    s = s.strip()
+    if not s:
+        return []
+    results = []
+    i = 0
+    while i < len(s):
+        while i < len(s) and s[i] in (' ', '\t', '\n', '\r'):
+            i += 1
+        if i >= len(s):
+            break
+        if s[i] != '(':
+            return None
+        depth = 0
+        in_str = False
+        escaped = False
+        start = i
+        while i < len(s):
+            ch = s[i]
+            if escaped:
+                escaped = False
+                i += 1
+                continue
+            if ch == '\\' and in_str:
+                escaped = True
+                i += 1
+                continue
+            if ch == '"':
+                in_str = not in_str
+            elif not in_str:
+                if ch == '(':
+                    depth += 1
+                elif ch == ')':
+                    depth -= 1
+                    if depth == 0:
+                        results.append(s[start:i+1])
+                        i += 1
+                        break
+            i += 1
+        else:
+            return None
+    return results
+
+
+def _validate_sexpr_batch(s, is_new_message=False):
+    """Validate a batch of s-expressions. Returns (result_str, error_str)."""
+    sexprs = _parse_sexpr_tokens(s)
+    if sexprs is None:
+        return None, None
+    if not sexprs:
+        return None, None
+    # If we got exactly one token, try stripping outer parens and re-parsing.
+    # This handles the case where the batch is wrapped in an extra layer: ((a) (b))
+    if len(sexprs) == 1:
+        inner = _strip_outer_parens(sexprs[0].strip())
+        re_parsed = _parse_sexpr_tokens(inner)
+        if re_parsed is not None and len(re_parsed) > 1:
+            sexprs = re_parsed
+    validated = []
+    has_send = False
+    for sexpr in sexprs:
+        inner = _strip_outer_parens(sexpr.strip())
+        parts = inner.split(maxsplit=1)
+        if not parts:
+            return None, _ERROR_INVALID
+        cmd = parts[0]
+        rest = parts[1].strip() if len(parts) > 1 else ""
+        if cmd not in _ALLOWED_INTERNAL_ACTIONS:
+            return None, _ERROR_INVALID
+        if rest and rest.startswith('(') and rest.endswith(')'):
+            return None, _ERROR_INVALID
+        if cmd == 'send':
+            has_send = True
+            decoded = _decode_quoted_arg(rest) if rest.startswith('"') else None
+            check_text = decoded if decoded is not None else rest
+            if _is_suppressed_noop_response(check_text):
+                continue
+        validated.append(sexpr.strip())
+    if len(validated) > _MAX_ACTIONS:
+        return None, _ERROR_INVALID
+    if _truthy(is_new_message) and not has_send:
+        return None, _ERROR_NO_REPLY
+    return '(' + ' '.join(validated) + ')', None
+
+
+def is_new_message(text_a, corr_a, text_b, corr_b):
+    """Return True if message A is a new message relative to B.
+
+    Uses correlation ID as the primary key.  If both correlation IDs
+    are empty (legacy/unknown), fall back to text comparison.
+    """
+    if corr_a or corr_b:
+        return corr_a != corr_b
+    return text_a != text_b
+
+
 def balance_parentheses_for_message(s, is_new_message=False):
     s = str(s).replace("_quote_", '"').replace("_newline_", "\n")
     if _is_suppressed_noop_response(s):
         return "()"
+    # Try JSON envelope parsing first
+    parsed, err = _try_parse_json_envelope(s, is_new_message)
+    if parsed is not None:
+        return parsed
+    if err is not None:
+        return err
+    # Try s-expression batch validation
+    sparsed, serr = _validate_sexpr_batch(s, is_new_message)
+    if sparsed is not None:
+        return sparsed
+    if serr is not None:
+        return serr
     if _truthy(is_new_message) and not _looks_like_known_command_response(s):
         text = s.strip()
         if text:
