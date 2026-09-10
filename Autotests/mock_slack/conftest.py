@@ -30,6 +30,9 @@ if _SELF_DIR not in sys.path:
 
 from llm import LlmMockController, LLM_MOCK_PORT  # noqa: E402
 
+# Clear any cached real_driver from a sibling mock suite (mock_telegram also has one)
+if 'real_driver' in sys.modules:
+    del sys.modules['real_driver']
 from real_driver import SlackRealDriver  # noqa: E402
 
 
