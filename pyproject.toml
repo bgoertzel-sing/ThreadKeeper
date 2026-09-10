@@ -1,2 +1,4 @@
 [tool.pytest.ini_options]
-pythonpath = [".", "channels", "src"]
+pythonpath = [
+  "src", "."
+]
